@@ -1,0 +1,13 @@
+.venv/
+.python/
+models/
+__pycache__/
+history.txt
+run.log
+selftest.out
+test.wav
+e2e_out/
+test_zh.wav
+settings.json
+HANDOFF.md
+CLAUDE.md
