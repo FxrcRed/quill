@@ -33,6 +33,7 @@ m.paste = lambda t: typed.__setitem__(0, (typed[0] + '\n' + t).strip())  # 「�
 orig = m.ulw
 def ulw(h, img, x, y): orig(h, img, x, y); latest[0] = img.copy()
 m.ulw = ulw
+m.Overlay.grab_backdrop = lambda self, box: Image.new('RGBA', (box[2] - box[0], box[3] - box[1]), (238, 238, 240, 255))  # 玻璃后面用固定底色，不截真实屏幕
 audio = {lang: tts(lang, text, HERE / f'_demo_{lang}.wav') for lang, text in LINES}
 m.cfg.update(lang='en', mode='fast', hotkey=0xA5)  # 演示用默认快捷键右 Alt
 app = m.App(root); root.deiconify()

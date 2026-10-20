@@ -8,7 +8,7 @@ import tkinter.font as tkfont
 
 import numpy as np
 import sounddevice as sd
-from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont, ImageTk
+from PIL import Image, ImageChops, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageGrab, ImageTk
 
 HERE = Path(__file__).parent
 TITLE = 'Quill'
@@ -1090,8 +1090,12 @@ class Overlay:
         ex = user32.GetWindowLongW(self.hwnd, -20) | 0x08000000 | 0x80 | 0x8  # 不抢焦点 / 不进任务栏 / 置顶
         user32.ShowWindow(self.hwnd, 0)
         user32.SetWindowLongW(self.hwnd, -20, ex & ~0x80000); user32.SetWindowLongW(self.hwnd, -20, ex | 0x80000)  # 分层：要先清掉再设，否则 UpdateLayeredWindow 报参数错误（87）
+        try: user32.SetWindowDisplayAffinity(ctypes.c_void_p(self.hwnd), 0x11)  # WDA_EXCLUDEFROMCAPTURE：截屏里没有浮窗，玻璃后面才截得到真正的背景（不然会把自己截进去）
+        except Exception: pass
         self.mode, self.d, self.visible, self.pinned, self.inside, self.hover, self.timer = None, {}, False, False, False, None, None
-        self.cards, self.base, self.hits, self.geo, self.bar_c = {}, None, [], None, (0, 0)
+        self.cards, self.base, self.hits, self.geo, self.wgeo, self.bar_c, self.h = {}, None, [], None, None, (0, 0), self.ROW_H
+        self.backdrop, self.grab_on = (None, None), threading.Event()  # 后面那块屏幕的模糊图 (geo, 图)；浮窗显示时后台每 0.25 秒更新
+        threading.Thread(target=self.grabber, daemon=True).start()
         self.sm, self.lv, self.t0 = [0.0] * 6, 0.0, time.time()
 
     # 对外：每种状态
@@ -1131,23 +1135,56 @@ class Overlay:
         if self.timer: self.w.after_cancel(self.timer); self.timer = None
         self.mode, self.pinned = None, False
         if self.visible: user32.ShowWindow(self.hwnd, 0); self.visible = False
+        self.grab_on.clear()
 
     # 画
     def card(self, h):
-        """卡片底：卡片外圈的柔和投影 + 半透明浅灰圆角面（后面的东西隐约透出来）+ 一圈白色细边，按高度缓存。
-        投影只留在卡片外面：卡片是半透明的，垫在下面的投影会透出来把卡片染暗。"""
+        """液态玻璃卡片的固定部分（按高度缓存）：under = 卡片外圈的柔和投影；face = 圆角面的形状（玻璃底每帧贴在这里）；
+        over = 玻璃上的光：顶部一层往下淡出的高光、贴着边缘的一圈亮光（上面亮、往下几乎没有，是光不是框）、底部一点点暗。
+        没有描边。投影只在卡片外面（卡片是透的，垫在下面会透出来）。"""
         if h not in self.cards:
             M, W = self.M, self.W; size = (px(W + 2 * M), px(h + 2 * M)); box = (px(M), px(M), px(M + W), px(M + h)); R = px(26)
-            img = Image.new('RGBA', size, (0, 0, 0, 0)); face = _shape(size, box, R, 2)
-            sh = Image.new('L', size, 0); ImageDraw.Draw(sh).rounded_rectangle((px(M + 6), px(M + 10), px(M + W - 6), px(M + h + 5)), R, fill=110)
-            shadow = Image.new('RGBA', size, (40, 40, 48, 0)); shadow.putalpha(ImageChops.multiply(_blur(sh, px(12)), ImageChops.invert(face)))
-            img.alpha_composite(shadow)
-            img.paste(Image.new('RGBA', size, (233, 233, 235, self.ALPHA)), (0, 0), face)
-            ol = Image.new('L', (size[0] * 3, size[1] * 3), 0)
-            ImageDraw.Draw(ol).rounded_rectangle([v * 3 for v in box], R * 3, outline=170, width=round(1.3 * S * 3))
-            img.alpha_composite(Image.composite(Image.new('RGBA', size, (255, 255, 255, 255)), Image.new('RGBA', size, (0, 0, 0, 0)), ol.resize(size, Image.LANCZOS)))
-            self.cards[h] = img
-        return self.cards[h].copy()
+            face = _shape(size, box, R, 2)
+            sh = Image.new('L', size, 0); ImageDraw.Draw(sh).rounded_rectangle((px(M + 8), px(M + 10), px(M + W - 8), px(M + h + 6)), R, fill=80)
+            under = Image.new('RGBA', size, (30, 30, 40, 0)); under.putalpha(ImageChops.multiply(_blur(sh, px(14)), ImageChops.invert(face)))
+            ys = (np.arange(size[1]) - box[1]) / max(1, box[3] - box[1])  # 卡片里从上到下 0→1
+            col = lambda v: Image.fromarray(np.repeat(np.clip(v, 0, 255).astype(np.uint8)[:, None], size[0], axis=1))
+            sheen = col(80 * np.clip(1 - ys / 0.55, 0, 1) ** 1.6)                    # 顶部高光
+            inner = face.filter(ImageFilter.MinFilter(2 * round(1.6 * S) + 1))       # 往里收一点的形状
+            rim = ImageChops.subtract(face, inner).filter(ImageFilter.GaussianBlur(0.6 * S))
+            rim = ImageChops.multiply(rim, col(40 + 190 * np.clip(1 - ys / 0.4, 0, 1) ** 1.3))  # 边缘亮光：上亮下暗
+            light = ImageChops.multiply(ImageChops.lighter(sheen, rim), face)
+            over = Image.new('RGBA', size, (255, 255, 255, 0)); over.putalpha(light)
+            dark = Image.new('RGBA', size, (40, 40, 50, 0)); dark.putalpha(ImageChops.multiply(col(22 * np.clip((ys - 0.65) / 0.35, 0, 1)), face))
+            over.alpha_composite(dark)
+            self.cards[h] = {'under': under, 'face': face, 'over': over}
+        return self.cards[h]
+
+    def layer(self, h):
+        """一张透明的内容层（文字、图标画在上面，blit 时盖在玻璃上）。"""
+        self.h = h; self.card(h)
+        return Image.new('RGBA', (px(self.W + 2 * self.M), px(h + 2 * self.M)), (0, 0, 0, 0))
+
+    def grab_backdrop(self, box):
+        """浮窗后面那块屏幕：截下来（截屏不含分层窗口，浮窗自己截不进来）→ 缩小模糊 → 稍微加饱和、提亮（上面深色的字才看得清）。
+        只在内存里用。make_demo.py 会把它换成固定的底色。"""
+        w, h = box[2] - box[0], box[3] - box[1]
+        im = ImageGrab.grab(box).convert('RGB')
+        im = im.resize((max(1, w // 6), max(1, h // 6)), Image.BILINEAR).filter(ImageFilter.GaussianBlur(2.2)).resize((w, h), Image.BICUBIC)
+        im = Image.blend(ImageEnhance.Color(im).enhance(1.3), Image.new('RGB', (w, h), (247, 247, 249)), 0.45)
+        return im.convert('RGBA')
+
+    def refresh_backdrop(self):
+        g = self.geo  # 后台线程也会调：先取一份，免得截的位置和记下的对不上
+        try: self.backdrop = (g, self.grab_backdrop((g[2], g[3], g[2] + g[0], g[3] + g[1])))
+        except Exception: self.backdrop = (g, None)  # 截不了（锁屏 / UAC 那种安全桌面）：退回半透明纯色
+
+    def grabber(self):
+        """后台每 0.25 秒重截一次后面的画面（截一次要三四十毫秒，不放在界面线程）。浮窗藏起来就停。"""
+        while True:
+            self.grab_on.wait()
+            if self.visible and self.geo: self.refresh_backdrop()
+            time.sleep(0.25)
 
     def render_row(self):
         """正在听 / 改语病 / 结果 / 提示：一行。左边声波条（每帧在 blit 里画；提示是彩色「!」），中间文字上下居中，
@@ -1169,7 +1206,7 @@ class Overlay:
             f = pfont(14); blocks.append((flow([(d['text'], TEXT, False)], f, TW, 3), f))
         th = sum(len(ls) * f.size * 1.5 for ls, f in blocks) / S + 2 * (len(blocks) - 1)  # 文字块总高（逻辑像素）
         h = max(self.ROW_H, round(th + 30)); self.hits = []  # 最矮也按「英文一行 + 中文一行」：一句话从正在听到出结果一样高，不会突然变大
-        img = self.card(h); dr = ImageDraw.Draw(img); cy = px(M + h / 2)
+        img = self.layer(h); dr = ImageDraw.Draw(img); cy = px(M + h / 2)
         y = px(M) + (px(h) - px(th)) / 2
         for ls, f in blocks:
             draw_lines(dr, ls, f, TX, y, f.size * 1.5); y += len(ls) * f.size * 1.5 + px(2)
@@ -1219,7 +1256,7 @@ class Overlay:
             blocks.append(('lines', lines, f2, y + 2)); y += 2 + len(lines) * 12 * 1.55
         h = int(y + 20)
 
-        img = self.card(h); dr = ImageDraw.Draw(img)
+        img = self.layer(h); dr = ImageDraw.Draw(img)
         cx, cy = px(M + 39), px(M + 33)
         dr.ellipse((cx - px(15), cy - px(15), cx + px(15), cy + px(15)), fill=INK)  # 左上角小圆章
         dr.text((cx, cy), icon, font=pfont(13, 'i'), fill='white', anchor='mm')
@@ -1232,7 +1269,7 @@ class Overlay:
                 _, i, name, lines, f, by, bh = b
                 x0, y0, x1, y1 = px(M + 16), px(M + by), px(M + W - 16), px(M + by + bh)
                 hov = self.hover == i
-                dr.rounded_rectangle((x0, y0, x1, y1), px(18), fill='#F7F7F8' if hov else '#DEDEE1', outline='#FFFFFF' if hov else None, width=max(1, px(1)))
+                dr.rounded_rectangle((x0, y0, x1, y1), px(18), fill=(255, 255, 255, 175) if hov else (255, 255, 255, 80))  # 玻璃上再叠一层半透明白
                 cy2 = y0 + px(11) + f.size * 1.55 / 2
                 dr.rounded_rectangle((x0 + px(12), cy2 - px(12), x0 + px(60), cy2 + px(12)), px(12), fill=INK if hov or i == 0 else '#8E8E93')
                 dr.text((x0 + px(36), cy2), name, font=pfont(11, 'b'), fill='white', anchor='mm')
@@ -1242,22 +1279,27 @@ class Overlay:
 
     def frame(self, level):
         """每帧调：说话 / 思考时让左上角小光球动起来。"""
-        if self.visible and self.mode in ('rec', 'busy', 'result'): self.blit(level)
+        if self.visible and self.mode: self.blit(level)  # 声波条在动；后面的画面也在后台更新
 
     def blit(self, level=0.0):
-        img = self.base
+        c = self.cards[self.h]; img = c['under'].copy()
+        wa = ctypes.wintypes.RECT(); user32.SystemParametersInfoW(0x30, 0, ctypes.byref(wa), 0)
+        x, y = wa.left + (wa.right - wa.left - img.width) // 2, wa.bottom - img.height + px(self.M) - px(18)
+        geo = (img.width, img.height, x, y)
+        if self.backdrop[0] != geo: self.geo = geo; self.refresh_backdrop()  # 刚显示 / 换了高度：马上截一张对得上的
+        bd = self.backdrop[1]
+        img.paste(bd if bd is not None else Image.new('RGBA', img.size, (233, 233, 235, self.ALPHA)), (0, 0), c['face'])
+        img.alpha_composite(c['over']); img.alpha_composite(self.base)
         if self.mode in ('rec', 'busy', 'result'):
-            img = img.copy(); st = 'ready' if self.mode == 'result' else self.mode; t = time.time() - self.t0
+            st = 'ready' if self.mode == 'result' else self.mode; t = time.time() - self.t0
             self.lv += ((level if st == 'rec' else 0) - self.lv) * 0.35
             n, ss = px(34), 3; Lr = Image.new('RGBA', (n * ss, n * ss), (0, 0, 0, 0))
             paint_bars(Lr, n * ss / 2, n * ss / 2, n * ss * 0.78, st, self.lv, t, self.sm)
             img.alpha_composite(Lr.resize((n, n), Image.LANCZOS), (round(self.bar_c[0]) - n // 2, round(self.bar_c[1]) - n // 2))
-        wa = ctypes.wintypes.RECT(); user32.SystemParametersInfoW(0x30, 0, ctypes.byref(wa), 0)
-        x, y = wa.left + (wa.right - wa.left - img.width) // 2, wa.bottom - img.height + px(self.M) - px(18)
-        if self.geo != (img.width, img.height, x, y):
-            self.geo = (img.width, img.height, x, y); self.w.geometry(f'{img.width}x{img.height}+{x}+{y}')
+        if self.wgeo != geo: self.wgeo = geo; self.w.geometry(f'{img.width}x{img.height}+{x}+{y}')
         if not self.visible:
             user32.ShowWindow(self.hwnd, 8); user32.SetWindowPos(self.hwnd, -1, 0, 0, 0, 0, 0x13); self.visible = True  # 显示但不激活
+            self.grab_on.set()
         ulw(self.hwnd, img, x, y)
 
     # 鼠标
