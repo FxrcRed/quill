@@ -1079,7 +1079,7 @@ def draw_lines(d, lines, f, x, y, lh):
 class Overlay:
     """屏幕底部中间的浮窗：说话时实时显示识别的字，之后显示改好的结果（标出改动），或者给两个版本让你点。
     不抢焦点：点它光标还留在你原来的输入框里，所以点了就能直接粘贴进去。"""
-    W, M, ALPHA = 600, 28, 215  # 卡片宽、四周给阴影留的边（逻辑像素）、卡片底色不透明度（215/255，半透明，后面再乱也看得清字）
+    W, M, ALPHA, ROW_H = 600, 28, 215, 74  # ROW_H：一行样式的最小高度（英文一行 24 + 中文一行 18 + 间隔 2 + 上下各 15）； 卡片宽、四周给阴影留的边（逻辑像素）、卡片底色不透明度（215/255，半透明，后面再乱也看得清字）
 
     def __init__(self, app):
         self.app = app
@@ -1168,7 +1168,7 @@ class Overlay:
             tcol = {'err': RED, 'ok': GREEN}.get(d.get('level'), ORANGE)
             f = pfont(14); blocks.append((flow([(d['text'], TEXT, False)], f, TW, 3), f))
         th = sum(len(ls) * f.size * 1.5 for ls, f in blocks) / S + 2 * (len(blocks) - 1)  # 文字块总高（逻辑像素）
-        h = max(60, round(th + 30)); self.hits = []
+        h = max(self.ROW_H, round(th + 30)); self.hits = []  # 最矮也按「英文一行 + 中文一行」：一句话从正在听到出结果一样高，不会突然变大
         img = self.card(h); dr = ImageDraw.Draw(img); cy = px(M + h / 2)
         y = px(M) + (px(h) - px(th)) / 2
         for ls, f in blocks:
@@ -1178,10 +1178,26 @@ class Overlay:
             cx = px(M + 36); dr.ellipse((cx - px(14), cy - px(14), cx + px(14), cy + px(14)), fill=tcol)
             dr.text((cx, cy), '!', font=pfont(13, 'b'), fill='white', anchor='mm')
         if m == 'result':
-            cx = px(M + W - 34); icon = I_PIN if self.pinned else I_OK if d.get('by_key') else I_COPY
-            dr.ellipse((cx - px(15), cy - px(15), cx + px(15), cy + px(15)), fill=INK)
-            dr.text((cx, cy), icon, font=pfont(12, 'i'), fill='white', anchor='mm')
+            badge = self.badge('pin' if self.pinned else 'ok' if d.get('by_key') else 'copy')
+            img.alpha_composite(badge, (px(M + W - 34) - badge.width // 2, round(cy) - badge.height // 2))
         self.base = img; self.blit()
+
+    _badges = {}
+    def badge(self, kind):
+        """结果右边的小图标，苹果 checkmark.circle 那种细线：浅灰细圆圈 + 深灰细勾（勾是矢量线画的，4 倍大画再缩小，边缘干净）；
+        固定后是图钉、只复制时是复制图标（字形，同样的颜色）。"""
+        if kind not in self._badges:
+            n, ss = px(30), 4; N = n * ss; im = Image.new('RGBA', (N, N), (0, 0, 0, 0)); d = ImageDraw.Draw(im)
+            ring_w = round(1.3 * S * ss); d.ellipse((ring_w, ring_w, N - ring_w, N - ring_w), outline='#B4B4B9', width=ring_w)
+            if kind == 'ok':
+                pts = [(0.31 * N, 0.52 * N), (0.45 * N, 0.65 * N), (0.70 * N, 0.37 * N)]; w = round(1.8 * S * ss)
+                d.line(pts, fill='#55555A', width=w, joint='curve')
+                for x, y in (pts[0], pts[-1]): d.ellipse((x - w / 2, y - w / 2, x + w / 2, y + w / 2), fill='#55555A')  # 圆头
+            else:
+                f = ImageFont.truetype(pfont(1, 'i').path, round(11 * S * ss))
+                d.text((N / 2, N / 2), I_PIN if kind == 'pin' else I_COPY, font=f, fill='#55555A', anchor='mm')
+            Overlay._badges[kind] = im.resize((n, n), Image.LANCZOS)
+        return self._badges[kind]
 
     def render(self):
         """按当前内容重画卡片和文字（左边的声波条每帧另外画）。"""
