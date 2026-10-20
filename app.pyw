@@ -74,7 +74,8 @@ FONT, FONT_BOLD = 'Microsoft YaHei UI', None  # 启动时有 fonts\NotoSansSC �
 DISPLAY, ICON = 'Bahnschrift', 'Segoe MDL2 Assets'  # 启动时换成项目里的 Michroma 宽体 / Segoe Fluent Icons（有的话）
 I_SET, I_COPY, I_HIST, I_OK, I_CHECK = '', '', '', '', ''
 I_MIN, I_CLOSE, I_MIC, I_BALL = '\uE921', '\uE8BB', '\uE720', '\uE73F'
-I_DOWN, I_UP = '\uE70D', '\uE70E'  # \u8BB0\u5F55\u91CC\u5C55\u5F00 / \u6536\u8D77\u539F\u8BDD
+I_DOWN, I_UP = '\uE70D', '\uE70E'  # 记录里展开 / 收起原话
+I_PIN = '\uE718'  # 浮窗固定后右边的图钉
 ICON_C = '#555555'  # 图标按钮平时的颜色
 S = 1.0  # 屏幕缩放（150% = 1.5），界面坐标都按 100% 写，画的时候乘 S
 
@@ -1078,7 +1079,7 @@ def draw_lines(d, lines, f, x, y, lh):
 class Overlay:
     """屏幕底部中间的浮窗：说话时实时显示识别的字，之后显示改好的结果（标出改动），或者给两个版本让你点。
     不抢焦点：点它光标还留在你原来的输入框里，所以点了就能直接粘贴进去。"""
-    W, M = 600, 28  # 卡片宽、四周给阴影留的边（逻辑像素）
+    W, M, ALPHA = 600, 28, 215  # 卡片宽、四周给阴影留的边（逻辑像素）、卡片底色不透明度（215/255，半透明，后面再乱也看得清字）
 
     def __init__(self, app):
         self.app = app
@@ -1090,7 +1091,7 @@ class Overlay:
         user32.ShowWindow(self.hwnd, 0)
         user32.SetWindowLongW(self.hwnd, -20, ex & ~0x80000); user32.SetWindowLongW(self.hwnd, -20, ex | 0x80000)  # 分层：要先清掉再设，否则 UpdateLayeredWindow 报参数错误（87）
         self.mode, self.d, self.visible, self.pinned, self.inside, self.hover, self.timer = None, {}, False, False, False, None, None
-        self.cards, self.base, self.hits, self.geo = {}, None, [], None
+        self.cards, self.base, self.hits, self.geo, self.bar_c = {}, None, [], None, (0, 0)
         self.sm, self.lv, self.t0 = [0.0] * 6, 0.0, time.time()
 
     # 对外：每种状态
@@ -1133,56 +1134,79 @@ class Overlay:
 
     # 画
     def card(self, h):
-        """卡片底：柔和投影 + 浅灰圆角面 + 一圈白色细边，按高度缓存。"""
+        """卡片底：卡片外圈的柔和投影 + 半透明浅灰圆角面（后面的东西隐约透出来）+ 一圈白色细边，按高度缓存。
+        投影只留在卡片外面：卡片是半透明的，垫在下面的投影会透出来把卡片染暗。"""
         if h not in self.cards:
             M, W = self.M, self.W; size = (px(W + 2 * M), px(h + 2 * M)); box = (px(M), px(M), px(M + W), px(M + h)); R = px(26)
-            img = Image.new('RGBA', size, (0, 0, 0, 0))
-            sh = Image.new('L', size, 0); ImageDraw.Draw(sh).rounded_rectangle((px(M + 6), px(M + 12), px(M + W - 6), px(M + h + 6)), R, fill=120)
-            shadow = Image.new('RGBA', size, (40, 40, 48, 0)); shadow.putalpha(_blur(sh, px(13))); img.alpha_composite(shadow)
-            img.paste(Image.new('RGBA', size, '#E9E9EB'), (0, 0), _shape(size, box, R, 2))
+            img = Image.new('RGBA', size, (0, 0, 0, 0)); face = _shape(size, box, R, 2)
+            sh = Image.new('L', size, 0); ImageDraw.Draw(sh).rounded_rectangle((px(M + 6), px(M + 10), px(M + W - 6), px(M + h + 5)), R, fill=110)
+            shadow = Image.new('RGBA', size, (40, 40, 48, 0)); shadow.putalpha(ImageChops.multiply(_blur(sh, px(12)), ImageChops.invert(face)))
+            img.alpha_composite(shadow)
+            img.paste(Image.new('RGBA', size, (233, 233, 235, self.ALPHA)), (0, 0), face)
             ol = Image.new('L', (size[0] * 3, size[1] * 3), 0)
-            ImageDraw.Draw(ol).rounded_rectangle([v * 3 for v in box], R * 3, outline=200, width=round(1.3 * S * 3))
-            img.paste(Image.new('RGBA', size, '#FFFFFF'), (0, 0), ol.resize(size, Image.LANCZOS))
+            ImageDraw.Draw(ol).rounded_rectangle([v * 3 for v in box], R * 3, outline=170, width=round(1.3 * S * 3))
+            img.alpha_composite(Image.composite(Image.new('RGBA', size, (255, 255, 255, 255)), Image.new('RGBA', size, (0, 0, 0, 0)), ol.resize(size, Image.LANCZOS)))
             self.cards[h] = img
         return self.cards[h].copy()
 
-    def render(self):
-        """按当前内容重画卡片和文字；说话 / 思考时左上角的小光球每帧另外画。"""
-        if not self.mode: return
-        M, W, d, key = self.M, self.W, self.d, key_name(cfg['hotkey'])
-        L, TW = px(M + 24), px(W - 48)  # 文字左边、宽度（像素）
-        title, hint, icon, tcol = {
-            'rec': ('正在听…', f'松开「{key}」结束' if d.get('by_key') else '松开结束', None, TEXT),
-            'busy': ('改语病中…', '', None, TEXT),
-            'result': ('已输入' if d.get('by_key') else '已复制，去要输入的地方按 Ctrl+V', '再点一下关闭' if self.pinned else '点一下固定', I_OK, TEXT),
-            'pick': ('选一个版本', f'点一下输入 · 按「{key}」选 1 · Esc 放弃', '\uE8FD', TEXT),
-            'notice': ('提示', '', '!', {'err': RED, 'ok': GREEN}.get(d.get('level'), ORANGE))}[self.mode]
-        blocks, y = [], 62  # (画法, 参数)；y 是逻辑像素
-        if self.mode == 'rec':
+    def render_row(self):
+        """正在听 / 改语病 / 结果 / 提示：一行。左边声波条（每帧在 blit 里画；提示是彩色「!」），中间文字上下居中，
+        结果最右边一个勾（固定后换成图钉，只复制没输入时是复制图标）。"""
+        M, W, d, m = self.M, self.W, self.d, self.mode
+        right = 56 if m == 'result' else 22  # 文字右边留给图标的宽度
+        TX, TW = px(M + 66), px(W - 66 - right)
+        blocks = []  # (行, 字体, 行高)
+        if m == 'rec':
             f = pfont(16); runs = [(d['done'] + ' ', INK, False)] * bool(d['done']) + [(d['part'], '#9A9A9A', False)] * bool(d['part'])
-            lines = flow(runs or [('请说中文…' if cfg['lang'] == 'zh' else '请说英文…', '#A8A8A8', False)], f, TW, 3, 'last'); blocks.append(('lines', lines, f, y)); y += len(lines) * 16 * 1.55
-        elif self.mode == 'busy':
-            f = pfont(15); lines = flow([(d['raw'] or '识别中…', '#8A8A8A', False)], f, TW, 3); blocks.append(('lines', lines, f, y)); y += len(lines) * 15 * 1.55
-        elif self.mode == 'result':
-            f = pfont(17); lines = flow(changed_words(d['raw'], d['fixed']), f, TW, 4); blocks.append(('lines', lines, f, y)); y += len(lines) * 17 * 1.55 + 4
-            f2 = pfont(13); lines = flow([(d['zh'] if d['zh'] is not None else '翻译中…', '#6E6E73', False)], f2, TW, 2)
-            blocks.append(('lines', lines, f2, y)); y += len(lines) * 13 * 1.55
-        elif self.mode == 'pick':
+            blocks.append((flow(runs or [('请说中文…' if cfg['lang'] == 'zh' else '请说英文…', '#A8A8A8', False)], f, TW, 3, 'last'), f))
+        elif m == 'busy':
+            f = pfont(15); blocks.append((flow([(d['raw'] or '识别中…', '#8A8A8A', False)], f, TW, 3), f))
+        elif m == 'result':
+            f = pfont(16); blocks.append((flow(changed_words(d['raw'], d['fixed']), f, TW, 3), f))
+            f2 = pfont(12); blocks.append((flow([(d['zh'] if d['zh'] is not None else '翻译中…', '#6E6E73', False)], f2, TW, 2), f2))
+        else:
+            tcol = {'err': RED, 'ok': GREEN}.get(d.get('level'), ORANGE)
+            f = pfont(14); blocks.append((flow([(d['text'], TEXT, False)], f, TW, 3), f))
+        th = sum(len(ls) * f.size * 1.5 for ls, f in blocks) / S + 2 * (len(blocks) - 1)  # 文字块总高（逻辑像素）
+        h = max(60, round(th + 30)); self.hits = []
+        img = self.card(h); dr = ImageDraw.Draw(img); cy = px(M + h / 2)
+        y = px(M) + (px(h) - px(th)) / 2
+        for ls, f in blocks:
+            draw_lines(dr, ls, f, TX, y, f.size * 1.5); y += len(ls) * f.size * 1.5 + px(2)
+        self.bar_c = (px(M + 36), cy)
+        if m == 'notice':
+            cx = px(M + 36); dr.ellipse((cx - px(14), cy - px(14), cx + px(14), cy + px(14)), fill=tcol)
+            dr.text((cx, cy), '!', font=pfont(13, 'b'), fill='white', anchor='mm')
+        if m == 'result':
+            cx = px(M + W - 34); icon = I_PIN if self.pinned else I_OK if d.get('by_key') else I_COPY
+            dr.ellipse((cx - px(15), cy - px(15), cx + px(15), cy + px(15)), fill=INK)
+            dr.text((cx, cy), icon, font=pfont(12, 'i'), fill='white', anchor='mm')
+        self.base = img; self.blit()
+
+    def render(self):
+        """按当前内容重画卡片和文字（左边的声波条每帧另外画）。"""
+        if not self.mode: return
+        (self.render_pick if self.mode == 'pick' else self.render_row)()
+
+    def render_pick(self):
+        """挑版本：上面标题 + 提示，下面两张小卡（自然 / 口语）和中文意思。"""
+        M, W, d = self.M, self.W, self.d
+        key = key_name(cfg['hotkey']); L, TW = px(M + 24), px(W - 48)  # 文字左边、宽度（像素）
+        title, hint, icon, tcol = '选一个版本', f'点一下输入 · 按「{key}」选 1 · Esc 放弃', '\uE8FD', TEXT
+        blocks, y = [], 62  # (画法, 参数)；y 是逻辑像素
+        if True:
             f = pfont(16); self.hits = []
             for i, (name, text) in enumerate(zip(('自然', '口语'), d['opts'])):
                 lines = flow(changed_words(d['raw'], text), f, TW - px(76), 3); h = len(lines) * 16 * 1.55 + 22
                 blocks.append(('option', i, name, lines, f, y, h)); y += h + 10
             f2 = pfont(12); lines = flow([('意思：' + (d['zh'] if d.get('zh') is not None else '翻译中…'), '#6E6E73', False)], f2, TW, 2)
             blocks.append(('lines', lines, f2, y + 2)); y += 2 + len(lines) * 12 * 1.55
-        else:
-            f = pfont(15); lines = flow([(d['text'], tcol, False)], f, TW, 4); blocks.append(('lines', lines, f, y)); y += len(lines) * 15 * 1.55
         h = int(y + 20)
 
         img = self.card(h); dr = ImageDraw.Draw(img)
         cx, cy = px(M + 39), px(M + 33)
-        if icon:  # 左上角小圆章（说话 / 思考时这里画光球）
-            dr.ellipse((cx - px(15), cy - px(15), cx + px(15), cy + px(15)), fill=INK if self.mode != 'notice' else tcol)
-            fi = pfont(13, 'i' if icon != '!' else 'b'); dr.text((cx, cy), icon, font=fi, fill='white', anchor='mm')
+        dr.ellipse((cx - px(15), cy - px(15), cx + px(15), cy + px(15)), fill=INK)  # 左上角小圆章
+        dr.text((cx, cy), icon, font=pfont(13, 'i'), fill='white', anchor='mm')
         dr.text((px(M + 64), cy), title, font=pfont(13, 'b'), fill=tcol, anchor='lm')
         if hint: dr.text((px(M + W - 24), cy), hint, font=pfont(11), fill='#9A9A9A', anchor='rm')
         for b in blocks:
@@ -1202,16 +1226,16 @@ class Overlay:
 
     def frame(self, level):
         """每帧调：说话 / 思考时让左上角小光球动起来。"""
-        if self.visible and self.mode in ('rec', 'busy'): self.blit(level)
+        if self.visible and self.mode in ('rec', 'busy', 'result'): self.blit(level)
 
     def blit(self, level=0.0):
         img = self.base
-        if self.mode in ('rec', 'busy'):
-            img = img.copy(); st = self.mode; t = time.time() - self.t0
+        if self.mode in ('rec', 'busy', 'result'):
+            img = img.copy(); st = 'ready' if self.mode == 'result' else self.mode; t = time.time() - self.t0
             self.lv += ((level if st == 'rec' else 0) - self.lv) * 0.35
             n, ss = px(34), 3; Lr = Image.new('RGBA', (n * ss, n * ss), (0, 0, 0, 0))
             paint_bars(Lr, n * ss / 2, n * ss / 2, n * ss * 0.78, st, self.lv, t, self.sm)
-            img.alpha_composite(Lr.resize((n, n), Image.LANCZOS), (px(self.M + 39) - n // 2, px(self.M + 33) - n // 2))
+            img.alpha_composite(Lr.resize((n, n), Image.LANCZOS), (round(self.bar_c[0]) - n // 2, round(self.bar_c[1]) - n // 2))
         wa = ctypes.wintypes.RECT(); user32.SystemParametersInfoW(0x30, 0, ctypes.byref(wa), 0)
         x, y = wa.left + (wa.right - wa.left - img.width) // 2, wa.bottom - img.height + px(self.M) - px(18)
         if self.geo != (img.width, img.height, x, y):
