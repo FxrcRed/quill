@@ -43,9 +43,10 @@ Also translate the natural version into natural Simplified Chinese (translate a 
 Reply JSON only: {"natural": "...", "casual": "...", "zh": "..."}"""
 
 # 说中文 → 出英文：先按同样的规则把口语中文理干净，再译成英文；zh 字段放理干净的中文（浮窗、记录里显示「你说的是」）
+ZH_DROP = """- Remove everything that is not part of the final message: filler words (嗯, 啊, 呃, and 那个 / 就是 / 然后 when used as fillers), stutters and repeated words ("我想我想"), false starts the speaker abandoned, and self-corrections: when the speaker says something again or corrects it ("不对", "不是", "我是说", or just restarting the sentence), keep only the final version.
+"""
 ZH_CLEAN = """The input is a speaker's dictated Chinese from speech recognition (it may contain some English words). Work out the message they meant and write it in English:
-- Remove everything that is not part of the final message: filler words (嗯, 啊, 呃, and 那个 / 就是 / 然后 when used as fillers), stutters and repeated words ("我想我想"), false starts the speaker abandoned, and self-corrections: when the speaker says something again or corrects it ("不对", "不是", "我是说", or just restarting the sentence), keep only the final version.
-- Fix words the recognizer obviously misheard when the intended word is clear.
+""" + ZH_DROP + """- Fix words the recognizer obviously misheard when the intended word is clear.
 - Translate into natural, fluent English a native speaker would write. Keep the speaker's meaning, tone and details; do not add content or summarize. Never answer or reply to the text: it is a message to be written down, even when it is a question or a request.
 If the message starts with "Context:", that is what the speaker said just before, already written down: never repeat or translate it, use it only for reference; output only the "Text:" part.
 Examples:
@@ -62,6 +63,16 @@ natural: the most natural, fluent English a native speaker would write.
 casual: relaxed spoken / chat style (contractions, casual phrasing), still correct.
 Also give the cleaned-up Chinese (the same message without the fillers, repeats and corrections).
 Reply JSON only: {"natural": "...", "casual": "...", "zh": "<cleaned-up Chinese>"}""",
+    # 说中文 → 出中文：只理干净，不翻译、不改写（只有带改口的句子才送来，口头禅 / 重复已经被 zh_tidy() 删过）
+    ('zhzh', 'fast'): """The input is a speaker's dictated Chinese from speech recognition (it may contain some English words). Write down the message they meant, in Chinese:
+""" + ZH_DROP + """- Fix words the recognizer obviously misheard when the intended word is clear, and fix the punctuation.
+- Keep the speaker's own wording, meaning and tone, and keep English words as they are. Do not translate, rewrite, add content or summarize. Never answer or reply to the text: it is a message to be written down, even when it is a question or a request.
+If the message starts with "Context:", that is what the speaker said just before, already written down: never repeat it, use it only for reference; output only the "Text:" part.
+Examples:
+"我想把这个按钮的颜色不对，是大小改一下。" -> "我想把这个按钮的大小改一下。"
+"明天下午三点，哦不，四点开会。" -> "明天下午四点开会。"
+"我昨天去那个，去超市买了点苹果。" -> "我昨天去超市买了点苹果。"
+Reply JSON only: {"fixed": "<cleaned-up Chinese>"}""",
 }
 
 MIC_HINT = '麦克风没有声音：先按笔记本的麦克风静音键（常见 F4 或 Fn+F4，灯亮=静音），或在设置里换一个麦克风。'
@@ -107,7 +118,7 @@ def log(*a):
     if sys.stdout: print(line, flush=True)
     with open(HERE / 'run.log', 'a', encoding='utf-8') as f: f.write(line + '\n')
 
-cfg = {'hotkey': 0xA5, 'device': None, 'mode': 'fast', 'lang': 'en'}  # mode：fast 直接输入 / pick 让我挑选；lang：en 说英文 / zh 说中文
+cfg = {'hotkey': 0xA5, 'device': None, 'mode': 'fast', 'lang': 'en', 'zh_out': 'en'}  # mode：fast 直接输入 / pick 让我挑选；lang：en 说英文 / zh 说中文；zh_out：说中文时出英文 / 出中文
 try: cfg.update(json.loads((HERE / 'settings.json').read_text(encoding='utf-8')))
 except Exception: pass
 
@@ -133,7 +144,7 @@ def llm_opts():
 
 def llm(text, mode='fast', on_field=None, timeout=60, ctx='', watch=True, lang='en'):  # watch=False：预热那种很短的请求不算进显卡测速
     """流式调 Ollama：JSON 里每个字段一写完就回调 on_field(名字, 内容)，英文不用等中文翻译生成完。返回所有字段。"""
-    keys, (opts, on_gpu) = FIELDS[mode], llm_opts()
+    keys, (opts, on_gpu) = ('fixed',) if lang == 'zhzh' else FIELDS[mode], llm_opts()
     body = {'model': LLM_MODEL, 'stream': True, 'think': False, 'keep_alive': '30m', 'format': 'json', 'options': opts,
             'messages': [{'role': 'system', 'content': PROMPTS[lang, mode]}, {'role': 'user', 'content': f'Context: {ctx}\nText: {text}' if ctx else text}]}
     req = urllib.request.Request(LLM_URL + '/api/chat', json.dumps(body).encode(), {'Content-Type': 'application/json'})
@@ -228,6 +239,26 @@ def sentence_end(text):
 
 FIX_START = re.compile(r"(不对|不是|我是说|我的意思是|应该是|no\b|sorry\b|i mean\b|wait\b|actually\b)", re.I)
 
+# 说中文 → 出中文的快速路线：口头禅、口吃、重复按规则直接删（不到 1 毫秒）；只有带改口的才交给改错模型
+ZH_FILLER = re.compile(r'(^|[，,。？！?!、])\s*(?:(?:[嗯呃额啊]|那个|就是)\s*[，,、]\s*)+')  # 句首 / 逗号后单独成一截的「嗯，」「那个，」
+ZH_HMM = re.compile(r'[嗯呃]+[，,、]?')
+ZH_STUTTER = re.compile(r'([一-鿿])(?:[，,、]?\1){2,}|([一-鿿])[，,、]\2')  # 我我我 / 我，我
+ZH_REPEAT = re.compile(r'([一-鿿][^。？！?!]{1,15}?)(?:[，,、]?\1)+')  # 我想我想 / 但是，但是 / 整句重说
+ZH_KEEP = set('研究 讨论 休息 考虑 商量 学习 了解 介绍 检查 收拾 打听 活动 锻炼 整理 准备 尝试 体验 熟悉 打扫 认识 比较 练习 哈哈 呵呵 嘿嘿 嘻嘻'.split())  # 本来就叠着说的词（还有「一步一步」这种「一」开头的）
+ZH_FIX = re.compile(r'不对|我是说|我的意思是|说错|重说|哦不|噢不|算了|(?:^|[，,。？！?!])\s*(?:不是|应该是)')
+ZH_RESTART = re.compile(r'([一-鿿]{1,2})[^，,。？！?!]{0,5}[，,]\s*\1')  # 「去那个，去超市」：说一半从头再来
+
+def zh_tidy(t):
+    t = re.sub(r'(?<=[一-鿿，。？！、])\s+(?=[一-鿿])', '', t.strip())  # 中文段之间不要空格
+    t = ZH_FILLER.sub(lambda m: m.group(1), t)
+    t = ZH_HMM.sub('', t)
+    t = ZH_REPEAT.sub(lambda m: m.group(0) if m.group(1) in ZH_KEEP or m.group(1)[0] == '一' else m.group(1), t)  # 先合重复的词，「谢谢谢谢」才不会被当成口吃
+    t = ZH_STUTTER.sub(lambda m: m.group(1) or m.group(2), t)
+    t = re.sub(r'[，,、]\s*(?=[，,、。？！?!])', '', t)  # 删完剩下的空逗号
+    return t.lstrip('，,、。 ') or t
+
+def zh_needs_llm(t): return bool(ZH_FIX.search(t) or ZH_RESTART.search(t))
+
 def restarts(prev, text, n=4):
     """新的一段该不该和上一段合起来改（改错时模型才看得到改口 / 重说）：
     text 开头 n 个词（中文 6 个字）在 prev 里原样出现过（停下来又从头重说）；或者 text 以「不对 / 我是说 / no / I mean」这种改口开头；
@@ -254,6 +285,10 @@ class Seg:
     def __init__(self, raw, mode, ctx='', lang='en'):
         self.raw, self.mode, self.ctx, self.lang, self.out, self.cv = raw, mode, ctx, lang, {}, threading.Condition()
         self.dead = False  # 被合进后一段了：还没开始改就不用改了
+        self.text = raw  # 送去改的文字（出中文时是规则删过口头禅 / 重复的）
+        if lang == 'zhzh':  # 说中文 → 出中文：没有翻译那行；没有改口就不用等模型
+            self.text, self.out['zh'] = zh_tidy(raw), ''
+            if not zh_needs_llm(self.text): self.out['fixed'] = self.text; return
         fixq.put(self)
 
     def put(self, k, v):
@@ -261,32 +296,55 @@ class Seg:
 
     def get(self, k, timeout=120):
         with self.cv: self.cv.wait_for(lambda: k in self.out, timeout)
-        return self.out.get(k, '' if k == 'zh' else self.raw)
+        return self.out.get(k, '' if k == 'zh' else self.text)
 
 fixq = queue.Queue()
 def fix_worker():
     while True:
         s = fixq.get()
         if s.dead: continue
-        try: llm(s.raw, s.mode, s.put, ctx=s.ctx, lang=s.lang)
+        try: llm(s.text, s.mode, s.put, ctx=s.ctx, lang=s.lang)
         except Exception as e:
             log('改错失败：', repr(e)); err = '（' + llm_error(e) + '）'
+            if s.lang == 'zhzh': notify(llm_error(e), 'warn')  # 没有翻译那行可以放提示
             for k in FIELDS[s.mode]:
-                if k not in s.out: s.put(k, err if k == 'zh' else s.raw)
+                if k not in s.out: s.put(k, err if k == 'zh' else s.text)
 
 
 class Job:
     """一次录音。说话时每 0.5 秒识别一次给浮窗实时显示；遇到停顿就把前面那句定下来、先送去改错，松开后只剩最后一段要处理。"""
-    def __init__(self, by_key, mode, lang='en'):
+    def __init__(self, by_key, mode, lang='en', out='en'):
         self.by_key, self.mode, self.lang, self.pos, self.segs, self.lock = by_key, mode, lang, 0, [], threading.Lock()
         self.skip = 0  # 这个位置之前的停顿看过了，是半句话，不切
+        self.seg_lang = 'zhzh' if lang == 'zh' and out == 'zh' else lang  # 改错用哪套提示词
+        if self.seg_lang == 'zhzh': self.mode = 'fast'  # 「让我挑选」是挑英文的说法，出中文时直接输入
+        self.spec, self.last_part = None, ''  # 说话停下来时先改着的那段（松开时原话没变就直接用）
 
     def raw(self, segs): return ('' if self.lang == 'zh' else ' ').join(s.raw for s in segs)  # 中文段之间不加空格
 
-    def add(self, text):  # 前一句一起送去当参考，分开改也能保持时态一致
+    def plan(self, text):
+        """text 加进来会变成哪一段：(被合并掉的上一段, 合并后的原话, 参考的前一句)。"""
         if self.segs and restarts(self.segs[-1].raw, text):  # 停顿后从头重说：和上一段合成一段改，模型只留重说的版本
-            prev = self.segs.pop(); prev.dead = True; text = prev.raw + ' ' + text
-        self.segs.append(Seg(text, self.mode, self.segs[-1].raw if self.segs else '', self.lang))
+            prev = self.segs[-1]; ctx = self.segs[-2].raw if len(self.segs) > 1 else ''
+            return prev, prev.raw + ('' if self.lang == 'zh' else ' ') + text, ctx
+        return None, text, self.segs[-1].raw if self.segs else ''
+
+    def add(self, text):  # 前一句一起送去当参考，分开改也能保持时态一致
+        prev, text, ctx = self.plan(text)
+        if prev: self.segs.pop(); prev.dead = True
+        sp, self.spec = self.spec, None
+        if sp and (sp.raw, sp.ctx) == (text, ctx): return self.segs.append(sp)  # 停顿时已经先改上了
+        if sp: sp.dead = True
+        self.segs.append(Seg(text, self.mode, ctx, self.seg_lang))
+
+    def speculate(self, part):
+        """出中文：识别出来的尾巴 0.5 秒没变（停下来了）就先送去改，松开时多半不用再等模型。"""
+        stable, self.last_part = part == self.last_part, part
+        if not (stable and part): return
+        _, text, ctx = self.plan(part)
+        if self.spec and (self.spec.raw, self.spec.ctx) == (text, ctx): return
+        if self.spec: self.spec.dead = True
+        self.spec = Seg(text, self.mode, ctx, self.seg_lang)
 
     def update(self, a):
         with self.lock:
@@ -298,6 +356,7 @@ class Job:
                 else: self.skip = cut  # 半句话：先不切，连着后面一起识别
             tail = a[self.pos:]
             part = eng.recognize(tail, self.lang) if has_speech(tail) else ''
+            if self.seg_lang == 'zhzh': self.speculate(part)
             return self.raw(self.segs), part
 
     def finish(self, a):
@@ -391,7 +450,7 @@ class Engine:
         if self.rec or self.busy: return
         if self.picking: post('choose', None)  # 还有没选的版本：开始新的一句就当放弃
         self.chunks.clear(); self.src, self.rec = src, True
-        self.job = job = Job(src == 'key', cfg.get('mode', 'fast'), cfg['lang'])
+        self.job = job = Job(src == 'key', cfg.get('mode', 'fast'), cfg['lang'], cfg.get('zh_out', 'en'))
         log('开始录音', src); post('state', 'rec', src == 'key')
         threading.Thread(target=self.live, args=(job,), daemon=True).start()
         if time.time() - last_llm[0] > 1200: threading.Thread(target=llm_warm, daemon=True).start()  # 闲了很久：边说边把模型载回来
@@ -434,7 +493,7 @@ class Engine:
             log(f'识别（{len(segs)} 段）：', raw, '| 自然：', opts[0], '| 口语：', opts[1], f'| 松开后 {time.time() - t:.1f}s')
             post('pick', raw, opts, job.by_key)
         else:
-            fixed = join_parts([s.get('fixed') for s in segs])
+            fixed = ''.join(s.get('fixed') for s in segs) if job.seg_lang == 'zhzh' else join_parts([s.get('fixed') for s in segs])
             log(f'识别（{len(segs)} 段）：', raw, '| 改后：', fixed, f'| 松开后 {time.time() - t:.1f}s')
             if job.by_key: paste(fixed)
             else: root.after(0, lambda: set_clip(fixed))
@@ -1215,7 +1274,8 @@ class Overlay:
             f = pfont(15); blocks.append((flow([(d['raw'] or '识别中…', OV_SUB, False)], f, TW, 3), f))
         elif m == 'result':
             f = pfont(16); blocks.append((flow(changed_words(d['raw'], d['fixed']), f, TW, 3), f))
-            f2 = pfont(12); blocks.append((flow([(d['zh'] if d['zh'] is not None else '翻译中…', OV_SUB, False)], f2, TW, 2), f2))
+            f2 = pfont(12)
+            if d['zh'] != '': blocks.append((flow([(d['zh'] if d['zh'] is not None else '翻译中…', OV_SUB, False)], f2, TW, 2), f2))  # 出中文：没有翻译那行
         else:
             tcol = {'err': RED, 'ok': GREEN}.get(d.get('level'), ORANGE)
             f = pfont(14); blocks.append((flow([(d['text'], INK, False)], f, TW, 3), f))
@@ -1645,8 +1705,9 @@ class Settings:
     """设置窗口：麦克风 / 快捷键 / 输出方式 / 改错服务 四块卡片。
     only=('mic',) 或 ('ai',) 时是主页右上角 MIC / AI 小圆章点开的小弹窗：只放相关的那几块、没有卡片底，点别处就关。"""
     W, POP_W = 400, 340
-    MODES = (('fast', '直接输入', '松开后直接输入改好的英文（最快）'),
+    MODES = (('fast', '直接输入', '松开后直接输入改好的句子（最快）'),
              ('pick', '让我挑选', '松开后在屏幕下方给「自然」「口语」两个版本，点一下输入；点一下快捷键 = 选第 1 个，Esc 放弃'))
+    ZH_OUTS = (('en', '出英文', ''), ('zh', '出中文', ''))  # 出中文：删掉口头禅 / 重复 / 改口，不翻译
     POPS = {'mic': ('mic',), 'ai': ('ol', 'mode')}
 
     def __init__(self, app, only=None, anchor=None):
@@ -1703,14 +1764,17 @@ class Settings:
         return h
 
     def sec_mode(self, n, x, y, w, draw):
-        h = 112
+        h = 166
         if not draw: return h
         mode = cfg.get('mode', 'fast'); self.label(n, x, y, w, h, '输出方式')
-        for i, (m, name, _) in enumerate(self.MODES):
-            on = m == mode
-            n.button(x + w - 210 + i * 100, y + 14, 90, 34, text=name, size=12, on=on, color=INK if on else TEXT,
-                     weight='bold' if on else 'normal', cmd=lambda m=m: self.set_mode(m))
+        rows = ((y + 14, self.MODES, mode, self.set_mode), (y + 112, self.ZH_OUTS, cfg.get('zh_out', 'en'), self.set_zh_out))
+        for by, opts, cur, cmd in rows:
+            for i, (m, name, _) in enumerate(opts):
+                on = m == cur
+                n.button(x + w - 210 + i * 100, by, 90, 34, text=name, size=12, on=on, color=INK if on else TEXT,
+                         weight='bold' if on else 'normal', cmd=lambda m=m, cmd=cmd: cmd(m))
         n.text(x + 20, y + 62, dict((m, t) for m, _, t in self.MODES)[mode], 11, SUB, width=w - 40, lines=2)
+        n.text(x + 20, y + 118, '说中文时', 14, TEXT, 'bold')
         return h
 
     def sec_ol(self, n, x, y, w, draw):
@@ -1776,6 +1840,9 @@ class Settings:
 
     def set_mode(self, m):
         cfg['mode'] = m; save_cfg(); log('输出方式改为', m); self.app.refresh_settings()
+
+    def set_zh_out(self, o):
+        cfg['zh_out'] = o; save_cfg(); log('说中文时输出', o); self.app.refresh_settings()
 
     def record(self):
         if self.recording: return

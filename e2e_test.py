@@ -20,7 +20,8 @@ def ulw(h, img, x, y): orig(h, img, x, y); latest[0] = img
 m.ulw = ulw
 try: clip = root.clipboard_get()
 except Exception: clip = None
-LANG = 'zh' if 'zh' in sys.argv else 'en'; m.cfg['lang'] = LANG  # e2e_test.py zh：说中文（test_zh.wav）
+LANG = 'zh' if {'zh', 'zhzh'} & set(sys.argv) else 'en'; m.cfg['lang'] = LANG  # e2e_test.py zh：说中文（test_zh.wav）
+ZHZH = 'zhzh' in sys.argv; m.cfg['zh_out'] = 'zh' if ZHZH else 'en'  # e2e_test.py zhzh：说中文 → 出中文（只跑直接输入）
 app = m.App(root); root.deiconify()
 threading.Thread(target=m.fix_worker, daemon=True).start(); threading.Thread(target=m.eng.load, daemon=True).start()
 if LANG == 'zh': threading.Thread(target=m.eng.load_zh, daemon=True).start()
@@ -31,7 +32,7 @@ audio = np.concatenate([a, (np.random.randn(int(16000 * 0.9)) * 0.001).astype(np
 
 def snap(name):
     time.sleep(0.15)
-    if latest[0]: latest[0].save(OUT / f'ov_{LANG}_{name}.png')
+    if latest[0]: latest[0].save(OUT / f'ov_{"zhzh" if ZHZH else LANG}_{name}.png')
 
 def say(mode, tag):
     m.cfg['mode'] = mode; m.eng.start('mouse'); t0 = time.time(); F = 480
@@ -48,8 +49,8 @@ def say(mode, tag):
 def scenario():
     try:
         m.eng.loaded.wait(); m.eng.ev(LANG).wait(); time.sleep(4)
-        say('fast', 'fast'); say('pick', 'pick')
-        m.post('choose', 1); time.sleep(1); snap('pick_chosen')
+        say('fast', 'fast')
+        if not ZHZH: say('pick', 'pick'); m.post('choose', 1); time.sleep(1); snap('pick_chosen')
     finally:
         def end():
             if clip is not None: root.clipboard_clear(); root.clipboard_append(clip); root.update()
