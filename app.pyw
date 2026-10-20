@@ -15,7 +15,7 @@ TITLE = 'Quill'
 LLM_URL = 'http://127.0.0.1:11434'
 LLM_MODEL = 'qwen3:8b'
 LLM_GPU_LAYERS = -1   # -1 = 放显卡（Ollama 自动，一句约 1.5 秒）；0 = 全用 CPU（约 5~8 秒）。显卡被别的程序占着变慢时会自动临时改用 CPU
-SHOW_SECONDS = 8      # 底部浮窗的结果自动消失；点一下固定，再点关闭
+SHOW_SECONDS = 3      # 底部浮窗的结果自动消失；点一下固定，再点关闭
 RATE = 16000
 SELFTEST = '--selftest' in sys.argv
 SHOWCASE = any(a.startswith('--show=') for a in sys.argv)  # 截图测试：小弹窗不因为没拿到焦点而关掉
@@ -79,7 +79,7 @@ MIC_HINT = '麦克风没有声音：先按笔记本的麦克风静音键（常�
 MIC_SHORT = '麦克风没声音：按静音键（F4 / Fn+F4），或去设置换一个麦克风。'
 # 软 UI（neumorphism）配色：同一种浅灰底，凸起/凹陷全靠左上白光、右下灰影
 BG, INSET, LIGHT, DARK = '#E6E6E6', '#DFDFDF', '#FFFFFF', '#BDBDBD'
-INK, TEXT, SUB, MUTED, TICK, TICK_MAJ = '#1E1E1E', '#2B2B2B', '#8C8C8C', '#9A9A9A', '#C6C6C6', '#8F8F8F'
+INK, TEXT, SUB, TICK, TICK_MAJ = '#1E1E1E', '#1E1E1E', '#8C8C8C', '#C6C6C6', '#8F8F8F'  # 字只用两种颜色：TEXT 正文 / SUB 说明（INK 是声波条那些画的东西）
 GREEN, ORANGE, RED, TOAST_BG = '#2F9E5B', '#D9822B', '#D64541', '#EFEFEF'
 FONT, FONT_BOLD = 'Microsoft YaHei UI', None  # 启动时有 fonts\NotoSansSC 就换成 Noto Sans SC Medium / Bold（思源黑体，SIL OFL 开源）
 DISPLAY, ICON = 'Bahnschrift', 'Segoe MDL2 Assets'  # 启动时换成项目里的 Michroma 宽体 / Segoe Fluent Icons（有的话）
@@ -916,7 +916,7 @@ class Switch:
             x, y, w, h = self.box(i); lx, ly = x - self.x + self.ox, y - self.y + self.oy
             if v == self.value or v == self.down: inset(im, lx, ly, w, h, h / 2, 4 if v == self.down else 2.4)
             else: raised(im, lx, ly, w, h, h / 2, 3)
-            self.lab.append(c.create_text(px(x + w / 2), px(y + h / 2), text=t, font=fnt(11), fill=INK if v == self.value else ICON_C, tags='txt'))
+            self.lab.append(c.create_text(px(x + w / 2), px(y + h / 2), text=t, font=fnt(12), fill=TEXT, tags='txt'))
         self.ph = ImageTk.PhotoImage(im); c.itemconfigure(self.tile, image=self.ph)
 
     def contains(self, x, y):
@@ -1152,6 +1152,7 @@ class Overlay:
         user32.ShowWindow(self.hwnd, 0)
         user32.SetWindowLongW(self.hwnd, -20, ex & ~0x80000); user32.SetWindowLongW(self.hwnd, -20, ex | 0x80000)  # 分层：要先清掉再设，否则 UpdateLayeredWindow 报参数错误（87）
         self.mode, self.d, self.visible, self.pinned, self.inside, self.hover, self.timer = None, {}, False, False, False, None, None
+        self.mouse_down = False  # 上一帧鼠标键是不是按着（点浮窗外面就关）
         self.cards, self.base, self.hits, self.wgeo, self.bar_c, self.h = {}, None, [], None, (0, 0), self.ROW_H
         self.backdrop = (None, None)  # 浮窗后面那块屏幕的模糊图：(屏幕上的范围, 图)，一次截得比浮窗高，浮窗变高时直接从里面裁
         self.sm, self.lv, self.t0 = [0.0] * 6, 0.0, time.time()
@@ -1268,12 +1269,12 @@ class Overlay:
         TX, TW = px(M + 66), px(W - 66 - right)
         blocks = []  # (行, 字体, 行高)
         if m == 'rec':
-            f = pfont(16); runs = [(d['done'] + ' ', INK, False)] * bool(d['done']) + [(d['part'], OV_SUB, False)] * bool(d['part'])
+            f = pfont(14); runs = [(d['done'] + ' ', INK, False)] * bool(d['done']) + [(d['part'], OV_SUB, False)] * bool(d['part'])
             blocks.append((flow(runs or [('请说中文…' if cfg['lang'] == 'zh' else '请说英文…', OV_SUB, False)], f, TW, 3, 'last'), f))
         elif m == 'busy':
-            f = pfont(15); blocks.append((flow([(d['raw'] or '识别中…', OV_SUB, False)], f, TW, 3), f))
+            f = pfont(14); blocks.append((flow([(d['raw'] or '识别中…', OV_SUB, False)], f, TW, 3), f))
         elif m == 'result':
-            f = pfont(16); blocks.append((flow(changed_words(d['raw'], d['fixed']), f, TW, 3), f))
+            f = pfont(14); blocks.append((flow(changed_words(d['raw'], d['fixed']), f, TW, 3), f))
             f2 = pfont(12)
             if d['zh'] != '': blocks.append((flow([(d['zh'] if d['zh'] is not None else '翻译中…', OV_SUB, False)], f2, TW, 2), f2))  # 出中文：没有翻译那行
         else:
@@ -1288,7 +1289,7 @@ class Overlay:
         self.bar_c = (px(M + 36), cy)
         if m == 'notice':
             cx = px(M + 36); dr.ellipse((cx - px(14), cy - px(14), cx + px(14), cy + px(14)), fill=tcol)
-            dr.text((cx, cy), '!', font=pfont(13, 'b'), fill='white', anchor='mm')
+            dr.text((cx, cy), '!', font=pfont(13), fill='white', anchor='mm')
         if m == 'result':
             badge = self.badge('pin' if self.pinned else 'ok' if d.get('by_key') else 'copy')
             img.alpha_composite(badge, (px(M + W - 34) - badge.width // 2, round(cy) - badge.height // 2))
@@ -1323,7 +1324,7 @@ class Overlay:
         title, hint, icon, tcol = '选一个版本', f'点一下输入 · 按「{key}」选 1 · Esc 放弃', '\uE8FD', TEXT
         blocks, y = [], 62  # (画法, 参数)；y 是逻辑像素
         if True:
-            f = pfont(16); self.hits = []
+            f = pfont(14); self.hits = []
             for i, (name, text) in enumerate(zip(('自然', '口语'), d['opts'])):
                 lines = flow(changed_words(d['raw'], text), f, TW - px(76), 3); h = len(lines) * 16 * 1.55 + 22
                 blocks.append(('option', i, name, lines, f, y, h)); y += h + 10
@@ -1335,8 +1336,8 @@ class Overlay:
         cx, cy = px(M + 39), px(M + 33)
         dr.ellipse((cx - px(15), cy - px(15), cx + px(15), cy + px(15)), fill=INK)  # 左上角小圆章
         dr.text((cx, cy), icon, font=pfont(13, 'i'), fill='white', anchor='mm')
-        dr.text((px(M + 64), cy), title, font=pfont(13, 'b'), fill=tcol, anchor='lm')
-        if hint: dr.text((px(M + W - 24), cy), hint, font=pfont(11), fill=OV_SUB, anchor='rm')
+        dr.text((px(M + 64), cy), title, font=pfont(14), fill=tcol, anchor='lm')
+        if hint: dr.text((px(M + W - 24), cy), hint, font=pfont(12), fill=OV_SUB, anchor='rm')
         for b in blocks:
             if b[0] == 'lines':
                 _, lines, f, by = b; draw_lines(dr, lines, f, L, px(M + by), f.size * 1.55)
@@ -1347,13 +1348,19 @@ class Overlay:
                 dr.rounded_rectangle((x0, y0, x1, y1), px(18), fill=(255, 255, 255, 175) if hov else (255, 255, 255, 80))  # 玻璃上再叠一层半透明白
                 cy2 = y0 + px(11) + f.size * 1.55 / 2
                 dr.rounded_rectangle((x0 + px(12), cy2 - px(12), x0 + px(60), cy2 + px(12)), px(12), fill=INK if hov or i == 0 else OV_SUB)
-                dr.text((x0 + px(36), cy2), name, font=pfont(11, 'b'), fill='white', anchor='mm')
+                dr.text((x0 + px(36), cy2), name, font=pfont(12), fill='white', anchor='mm')
                 draw_lines(dr, lines, f, x0 + px(72), y0 + px(11), f.size * 1.55)
                 self.hits.append((x0, y0, x1, y1, i))
         self.base = img; self.blit()
 
     def frame(self, level):
-        """每帧调：说话 / 思考时让左上角小光球动起来。"""
+        """每帧调：说话 / 思考时让左上角小光球动起来；结果 / 提示显示着时，点屏幕上浮窗以外的地方就关（固定了的、挑版本的不关）。"""
+        down = key_down(0x01) or key_down(0x02)
+        if down and not self.mouse_down and self.visible and self.wgeo and self.mode in ('result', 'notice') and not self.pinned:
+            pt = ctypes.wintypes.POINT(); user32.GetCursorPos(ctypes.byref(pt))
+            w, h, x, y = self.wgeo; M = px(self.M)
+            if not (x + M <= pt.x <= x + w - M and y + M <= pt.y <= y + h - M): self.hide()
+        self.mouse_down = down
         if self.visible and self.mode in ('rec', 'busy', 'result'): self.blit(level)
 
     def blit(self, level=0.0):
@@ -1515,21 +1522,21 @@ class App:
         n = self.n = Neu(root, self.W, self.H); n.c.pack()
         # 能点的都是凸起的，凹下去的只放内容。和设置 / 记录窗口一套网格：左右离边 20，标题行一样，第一张卡片顶边 y=92，
         # 卡片之间都隔 20，卡片圆角 28（窗口圆角 48 = 28 + 20）；「上一句」右边的复制图标和齿轮同样大、圆心在同一竖线（x=348）
-        n.text(32, 26, 'QUILL', 18, INK, 'bold', family=DISPLAY)  # 和 SETTINGS 一样的宽体大字，加粗
-        n.text(33, 56, '英文语音输入', 12, SUB)
+        n.text(32, 26, 'QUILL', 18, INK, family=DISPLAY)  # 和 SETTINGS 一样的宽体大字
+        n.text(33, 56, '英文语音输入', 11, SUB)
         n.button(274, 30, 30, 30, icon=I_BALL, size=9, d=3, color=ICON_C, cmd=self.to_ball)   # 缩成悬浮球
         n.button(312, 30, 30, 30, icon=I_MIN, size=8, d=3, color=ICON_C, cmd=self.minimize)
         n.button(350, 30, 30, 30, icon=I_CLOSE, size=8, d=3, color=ICON_C, cmd=quit_app)
         n.raised(20, 92, 360, 326, 28, d=7)                      # 状态卡片（凸起，和设置里的卡片一样）：大字 + 提示 + 刻度和声波条；按住中间那圈说话时那圈凹下去
         self.word = n.text(44, 108, '', 22, INK, family=DISPLAY)
-        self.sub = n.text(45, 150, '', 12, SUB)
+        self.sub = n.text(45, 150, '', 11, SUB)
         self.dial = Dial(n, 200, 296, 104, (lambda: eng.start('mouse'), eng.stop))
         # 说哪种语言（出来的都是英文）：两个小胶囊和 READY 同一行、右边对齐卡片内边；选中的凹下去
         self.lang_sw = Switch(n, 276, 110, 40, 28, 4, (('en', 'EN'), ('zh', '中')), cfg['lang'], self.set_lang); n.btns.append(self.lang_sw)
         self.b_copy = n.button(20, 438, 360, 78, r=39, icon=I_COPY, size=16, d=5, color=ICON_C, align='left', cmd=self.copy_last)  # 上一句：整条点一下复制
-        self.l_en = n.text(48, 455, '还没有记录', 14, TEXT)  # 不显示「上一句 · 时间」，英文 + 中文两行在条里上下居中
+        self.l_en = n.text(48, 456, '还没有记录', 12, TEXT)  # 不显示「上一句 · 时间」，英文 + 中文两行在条里上下居中
         self.l_zh = n.text(48, 480, '', 11, SUB)
-        n.button(20, 536, 276, 64, r=32, icon=I_HIST, text='记录', size=14, color=ICON_C, d=5, cmd=self.open_history)
+        n.button(20, 536, 276, 64, r=32, icon=I_HIST, text='记录', size=12, color=ICON_C, d=5, cmd=self.open_history)
         n.button(316, 536, 64, 64, icon=I_SET, size=16, d=5, color=ICON_C, cmd=self.open_settings)
         n.commit()
 
@@ -1582,7 +1589,7 @@ class App:
 
     def set_last(self, raw, fixed, zh, when=''):
         self.last = fixed; c = self.n.c
-        c.itemconfigure(self.l_en, text=fit(fixed, fnt(14), px(270)))
+        c.itemconfigure(self.l_en, text=fit(fixed, fnt(12), px(270))); c.coords(self.l_en, px(48), px(456 if zh else 467))  # 没有中文那行（出中文）：一行上下居中
         c.itemconfigure(self.l_zh, text=fit(zh, fnt(11), px(270)))
 
     def set_key(self, vk):
@@ -1607,11 +1614,11 @@ class App:
 
     def refresh_sub(self):
         if time.time() < self.notice_until: return
-        self.n.c.itemconfigure(self.sub, text=fit(self.sub_text(), fnt(12), px(312), 2), fill=SUB)
+        self.n.c.itemconfigure(self.sub, text=fit(self.sub_text(), fnt(11), px(312), 2), fill=SUB)
 
     def show_notice(self, text, level):
         self.notice_until = time.time() + 15
-        self.n.c.itemconfigure(self.sub, text=fit(text, fnt(12), px(312), 2), fill={'err': RED, 'ok': GREEN}.get(level, ORANGE))
+        self.n.c.itemconfigure(self.sub, text=fit(text, fnt(11), px(312), 2), fill={'err': RED, 'ok': GREEN}.get(level, ORANGE))
         self.root.after(15100, self.refresh_sub)
 
     def set_state(self, s, toast=False):
@@ -1736,8 +1743,7 @@ class Settings:
         self.label(n, x, y, w, h, '麦克风')
         for i, name in enumerate(devs):
             on = name == cur
-            n.button(x + 20, dev_y + i * 50, w - 40, 40, r=20, text=name, icon=I_OK if on else '', size=12, on=on, align='left',
-                     color=INK if on else TEXT, cmd=lambda name=name: self.pick_dev(name))
+            n.button(x + 20, dev_y + i * 50, w - 40, 40, r=20, text=name, icon=I_OK if on else '', size=12, on=on, align='left', cmd=lambda name=name: self.pick_dev(name))
         n.inset(x + 20, track_y, w - 40, 10, 5, d=2.5)
         self.bar_x, self.bar_w = x + 26, w - 52
         self.bar = n.c.create_line(px(self.bar_x), px(track_y + 5), px(self.bar_x), px(track_y + 5), width=px(4), fill=ACCENT, capstyle='round')
@@ -1758,8 +1764,7 @@ class Settings:
                                         color=ORANGE if self.recording else TEXT, cmd=self.record)
             else:
                 on = vk == cfg['hotkey']
-                n.button(cx, chip_y + dy, cw, 34, text=key_name(vk), size=12, on=on, color=INK if on else TEXT,
-                         weight='bold' if on else 'normal', cmd=lambda vk=vk: self.set_hot(vk))
+                n.button(cx, chip_y + dy, cw, 34, text=key_name(vk), size=12, on=on, cmd=lambda vk=vk: self.set_hot(vk))
         self.ktip = n.text(x + 20, ktip_y, self.key_tip[0], 11, self.key_tip[1], width=w - 40, lines=2)
         return h
 
@@ -1771,10 +1776,9 @@ class Settings:
         for by, opts, cur, cmd in rows:
             for i, (m, name, _) in enumerate(opts):
                 on = m == cur
-                n.button(x + w - 210 + i * 100, by, 90, 34, text=name, size=12, on=on, color=INK if on else TEXT,
-                         weight='bold' if on else 'normal', cmd=lambda m=m, cmd=cmd: cmd(m))
+                n.button(x + w - 210 + i * 100, by, 90, 34, text=name, size=12, on=on, cmd=lambda m=m, cmd=cmd: cmd(m))
         n.text(x + 20, y + 62, dict((m, t) for m, _, t in self.MODES)[mode], 11, SUB, width=w - 40, lines=2)
-        n.text(x + 20, y + 118, '说中文时', 14, TEXT, 'bold')
+        n.text(x + 20, y + 122, '说中文时', 12, TEXT)
         return h
 
     def sec_ol(self, n, x, y, w, draw):
@@ -1790,8 +1794,8 @@ class Settings:
         n.text(x + 20, y + 56, f'本机 Ollama · {LLM_MODEL} · ' + ('显卡' if on_gpu else 'CPU') +
                ('\n一句约 1~2 秒；显卡被占着变慢会自动换 CPU' if on_gpu else '\n一句约 5~8 秒' + ('（显卡慢，暂时换成 CPU）' if LLM_GPU_LAYERS else '')), 11, SUB)
         last = f'上一句改错用了 {llm_stat["secs"]:.1f} 秒（{"显卡" if llm_stat["gpu"] else "CPU"}）' if llm_stat else '还没有改过句子'
-        n.text(x + 20, y + 94, last, 11, MUTED)
-        if st == 'down': n.button(x + w - 90, y + 50, 70, 34, text='启动', size=12, color=INK, weight='bold', cmd=self.start_ol)
+        n.text(x + 20, y + 94, last, 11, SUB)
+        if st == 'down': n.button(x + w - 90, y + 50, 70, 34, text='启动', size=12, cmd=self.start_ol)
         return h
 
     @classmethod
@@ -1802,7 +1806,7 @@ class Settings:
 
     def label(self, n, x, y, w, h, name):
         if not self.only: n.raised(x, y, w, h, 28, d=7)
-        n.text(x + 20, y + 20, name, 14, TEXT, 'bold')
+        n.text(x + 20, y + 24, name, 12, TEXT)
 
     def build(self):
         n, app = self.n, self.app
@@ -1812,8 +1816,8 @@ class Settings:
         H = self.full_height() if not self.only else y0 + sum(s(n, x, 0, w, False) for s in secs) + 10
         n.reset(H); n.c.configure(height=px(H))
         if not self.only:
-            n.text(32, 26, 'SETTINGS', 18, INK, family=DISPLAY); n.text(33, 56, '设置', 12, SUB)
-            n.button(272, 28, 70, 34, r=17, icon=I_CHECK, text='自检', size=11, cmd=app.open_checks)
+            n.text(32, 26, 'SETTINGS', 18, INK, family=DISPLAY); n.text(33, 56, '设置', 11, SUB)
+            n.button(272, 28, 70, 34, r=17, icon=I_CHECK, text='自检', size=12, cmd=app.open_checks)
             close_btn(n, self.Wd, self.w.withdraw)
         y = y0
         for i, s in enumerate(secs):
@@ -1878,9 +1882,9 @@ class History:
         self.app = app; self.w = sub_window(app, '记录', self.W); self.opened = set()  # 展开了原话的记录（时间, 原话）
         self.view = Settings.full_height()  # 和设置窗口一样高
         h = self.head = Neu(self.w, self.W, self.TOP); h.c.pack()
-        h.text(32, 26, 'HISTORY', 18, INK, family=DISPLAY); self.count = h.text(33, 56, '', 12, SUB)
+        h.text(32, 26, 'HISTORY', 18, INK, family=DISPLAY); self.count = h.text(33, 56, '', 11, SUB)
         close_btn(h, self.W, self.w.withdraw)
-        h.button(236, 28, 104, 36, r=18, text='打开文件', size=11, cmd=lambda: os.startfile(HERE / 'history.txt') if (HERE / 'history.txt').exists() else None)
+        h.button(236, 28, 104, 36, r=18, text='打开文件', size=12, cmd=lambda: os.startfile(HERE / 'history.txt') if (HERE / 'history.txt').exists() else None)
         h.commit()
         self.n = Neu(self.w, self.W, self.view - self.TOP, view=self.view - self.TOP); self.n.c.pack()
         self.w.bind('<MouseWheel>', lambda e: self.scroll('scroll', -int(e.delta / 120) * 3, 'units'))
@@ -1891,7 +1895,7 @@ class History:
 
     def build(self, keep=False):
         n = self.n; recs = list(reversed(load_history(20)))
-        fe, fz, fm = fnt(14), fnt(12), fnt(10)
+        fe, fz, fm = fnt(12), fnt(11), fnt(11)
         oy = n.c.canvasy(0) / S if keep else 0  # 展开 / 收起原话后还停在原来滚到的地方
         cards, y = [], self.FADE
         for raw, fixed, zh, when in recs:  # 卡片上面灰字：时间 · 原话（一行放不下时右边有展开钮）；卡片里只有改后的英文 + 中文，复制按钮 28 对着各自那段字上下居中
@@ -1902,21 +1906,21 @@ class History:
             top = y + len(lines) * fm.metrics('linespace') / S + 10  # 灰字下面隔一点就是卡片
             ey = top + max(14, 24 - he / 2)                  # 字离卡片边 14，按钮离卡片边至少 10
             zy = max(ey + he + 8, ey + he / 2 + 34 - hz / 2)  # 两个按钮之间至少隔 6
-            h = max(zy + hz + 14, zy + hz / 2 + 24) - top
+            h = (max(zy + hz + 14, zy + hz / 2 + 24) if zh else max(ey + he + 14, ey + he / 2 + 24)) - top  # 出中文的没有中文那行
             cards.append((y, top, h, ey, he, zy, hz, lines, key if len(full) > 1 else None, fixed, zh, en, cn)); y = top + h + 20
         H = max(self.view - self.TOP, y - 20 + self.FADE_B)  # 拉到底时最后一张卡片露在下面的渐隐带上面
         n.reset(H); n.c.configure(scrollregion=(0, 0, px(self.W), px(H)), yscrollincrement=px(20))
         self.head.c.itemconfigure(self.count, text=f'最近 {len(recs)} 条 · 新的在上面')
-        if not recs: n.text(200, 100, '还没有记录', 13, SUB, anchor='center')
+        if not recs: n.text(200, 100, '还没有记录', 11, SUB, anchor='center')
         for y, top, h, ey, he, zy, hz, lines, key, fixed, zh, en, cn in cards:
-            n.text(40, y, '\n'.join(lines), 10, SUB)
+            n.text(40, y, '\n'.join(lines), 11, SUB)
             if key:  # 原话一行放不下：小圆钮（和复制按钮同一竖列，对着第一行灰字居中），点一下展开全文，再点收起
                 cy = y + fm.metrics('linespace') / S / 2
                 n.button(336, cy - 10, 20, 20, icon=I_UP if key in self.opened else I_DOWN, size=7, d=2, color=ICON_C,
                          cmd=lambda key=key: self.toggle(key))
             n.raised(20, top, 360, h, 24, d=6)
-            n.text(40, ey, '\n'.join(en), 14, TEXT); n.text(40, zy, '\n'.join(cn), 12, '#555555')
-            for t, cy in ((fixed, ey + he / 2), (zh, zy + hz / 2)):
+            n.text(40, ey, '\n'.join(en), 12, TEXT); n.text(40, zy, '\n'.join(cn), 11, SUB)
+            for t, cy in ((fixed, ey + he / 2), (zh, zy + hz / 2))[:2 if zh else 1]:
                 b = n.button(332, cy - 14, 28, 28, icon=I_COPY, size=10, d=3, color=ICON_C)
                 b.cmd = lambda t=t, b=b: (set_clip(t), b.set(icon=I_OK), b.n.c.after(1200, lambda: b.set(icon=I_COPY)))
         self.bar = ScrollBar(n, H, self.view - self.TOP)
@@ -2005,16 +2009,16 @@ class Checks:
         top = 92; by = top + 5 * self.ROW + 16 + 22
         n = self.n = Neu(self.w, self.W, by + 52 + 26); n.c.pack()
         close_btn(n, self.W, self.w.withdraw)
-        n.text(32, 26, 'CHECK', 18, INK, family=DISPLAY); n.text(33, 56, '按提示说话、按键，一项项检查哪里有问题', 12, SUB)
+        n.text(32, 26, 'CHECK', 18, INK, family=DISPLAY); n.text(33, 56, '按提示说话、按键，一项项检查哪里有问题', 11, SUB)
         n.raised(20, top, 360, 5 * self.ROW + 16, 28, d=7)
         self.rows = []
         for i, name in enumerate(CHECKS):
             y = top + 8 + i * self.ROW
             n.inset(36, y + 10, 32, 32, 16, d=3)
-            ic = n.text(52, y + 26, '', 13, SUB, 'bold', anchor='center')
-            n.text(84, y + 10, name, 13, TEXT, 'bold')
+            ic = n.text(52, y + 26, '', 13, SUB, anchor='center')
+            n.text(84, y + 10, name, 12, TEXT)
             self.rows.append((ic, n.text(84, y + 34, '', 11, SUB), y))
-        self.btn = n.button(20, by, 360, 52, r=26, text='开始自检', size=14, weight='bold', color=INK, cmd=self.start)
+        self.btn = n.button(20, by, 360, 52, r=26, text='开始自检', size=12, cmd=self.start)
         n.commit()
         if SELFTEST: self.start()
 
@@ -2034,7 +2038,7 @@ class Checks:
         self.n.c.itemconfigure(d, text=fit(text, fnt(11), px(276), 3), fill=RED if st == 'fail' else SUB)
         if extra is not None:
             def use(): self.app.set_key(extra); self.n.remove(self.extra); self.extra = None
-            self.extra = self.n.button(254, y + 4, 110, 30, r=15, text=f'改用「{key_name(extra)}」', size=11, color=INK, cmd=use)
+            self.extra = self.n.button(254, y + 4, 110, 30, r=15, text=f'改用「{key_name(extra)}」', size=12, cmd=use)
 
     def done(self, ok):
         self.running = False; self.btn.set(text='全部通过 · 再测一次' if ok else '再测一次', color=INK)
