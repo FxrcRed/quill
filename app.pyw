@@ -70,7 +70,7 @@ MIC_SHORT = '麦克风没声音：按静音键（F4 / Fn+F4），或去设置换
 BG, INSET, LIGHT, DARK = '#E6E6E6', '#DFDFDF', '#FFFFFF', '#BDBDBD'
 INK, TEXT, SUB, MUTED, TICK, TICK_MAJ = '#1E1E1E', '#2B2B2B', '#8C8C8C', '#9A9A9A', '#C6C6C6', '#8F8F8F'
 GREEN, ORANGE, RED, TOAST_BG = '#2F9E5B', '#D9822B', '#D64541', '#EFEFEF'
-FONT, FONT_BOLD = 'Microsoft YaHei UI', None  # 启动时有 fonts\NotoSansSC 就换成 Noto Sans SC（思源黑体，SIL OFL 开源）
+FONT, FONT_BOLD = 'Microsoft YaHei UI', None  # 启动时有 fonts\NotoSansSC 就换成 Noto Sans SC Medium / Bold（思源黑体，SIL OFL 开源）
 DISPLAY, ICON = 'Bahnschrift', 'Segoe MDL2 Assets'  # 启动时换成项目里的 Michroma 宽体 / Segoe Fluent Icons（有的话）
 I_SET, I_COPY, I_HIST, I_OK, I_CHECK = '', '', '', '', ''
 I_MIN, I_CLOSE, I_MIC, I_BALL = '\uE921', '\uE8BB', '\uE720', '\uE73F'
@@ -613,7 +613,7 @@ def px(v): return round(v * S)
 _fonts = {}
 def fnt(size, weight='normal', family=None):
     fam = family or FONT
-    if weight == 'bold' and fam == FONT and FONT_BOLD: fam, weight = FONT_BOLD, 'normal'
+    if weight == 'bold' and fam == FONT and FONT_BOLD: fam = FONT_BOLD  # Noto 的 Bold 在系统里叫「Noto Sans SC」，按 bold 取
     key = (fam, -px(size), weight)
     if key not in _fonts: _fonts[key] = tkfont.Font(family=key[0], size=key[1], weight=weight)
     return _fonts[key]
@@ -1034,8 +1034,8 @@ def pfont(size, kind='r'):
     if key not in _pfonts:
         fonts = Path(os.environ.get('WINDIR', r'C:\Windows')) / 'Fonts'
         own = HERE / 'fonts'
-        path = {'r': own / 'NotoSansSC-Regular.otf' if (own / 'NotoSansSC-Regular.otf').exists() else fonts / 'msyh.ttc',
-                'b': own / 'NotoSansSC-Medium.otf' if (own / 'NotoSansSC-Medium.otf').exists() else fonts / 'msyhbd.ttc', 'i': fonts / ('SegoeIcons.ttf' if (fonts / 'SegoeIcons.ttf').exists() else 'segmdl2.ttf')}[kind]
+        path = {'r': own / 'NotoSansSC-Medium.otf' if (own / 'NotoSansSC-Medium.otf').exists() else fonts / 'msyh.ttc',
+                'b': own / 'NotoSansSC-Bold.otf' if (own / 'NotoSansSC-Bold.otf').exists() else fonts / 'msyhbd.ttc', 'i': fonts / ('SegoeIcons.ttf' if (fonts / 'SegoeIcons.ttf').exists() else 'segmdl2.ttf')}[kind]
         try: _pfonts[key] = ImageFont.truetype(str(path), key[0])
         except Exception: _pfonts[key] = ImageFont.truetype(str(fonts / 'msyh.ttc'), key[0])
     return _pfonts[key]
@@ -1999,7 +1999,7 @@ def setup_fonts(root):
     fams = set(tkfont.families(root))
     if 'Michroma' in fams: DISPLAY = 'Michroma'
     if 'Segoe Fluent Icons' in fams: ICON = 'Segoe Fluent Icons'
-    if 'Noto Sans SC' in fams: FONT, FONT_BOLD = 'Noto Sans SC', ('Noto Sans SC Medium' if 'Noto Sans SC Medium' in fams else None)
+    if 'Noto Sans SC Medium' in fams: FONT, FONT_BOLD = 'Noto Sans SC Medium', ('Noto Sans SC' if 'Noto Sans SC' in fams else None)  # 正文用 Medium：Regular 在 Windows 小字号下太细
 
 def quit_app():
     try:

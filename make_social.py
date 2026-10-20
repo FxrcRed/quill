@@ -7,8 +7,8 @@ W, H = 1280, 640
 im = Image.new('RGBA', (W, H), (230, 230, 230, 255)); d = ImageDraw.Draw(im)
 icon = Image.open(HERE / 'icon_dial.png').convert('RGBA').resize((120, 120), Image.LANCZOS); im.alpha_composite(icon, (90, 120))
 title = ImageFont.truetype(str(HERE / 'fonts' / 'Michroma-Regular.ttf'), 76)
-body = ImageFont.truetype(str(HERE / 'fonts' / 'NotoSansSC-Regular.otf'), 34)
-small = ImageFont.truetype(str(HERE / 'fonts' / 'NotoSansSC-Regular.otf'), 26)
+body = ImageFont.truetype(str(HERE / 'fonts' / 'NotoSansSC-Medium.otf'), 34)
+small = ImageFont.truetype(str(HERE / 'fonts' / 'NotoSansSC-Medium.otf'), 26)
 d.text((86, 270), 'QUILL', font=title, fill=(30, 30, 30))
 for i, t in enumerate(['Offline voice typing for Windows.', 'Speak messy English or Chinese,', 'get clean English at your cursor.']):
     d.text((90, 380 + i * 48), t, font=body, fill=(43, 43, 43))
