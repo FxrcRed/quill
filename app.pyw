@@ -1076,6 +1076,8 @@ def draw_lines(d, lines, f, x, y, lh):
         y += lh
     return y
 
+OV_SUB = '#3A3A3C'  # 浮窗里第二层的字（还没定下来的实时识别、原话、中文意思、提示）和细线图标：在玻璃上也要看得清，用深灰不用浅灰
+
 class Overlay:
     """屏幕底部中间的浮窗：说话时实时显示识别的字，之后显示改好的结果（标出改动），或者给两个版本让你点。
     不抢焦点：点它光标还留在你原来的输入框里，所以点了就能直接粘贴进去。"""
@@ -1090,16 +1092,14 @@ class Overlay:
         ex = user32.GetWindowLongW(self.hwnd, -20) | 0x08000000 | 0x80 | 0x8  # 不抢焦点 / 不进任务栏 / 置顶
         user32.ShowWindow(self.hwnd, 0)
         user32.SetWindowLongW(self.hwnd, -20, ex & ~0x80000); user32.SetWindowLongW(self.hwnd, -20, ex | 0x80000)  # 分层：要先清掉再设，否则 UpdateLayeredWindow 报参数错误（87）
-        try: user32.SetWindowDisplayAffinity(ctypes.c_void_p(self.hwnd), 0x11)  # WDA_EXCLUDEFROMCAPTURE：截屏里没有浮窗，玻璃后面才截得到真正的背景（不然会把自己截进去）
-        except Exception: pass
         self.mode, self.d, self.visible, self.pinned, self.inside, self.hover, self.timer = None, {}, False, False, False, None, None
-        self.cards, self.base, self.hits, self.geo, self.wgeo, self.bar_c, self.h = {}, None, [], None, None, (0, 0), self.ROW_H
-        self.backdrop, self.grab_on = (None, None), threading.Event()  # 后面那块屏幕的模糊图 (geo, 图)；浮窗显示时后台每 0.25 秒更新
-        threading.Thread(target=self.grabber, daemon=True).start()
+        self.cards, self.base, self.hits, self.wgeo, self.bar_c, self.h = {}, None, [], None, (0, 0), self.ROW_H
+        self.backdrop = (None, None)  # 浮窗后面那块屏幕的模糊图：(屏幕上的范围, 图)，一次截得比浮窗高，浮窗变高时直接从里面裁
         self.sm, self.lv, self.t0 = [0.0] * 6, 0.0, time.time()
 
     # 对外：每种状态
     def listen(self, by_key):
+        if self.visible: threading.Thread(target=self.refresh_backdrop, args=(True,), daemon=True).start()  # 浮窗还开着就说下一句：背景换新
         self.set('rec', done='', part='', by_key=by_key)
     def live(self, done, part):
         if self.mode == 'rec': self.d.update(done=done, part=part); self.render()
@@ -1135,7 +1135,6 @@ class Overlay:
         if self.timer: self.w.after_cancel(self.timer); self.timer = None
         self.mode, self.pinned = None, False
         if self.visible: user32.ShowWindow(self.hwnd, 0); self.visible = False
-        self.grab_on.clear()
 
     # 画
     def card(self, h):
@@ -1165,26 +1164,42 @@ class Overlay:
         self.h = h; self.card(h)
         return Image.new('RGBA', (px(self.W + 2 * self.M), px(h + 2 * self.M)), (0, 0, 0, 0))
 
+    TALL = 420  # 背景一次截多高（逻辑像素，比浮窗最高的时候还高）
+
     def grab_backdrop(self, box):
-        """浮窗后面那块屏幕：截下来（截屏不含分层窗口，浮窗自己截不进来）→ 缩小模糊 → 稍微加饱和、提亮（上面深色的字才看得清）。
-        只在内存里用。make_demo.py 会把它换成固定的底色。"""
+        """浮窗后面那块屏幕：截下来 → 缩小模糊 → 稍微加饱和、提亮（上面深色的字才看得清）。只在内存里用。
+        make_demo.py 会把它换成固定的底色。"""
         w, h = box[2] - box[0], box[3] - box[1]
         im = ImageGrab.grab(box).convert('RGB')
         im = im.resize((max(1, w // 6), max(1, h // 6)), Image.BILINEAR).filter(ImageFilter.GaussianBlur(2.2)).resize((w, h), Image.BICUBIC)
         im = Image.blend(ImageEnhance.Color(im).enhance(1.3), Image.new('RGB', (w, h), (247, 247, 249)), 0.45)
         return im.convert('RGBA')
 
-    def refresh_backdrop(self):
-        g = self.geo  # 后台线程也会调：先取一份，免得截的位置和记下的对不上
-        try: self.backdrop = (g, self.grab_backdrop((g[2], g[3], g[2] + g[0], g[3] + g[1])))
-        except Exception: self.backdrop = (g, None)  # 截不了（锁屏 / UAC 那种安全桌面）：退回半透明纯色
+    def backdrop_rect(self):
+        """浮窗底边往上 TALL 那么高、和浮窗一样宽的一块（屏幕物理像素）。"""
+        wa = ctypes.wintypes.RECT(); user32.SystemParametersInfoW(0x30, 0, ctypes.byref(wa), 0)
+        w = px(self.W + 2 * self.M); x = wa.left + (wa.right - wa.left - w) // 2; bottom = wa.bottom + px(self.M) - px(18)
+        return (x, bottom - px(self.TALL), x + w, bottom)
 
-    def grabber(self):
-        """后台每 0.25 秒重截一次后面的画面（截一次要三四十毫秒，不放在界面线程）。浮窗藏起来就停。"""
-        while True:
-            self.grab_on.wait()
-            if self.visible and self.geo: self.refresh_backdrop()
-            time.sleep(0.25)
+    def refresh_backdrop(self, hide_self=False):
+        """截浮窗后面的屏幕当玻璃底。平时在浮窗露面之前截（这时它还没显示，截不到自己）。
+        hide_self：浮窗已经开着（接着说下一句）时，只在截的这一下把浮窗排除在截屏外（WDA_EXCLUDEFROMCAPTURE），截完马上恢复，
+        所以别人截屏 / 录屏照样看得到浮窗。"""
+        r = self.backdrop_rect()
+        try:
+            if hide_self:
+                user32.SetWindowDisplayAffinity(ctypes.c_void_p(self.hwnd), 0x11); ctypes.windll.dwmapi.DwmFlush()
+            try: self.backdrop = (r, self.grab_backdrop(r))
+            finally:
+                if hide_self: user32.SetWindowDisplayAffinity(ctypes.c_void_p(self.hwnd), 0)
+        except Exception: self.backdrop = (r, None)  # 截不了（锁屏 / UAC 那种安全桌面）：退回半透明纯色
+
+    def glass(self, box):
+        """玻璃底：从截好的背景里裁出浮窗现在这块；对不上就是半透明纯色。"""
+        r, im = self.backdrop
+        if im is not None and r[0] <= box[0] and r[1] <= box[1] and box[2] <= r[2] and box[3] <= r[3]:
+            return im.crop((box[0] - r[0], box[1] - r[1], box[2] - r[0], box[3] - r[1]))
+        return Image.new('RGBA', (box[2] - box[0], box[3] - box[1]), (233, 233, 235, self.ALPHA))
 
     def render_row(self):
         """正在听 / 改语病 / 结果 / 提示：一行。左边声波条（每帧在 blit 里画；提示是彩色「!」），中间文字上下居中，
@@ -1194,16 +1209,16 @@ class Overlay:
         TX, TW = px(M + 66), px(W - 66 - right)
         blocks = []  # (行, 字体, 行高)
         if m == 'rec':
-            f = pfont(16); runs = [(d['done'] + ' ', INK, False)] * bool(d['done']) + [(d['part'], '#9A9A9A', False)] * bool(d['part'])
-            blocks.append((flow(runs or [('请说中文…' if cfg['lang'] == 'zh' else '请说英文…', '#A8A8A8', False)], f, TW, 3, 'last'), f))
+            f = pfont(16); runs = [(d['done'] + ' ', INK, False)] * bool(d['done']) + [(d['part'], OV_SUB, False)] * bool(d['part'])
+            blocks.append((flow(runs or [('请说中文…' if cfg['lang'] == 'zh' else '请说英文…', OV_SUB, False)], f, TW, 3, 'last'), f))
         elif m == 'busy':
-            f = pfont(15); blocks.append((flow([(d['raw'] or '识别中…', '#8A8A8A', False)], f, TW, 3), f))
+            f = pfont(15); blocks.append((flow([(d['raw'] or '识别中…', OV_SUB, False)], f, TW, 3), f))
         elif m == 'result':
             f = pfont(16); blocks.append((flow(changed_words(d['raw'], d['fixed']), f, TW, 3), f))
-            f2 = pfont(12); blocks.append((flow([(d['zh'] if d['zh'] is not None else '翻译中…', '#6E6E73', False)], f2, TW, 2), f2))
+            f2 = pfont(12); blocks.append((flow([(d['zh'] if d['zh'] is not None else '翻译中…', OV_SUB, False)], f2, TW, 2), f2))
         else:
             tcol = {'err': RED, 'ok': GREEN}.get(d.get('level'), ORANGE)
-            f = pfont(14); blocks.append((flow([(d['text'], TEXT, False)], f, TW, 3), f))
+            f = pfont(14); blocks.append((flow([(d['text'], INK, False)], f, TW, 3), f))
         th = sum(len(ls) * f.size * 1.5 for ls, f in blocks) / S + 2 * (len(blocks) - 1)  # 文字块总高（逻辑像素）
         h = max(self.ROW_H, round(th + 30)); self.hits = []  # 最矮也按「英文一行 + 中文一行」：一句话从正在听到出结果一样高，不会突然变大
         img = self.layer(h); dr = ImageDraw.Draw(img); cy = px(M + h / 2)
@@ -1225,14 +1240,14 @@ class Overlay:
         固定后是图钉、只复制时是复制图标（字形，同样的颜色）。"""
         if kind not in self._badges:
             n, ss = px(30), 4; N = n * ss; im = Image.new('RGBA', (N, N), (0, 0, 0, 0)); d = ImageDraw.Draw(im)
-            ring_w = round(1.3 * S * ss); d.ellipse((ring_w, ring_w, N - ring_w, N - ring_w), outline='#B4B4B9', width=ring_w)
+            ring_w = round(1.3 * S * ss); d.ellipse((ring_w, ring_w, N - ring_w, N - ring_w), outline=OV_SUB, width=ring_w)
             if kind == 'ok':
                 pts = [(0.31 * N, 0.52 * N), (0.45 * N, 0.65 * N), (0.70 * N, 0.37 * N)]; w = round(1.8 * S * ss)
-                d.line(pts, fill='#55555A', width=w, joint='curve')
-                for x, y in (pts[0], pts[-1]): d.ellipse((x - w / 2, y - w / 2, x + w / 2, y + w / 2), fill='#55555A')  # 圆头
+                d.line(pts, fill=INK, width=w, joint='curve')
+                for x, y in (pts[0], pts[-1]): d.ellipse((x - w / 2, y - w / 2, x + w / 2, y + w / 2), fill=INK)  # 圆头
             else:
                 f = ImageFont.truetype(pfont(1, 'i').path, round(11 * S * ss))
-                d.text((N / 2, N / 2), I_PIN if kind == 'pin' else I_COPY, font=f, fill='#55555A', anchor='mm')
+                d.text((N / 2, N / 2), I_PIN if kind == 'pin' else I_COPY, font=f, fill=INK, anchor='mm')
             Overlay._badges[kind] = im.resize((n, n), Image.LANCZOS)
         return self._badges[kind]
 
@@ -1252,7 +1267,7 @@ class Overlay:
             for i, (name, text) in enumerate(zip(('自然', '口语'), d['opts'])):
                 lines = flow(changed_words(d['raw'], text), f, TW - px(76), 3); h = len(lines) * 16 * 1.55 + 22
                 blocks.append(('option', i, name, lines, f, y, h)); y += h + 10
-            f2 = pfont(12); lines = flow([('意思：' + (d['zh'] if d.get('zh') is not None else '翻译中…'), '#6E6E73', False)], f2, TW, 2)
+            f2 = pfont(12); lines = flow([('意思：' + (d['zh'] if d.get('zh') is not None else '翻译中…'), OV_SUB, False)], f2, TW, 2)
             blocks.append(('lines', lines, f2, y + 2)); y += 2 + len(lines) * 12 * 1.55
         h = int(y + 20)
 
@@ -1261,7 +1276,7 @@ class Overlay:
         dr.ellipse((cx - px(15), cy - px(15), cx + px(15), cy + px(15)), fill=INK)  # 左上角小圆章
         dr.text((cx, cy), icon, font=pfont(13, 'i'), fill='white', anchor='mm')
         dr.text((px(M + 64), cy), title, font=pfont(13, 'b'), fill=tcol, anchor='lm')
-        if hint: dr.text((px(M + W - 24), cy), hint, font=pfont(11), fill='#9A9A9A', anchor='rm')
+        if hint: dr.text((px(M + W - 24), cy), hint, font=pfont(11), fill=OV_SUB, anchor='rm')
         for b in blocks:
             if b[0] == 'lines':
                 _, lines, f, by = b; draw_lines(dr, lines, f, L, px(M + by), f.size * 1.55)
@@ -1271,7 +1286,7 @@ class Overlay:
                 hov = self.hover == i
                 dr.rounded_rectangle((x0, y0, x1, y1), px(18), fill=(255, 255, 255, 175) if hov else (255, 255, 255, 80))  # 玻璃上再叠一层半透明白
                 cy2 = y0 + px(11) + f.size * 1.55 / 2
-                dr.rounded_rectangle((x0 + px(12), cy2 - px(12), x0 + px(60), cy2 + px(12)), px(12), fill=INK if hov or i == 0 else '#8E8E93')
+                dr.rounded_rectangle((x0 + px(12), cy2 - px(12), x0 + px(60), cy2 + px(12)), px(12), fill=INK if hov or i == 0 else OV_SUB)
                 dr.text((x0 + px(36), cy2), name, font=pfont(11, 'b'), fill='white', anchor='mm')
                 draw_lines(dr, lines, f, x0 + px(72), y0 + px(11), f.size * 1.55)
                 self.hits.append((x0, y0, x1, y1, i))
@@ -1279,16 +1294,15 @@ class Overlay:
 
     def frame(self, level):
         """每帧调：说话 / 思考时让左上角小光球动起来。"""
-        if self.visible and self.mode: self.blit(level)  # 声波条在动；后面的画面也在后台更新
+        if self.visible and self.mode in ('rec', 'busy', 'result'): self.blit(level)
 
     def blit(self, level=0.0):
         c = self.cards[self.h]; img = c['under'].copy()
         wa = ctypes.wintypes.RECT(); user32.SystemParametersInfoW(0x30, 0, ctypes.byref(wa), 0)
         x, y = wa.left + (wa.right - wa.left - img.width) // 2, wa.bottom - img.height + px(self.M) - px(18)
         geo = (img.width, img.height, x, y)
-        if self.backdrop[0] != geo: self.geo = geo; self.refresh_backdrop()  # 刚显示 / 换了高度：马上截一张对得上的
-        bd = self.backdrop[1]
-        img.paste(bd if bd is not None else Image.new('RGBA', img.size, (233, 233, 235, self.ALPHA)), (0, 0), c['face'])
+        if not self.visible: self.refresh_backdrop()  # 露面之前截后面的屏幕（这时还截不到自己）
+        img.paste(self.glass((x, y, x + img.width, y + img.height)), (0, 0), c['face'])
         img.alpha_composite(c['over']); img.alpha_composite(self.base)
         if self.mode in ('rec', 'busy', 'result'):
             st = 'ready' if self.mode == 'result' else self.mode; t = time.time() - self.t0
@@ -1299,7 +1313,6 @@ class Overlay:
         if self.wgeo != geo: self.wgeo = geo; self.w.geometry(f'{img.width}x{img.height}+{x}+{y}')
         if not self.visible:
             user32.ShowWindow(self.hwnd, 8); user32.SetWindowPos(self.hwnd, -1, 0, 0, 0, 0, 0x13); self.visible = True  # 显示但不激活
-            self.grab_on.set()
         ulw(self.hwnd, img, x, y)
 
     # 鼠标
