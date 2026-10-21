@@ -362,10 +362,15 @@ def ollama_status():
 
 ollama_proc = [None]  # Quill 自己拉起的 Ollama 进程；退出时只关它，不动用户本来开着的
 ollama_owned = [False]  # 这台机器上 Ollama 只给 Quill 用：启动时已经在跑的也算 Quill 的，退出一起关
-def start_ollama():
+ollama_retry = [0.0]  # 自动启动失败后，这个时间之前不再自动试（没装 Ollama 的电脑别每 28 秒拉一次、弹一次提示）
+def start_ollama(quiet=False):
+    """拉起 ollama serve，成功启动进程返回 True。quiet：自动重试时不再弹提示（第一次失败已经提示过）。"""
     exe = shutil.which('ollama') or os.path.expandvars(r'%LOCALAPPDATA%\Programs\Ollama\ollama.exe')
-    try: ollama_proc[0] = subprocess.Popen([exe, 'serve'], creationflags=0x08000000, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except Exception: log('启动 Ollama 失败', traceback.format_exc()); notify('找不到改错服务 Ollama，可能没装好。', 'err')
+    try: ollama_proc[0] = subprocess.Popen([exe, 'serve'], creationflags=0x08000000, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); return True
+    except Exception:
+        log('启动 Ollama 失败', traceback.format_exc())
+        if not quiet: notify('找不到改错服务 Ollama，可能没装好。', 'err')
+        return False
 
 def stop_ollama():
     """退出时关掉 Ollama。只关 Quill 拉起的那个；启动时就已经在跑的（ollama_owned）也关——这机器上只有 Quill 用它。"""
@@ -379,15 +384,17 @@ def stop_ollama():
     except Exception: log('关闭 Ollama 失败', traceback.format_exc())
 
 def ensure_ollama(wait=20):
-    """改错服务没开就自己拉起（用户不该管这个）。返回等待后的最新状态。"""
+    """改错服务没开就自己拉起（用户不该管这个）。返回等待后的最新状态。失败后 10 分钟内不再自动试，只第一次弹提示。"""
     st = ollama_status()
-    if st != 'down': ollama_owned[0] = True; return st
+    if st != 'down': ollama_owned[0] = True; ollama_retry[0] = 0.0; return st
+    if time.time() < ollama_retry[0]: return st
     log('改错服务没开，自动启动')
-    start_ollama(); end = time.time() + wait
-    while time.time() < end:
-        time.sleep(1); st = ollama_status()
-        if st != 'down': ollama_owned[0] = True; log('改错服务已自动启动'); return st
-    log('自动启动改错服务没成功'); return st
+    if start_ollama(quiet=ollama_retry[0] > 0):
+        end = time.time() + wait
+        while time.time() < end:
+            time.sleep(1); st = ollama_status()
+            if st != 'down': ollama_owned[0] = True; ollama_retry[0] = 0.0; log('改错服务已自动启动'); return st
+    log('自动启动改错服务没成功，10 分钟后再试'); ollama_retry[0] = time.time() + 600; return st
 
 
 # ---- 录音 / 识别 ----
@@ -513,11 +520,18 @@ class Seg:
     def __init__(self, raw, mode, ctx='', lang='en'):
         self.raw, self.mode, self.ctx, self.lang, self.out, self.cv = raw, mode, ctx, lang, {}, threading.Condition()
         self.dead = False  # 被合进后一段了：还没开始改就不用改了
-        self.text = apply_glossary(raw)  # 送去改的文字：先按常用词表换掉听错的词（出中文时还要用规则删口头禅 / 重复）
-        if lang == 'zhzh':  # 说中文 → 出中文：没有翻译那行；没有改口就不用等模型
-            self.text, self.out['zh'] = zh_fix_inside(zh_tidy(self.text)), ''
-            if not zh_needs_llm(self.text): self.out['fixed'] = self.text; return
+        self.text = raw  # 送去改的文字，prep() 在后台换词 / 理干净
+        if lang == 'zhzh': self.out['zh'] = ''  # 说中文 → 出中文：没有翻译那行
         fixq.put(self)
+
+    def prep(self):
+        """后台（fix_worker）里做：先按常用词表换掉听错的词，出中文再用规则删口头禅 / 重复。返回还要不要送模型改。
+        不放在 __init__：易混词要问一次模型（is_term），Ollama 正忙 / 在载入时要排队，放录音线程里浮窗实时文字会停住等它。"""
+        self.text = apply_glossary(self.raw)
+        if self.lang == 'zhzh':
+            self.text = zh_fix_inside(zh_tidy(self.text))
+            if not zh_needs_llm(self.text): self.put('fixed', self.text); return False  # 没有改口、不用改错字：不等模型
+        return True
 
     def put(self, k, v):
         with self.cv: self.out[k] = v; self.cv.notify_all()
@@ -531,7 +545,8 @@ def fix_worker():
     while True:
         s = fixq.get()
         if s.dead: continue
-        try: llm(s.text, s.mode, s.put, ctx=s.ctx, lang=s.lang)
+        try:
+            if s.prep(): llm(s.text, s.mode, s.put, ctx=s.ctx, lang=s.lang)
         except Exception as e:
             log('改错失败：', repr(e)); err = '（' + llm_error(e) + '）'
             if s.lang == 'zhzh': notify(llm_error(e), 'warn')  # 没有翻译那行可以放提示
@@ -1976,7 +1991,7 @@ class App:
                         for h, c, src in find_candidates([t for _, t in part]): st['cands'].setdefault(f'{h.lower()}\t{c}', [h, c, src])
                         st['done'] = part[-1][0]
                     else: st['at'] = time.time()
-                except Exception as e: log('找候选词失败：', repr(e))
+                except Exception as e: log('找候选词失败，1 小时后再试：', repr(e)); st['at'] = time.time() - 86400 + 3600  # 别每 5 分钟重试一次（每次最多占模型 60 秒）
                 with scan_lock: st['ignored'] = scan_load()['ignored']; scan_save(st)  # 扫的时候用户可能点了「忽略」，别用开扫前读的盖掉
                 if st['at'] > time.time() - 60: log(f'找候选词：扫了 {len(new)} 句，{len(word_sugs())} 个待确认'); post('words')
             time.sleep(300)
