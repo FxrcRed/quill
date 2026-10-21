@@ -36,6 +36,7 @@ all of that verbatim, or send my voice to the cloud. Quill does the cleanup loca
 - **Fast** — while you talk, finished sentences are already being corrected; in English the text usually appears ~0.5 s after you let go (NVIDIA GPU).
 - **Two output modes** — *Direct* (type it right away) or *Pick* (choose between a natural and a casual version).
 - **See what changed** — a small overlay at the bottom of the screen shows live transcription, the words that were fixed, and a Chinese translation.
+- **Learns your words** — a word list on the home screen (names, project names, tools). Write `Claude: cloud` and Quill decides from context whether "cloud" meant Claude. While idle, it reads your history once a day and suggests words it probably misheard; one tap to add or ignore.
 - **100% local** — speech recognition and the language model run on your machine. History is a plain text file that never leaves it.
 - Soft-UI (neumorphism) interface, floating mini ball, history with one-click copy, built-in self-test.
 
@@ -77,6 +78,7 @@ Then start **Quill** from the desktop, wait for **READY**, hold **Right Alt** an
 - Settings: microphone, hotkey (click *Record* and press any key), output mode, and a self-test that checks every part.
 - The shrink button (two arrows, top right) turns Quill to a floating ball at the edge of the screen; click it to come back.
 - History keeps the last 20 sentences: the original speech, the English, and the Chinese meaning. You can turn saving off, keep only the last 7 / 30 days, or clear it.
+- **Words** (bottom card on the home screen): click it to add, edit or delete entries, or open `words.txt` in a text editor. One entry per line: `Correct spelling: misheard, another misheard` (the part after the colon is optional).
 - Ollama is started with Quill and stopped when Quill quits; the model leaves GPU memory after it sits idle (2 / 10 / 30 minutes, or never — in Settings).
 
 ## Development
@@ -84,6 +86,7 @@ Then start **Quill** from the desktop, wait for **READY**, hold **Right Alt** an
 - All of the app is one file: [`app.pyw`](app.pyw) (tkinter + Pillow for the UI).
 - `e2e_test.py [zh]` — end-to-end test without a microphone (feeds a wav at real-time speed).
 - `fix_test.py [pick] [zh]` — compare correction output on real-world phrases after changing prompts.
+- `term_test.py` — checks how well the model tells a misheard name (cloud → Claude) from the ordinary word.
 - `make_demo.py` — regenerates the GIF and screenshot above.
 - The project was built together with Claude Code.
 

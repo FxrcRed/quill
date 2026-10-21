@@ -92,6 +92,7 @@ DISPLAY, ICON = 'Bahnschrift', 'Segoe MDL2 Assets'  # 启动时换成项目里�
 I_SET, I_COPY, I_HIST, I_OK, I_CHECK = '', '', '', '', ''
 I_MIN, I_CLOSE, I_MIC, I_BALL = '\uE921', '\uE8BB', '\uE720', '\uE73F'
 I_DOWN, I_UP = '\uE70D', '\uE70E'  # 记录里展开 / 收起原话
+I_EDIT, I_DEL = '\uE70F', '\uE74D'  # 常用词窗口：改 / 删
 I_PIN = '\uE718'  # 浮窗固定后右边的图钉
 ICON_C = '#555555'  # 图标按钮平时的颜色
 S = 1.0  # 屏幕缩放（150% = 1.5），界面坐标都按 100% 写，画的时候乘 S
@@ -135,35 +136,140 @@ def save_cfg():
 WORDS_FILE = HERE / 'words.txt'  # 常用词表（人名、项目名、中英混说的词），一行一个，# 开头是注释；识别听错时模型按它的写法改
 WORDS_HEAD = ('# 常用词：一行一个（人名、项目名、中英混说的词）。存盘后下一句就生效。\n'
               '# 只写词：大小写统一成这里的写法（github → GitHub），也提示改错模型。\n'
-              '# 「正确写法: 听错的写法, 另一种听错的写法」：识别出听错的写法就直接换掉，例如  Claude: cloud\n')
+              '# 「正确写法: 听错的写法, 另一种听错的写法」：识别出听错的写法时看上下文决定换不换（cloud 也可能真是云；每次多约 0.2 秒），例如  Claude: cloud\n')
+def term_rx(a):
+    """词表里一个写法的正则：中间有空格的，识别结果里那处是空格 / 句号 / 逗号都算；英文前后不能挨着别的字母（que 不匹配 queil）。"""
+    rx = r'[\s。，,]*'.join(re.escape(p) for p in a.split())
+    if re.match(r'[A-Za-z0-9]', a): rx = r'(?<![A-Za-z0-9])' + rx
+    if re.search(r'[A-Za-z0-9]$', a): rx += r'(?![A-Za-z0-9])'
+    return re.compile(rx, re.I)
+
 _glossary = [None, [], '', []]
 def glossary():
-    """(词表, 提示词里加的那段, [(听错的写法正则, 正确写法)])。按文件修改时间缓存，用户改了存盘下一句就生效。
-    听错的写法靠替换不靠模型：8B 模型给了词表也不敢把 cloud 改成 Claude（2026-10-21 试过三种放法）。"""
+    """(词表, 提示词里加的那段, [(正则, 正确写法, 听错的写法 / None)])。按文件修改时间缓存，用户改了存盘下一句就生效。
+    听错的写法不靠改错模型（8B 给了词表也不敢把 cloud 改成 Claude，2026-10-21 试过三种放法），每条单独问一次 is_term()；
+    正确写法本身（听错的写法 None）只统一大小写，直接换。"""
     try: mt = WORDS_FILE.stat().st_mtime
     except OSError: return [], '', []
     if mt != _glossary[0]:
-        terms, subs = [], []
+        terms, subs, asks = [], [], []
         try: lines = WORDS_FILE.read_text(encoding='utf-8-sig').splitlines()
         except Exception: lines = []
         for ln in lines:
-            ln = ln.strip()
-            if not ln or ln.startswith('#'): continue
-            term, _, alts = ln.replace('：', ':').partition(':'); term = term.strip()
-            if not term: continue
+            if not (p := parse_word(ln)): continue
+            term, alts = p
             terms.append(term)
-            for a in [term] + [a.strip() for a in re.split(r'[,，、]', alts) if a.strip()]:
-                rx = r'[\s。，,]*'.join(re.escape(p) for p in a.split())  # 听错的写法中间有空格的，识别结果里那处是空格 / 句号 / 逗号都算
-                if re.match(r'[A-Za-z0-9]', a): rx = r'(?<![A-Za-z0-9])' + rx
-                if re.search(r'[A-Za-z0-9]$', a): rx += r'(?![A-Za-z0-9])'
-                subs.append((re.compile(rx, re.I), term))
+            for a in [term] + alts:  # 以前要加 ? 才看上下文，现在都看，? 照样认（parse_word 去掉了）
+                if a is not term and a.lower() == term.lower(): continue
+                if a is term:
+                    if term != term.lower(): subs.append((term_rx(a), term, None))  # 全小写的（skill）不统一，不然句首的 Skill 也变小写
+                else: asks.append((term_rx(a), term, a))
+        asks.sort(key=lambda x: -len(x[2]))  # 长的先：cloud code 先判，不然 cloud 先被挖掉
         hint = ('\nThe speaker often talks about these names and terms: ' + ', '.join(terms) + '. Keep them written exactly like this.') if terms else ''
-        _glossary[:] = [mt, terms, hint, subs]
+        _glossary[:] = [mt, terms, hint, asks + subs]
     return _glossary[1], _glossary[2], _glossary[3]
 
+# 把听错的词挖空让模型填：直接问「这个 cloud 是不是 Claude」它会认死字面全答否（term_test.py：直接问 9/18，挖空 + 拿不准选名字 26/28）
+TERM_PROMPT = ('One word in this sentence was replaced by ___. It is either "{term}" (a name: a tool, app, product or person the speaker uses, talks to or works with every day) '
+               'or the ordinary word "{heard}". The speaker talks about {term} far more often than about {heard}. '
+               'Choose "{heard}" only when the sentence clearly uses its ordinary meaning; if unsure, choose "{term}". '
+               'Answer only JSON {{"word": "{term}"}} or {{"word": "{heard}"}}.')
+_term_memo = {}
+def is_term(t, rx, term, heard):
+    """句子里的 heard 是不是 term（cloud 可能真是云）。约 0.2 秒；同一句只问一次；出错算是 term（和以前直接替换一样）。"""
+    q = rx.sub('___', t)
+    if (q, term) not in _term_memo:
+        body = {'model': LLM_MODEL, 'stream': False, 'think': False, 'format': 'json', 'keep_alive': cfg.get('keep', '2m'),
+                'options': {**llm_opts()[0], 'temperature': 0},  # num_ctx 要和改错一样：不一样 Ollama 每次都重新载入模型（踩过，一句慢到 10 秒）
+                'messages': [{'role': 'system', 'content': TERM_PROMPT.format(term=term, heard=heard)}, {'role': 'user', 'content': q}]}
+        try:
+            with urllib.request.urlopen(urllib.request.Request(LLM_URL + '/api/chat', json.dumps(body).encode(), {'Content-Type': 'application/json'}), timeout=10) as r:
+                w = str(json.loads(json.loads(r.read())['message']['content']).get('word', ''))
+        except Exception as e: log('判断易混词失败：', repr(e)); return True
+        if len(_term_memo) > 200: _term_memo.clear()
+        _term_memo[q, term] = w.lower() != heard.lower()
+        log(f'易混词 {heard} → {term if _term_memo[q, term] else heard}')
+    return _term_memo[q, term]
+
 def apply_glossary(t):
-    for rx, term in glossary()[2]: t = rx.sub(term, t)
+    for rx, term, heard in glossary()[2]:
+        if heard is None or (rx.search(t) and is_term(t, rx, term, heard)): t = rx.sub(lambda m: term, t)  # 用函数：写法里有 \ 时 sub 会当转义
     return t
+
+def parse_word(ln):
+    """词表一行 → (正确写法, [听错的写法])；注释 / 空行 / 没有正确写法的返回 None。中文冒号、逗号、顿号也认，结尾 ? 是旧写法。"""
+    ln = ln.strip()
+    if not ln or ln.startswith('#'): return None
+    term, _, alts = ln.replace('：', ':').partition(':')
+    return (term.strip(), [a for a in (a.strip().rstrip('?？').strip() for a in re.split(r'[,，、]', alts)) if a]) if term.strip() else None
+
+def glossary_known():
+    """词表里已有的写法（正确的、听错的），小写。"""
+    return {t.lower() for t in glossary()[0]} | {h.lower() for _, _, h in glossary()[2] if h}
+
+
+# ---- 找可能听错的词：闲着时每天扫一次新记录，说过 ≥2 次的放到记录窗口的「常用词」卡片里，用户点「加入 / 忽略」（不自动加：模型猜的正确写法会错，如奥拉玛 → 阿拉马）----
+SCAN_FILE = HERE / 'words_scan.json'  # 扫到哪条记录了、找到的候选、忽略过的（不进 git）
+scan_lock = threading.Lock()  # 后台扫词和界面点「忽略」都读改写 SCAN_FILE
+SCAN_CHARS, SCAN_MIN = 1200, 2  # 每批约 1200 字：太多会超出 num_ctx，模型停不下来；说过几次才提示
+SCAN_PROMPT = ('These are raw speech-recognition transcripts from one speaker, a programmer who mixes Chinese and English and often talks about '
+               'AI tools, apps, coding and their own projects. Find words that are probably MISRECOGNIZED: names of tools / apps / products / '
+               'people / technical terms written wrong (e.g. "cloud" for Claude, "archK factsects" for Artifacts), or Chinese homophone errors. '
+               '"heard" must be copied exactly from the text. Skip ordinary words that are already correct. Only list ones you are fairly sure about. '
+               'Answer only JSON {"items": [{"heard": "...", "correct": "..."}]}.')
+
+def scan_load():
+    try: return {'done': '', 'at': 0, 'cands': {}, 'ignored': [], **json.loads(SCAN_FILE.read_text(encoding='utf-8'))}
+    except Exception: return {'done': '', 'at': 0, 'cands': {}, 'ignored': []}
+
+def scan_save(st):
+    try: SCAN_FILE.write_text(json.dumps(st, ensure_ascii=False, indent=1), encoding='utf-8')
+    except Exception: log('存候选词失败', traceback.format_exc())
+
+def scan_batches(items, key=lambda x: x):
+    """按字数分批（每批约 SCAN_CHARS 字）。"""
+    out, cur, n = [], [], 0
+    for it in items:
+        k = min(len(key(it)), SCAN_CHARS)
+        if cur and n + k > SCAN_CHARS: out.append(cur); cur, n = [], 0
+        cur.append(it); n += k
+    return out + ([cur] if cur else [])
+
+def find_candidates(part):
+    """一批识别原话 → 模型觉得听错的 [(听到的写法, 正确写法, 例句)]。听到的写法要真在原话里（模型会编），已在词表里的不要。"""
+    body = {'model': LLM_MODEL, 'stream': False, 'think': False, 'format': 'json', 'keep_alive': cfg.get('keep', '2m'),
+            'options': {**llm_opts()[0], 'temperature': 0, 'num_predict': 400},  # num_ctx 和改错一样，不然要重新载入模型
+            'messages': [{'role': 'system', 'content': SCAN_PROMPT}, {'role': 'user', 'content': '\n'.join(t[:SCAN_CHARS] for t in part)}]}
+    with urllib.request.urlopen(urllib.request.Request(LLM_URL + '/api/chat', json.dumps(body).encode(), {'Content-Type': 'application/json'}), timeout=60) as r:
+        reply = json.loads(r.read())['message']['content']
+    known, out = glossary_known(), []
+    for h, c in re.findall(r'"heard"\s*:\s*"((?:[^"\\]|\\.)*)"\s*,\s*"correct"\s*:\s*"((?:[^"\\]|\\.)*)"', reply):  # 不整个 json.loads：输出到 num_predict 被截断时前面写完的几条照样能用
+        h, c = json.loads(f'"{h}"').strip(), json.loads(f'"{c}"').strip()
+        if not h or not c or h.lower() == c.lower() or h.lower() in known: continue
+        if ' ' in c and c == c.lower(): continue  # 全小写的短语（round → run out）是语法，改错会管，不是听错的名字
+        if len(h) > 12 or re.search(r'[。，？！,.?!]', h): continue  # 模型有时把整句中文的改写当成听错
+        src = next((s for s in part if term_rx(h).search(s)), None)
+        if src: out.append((h, c, src))
+    return out
+
+def said_lines(blocks):
+    return [(b[:16], l[2:].strip()) for b in blocks for l in b.split('\n') if l.startswith('说：') and len(l) > 4]
+
+_sugs = [None, []]
+def word_sugs():
+    """记录窗口常用词卡片里要提示的候选词 [(听到, 正确写法, 说过几次, 例句)]：说过 ≥ SCAN_MIN 次、没忽略过、还没进词表的，次数多的在前。"""
+    if not cfg.get('hist', True): return []
+    try: key = (SCAN_FILE.stat().st_mtime, WORDS_FILE.stat().st_mtime if WORDS_FILE.exists() else 0)
+    except OSError: return []
+    if _sugs[0] != key:
+        st, known = scan_load(), glossary_known()
+        said, out = [t for _, t in said_lines(hist_blocks())], []
+        for k, (h, c, src) in st['cands'].items():
+            if k in st['ignored'] or h.lower() in known: continue
+            n = sum(len(term_rx(h).findall(s)) for s in said)
+            if n >= SCAN_MIN: out.append((h, c, n, src))
+        _sugs[:] = [key, sorted(out, key=lambda x: -x[2])]
+    return _sugs[1]
 
 ui = queue.Queue()  # 后台线程 → 界面线程
 def post(*m): ui.put(m)
@@ -907,7 +1013,7 @@ class Neu:
 
     def commit(self):
         self.photo = ImageTk.PhotoImage(self.img)
-        self.c.tag_lower(self.c.create_image(0, 0, anchor='nw', image=self.photo))
+        self.bg = self.c.create_image(0, 0, anchor='nw', image=self.photo); self.c.tag_lower(self.bg)
         self.ready = True
         for b in self.btns: b.make()
         self.c.tag_raise('txt')
@@ -936,6 +1042,16 @@ class Neu:
         elif b.cmd and self._hit(e) is b: b.cmd()
 
     def _motion(self, e): self.c.configure(cursor='hand2' if self._hit(e) else '')
+
+
+class CardBtn:
+    """整张卡片当一个按钮（主页常用词卡片）：按下时把画布底图换成卡片凹下去的那张，里面的按钮在那张图里照样凸着。
+    不用 Btn：Btn 按下是贴一块图盖住，会把卡片里画在底图上的按钮也盖掉。放在 btns 最前面，里面的按钮先被点到。"""
+    hold, visible = None, True
+    def __init__(self, n, box, down, cmd): self.n, self.box, self.cmd, self.ph = n, box, cmd, (n.photo, ImageTk.PhotoImage(down))
+    def make(self): pass
+    def contains(self, x, y): bx, by, w, h = self.box; return bx <= x <= bx + w and by <= y <= by + h
+    def set_down(self, v): self.n.c.itemconfigure(self.n.bg, image=self.ph[v])
 
 
 class Btn:
@@ -1093,7 +1209,8 @@ class Chrome:
             img = Image.new('RGBA', size, (0, 0, 0, 0)); sm = Image.new('L', size, 0)
             ImageDraw.Draw(sm).rounded_rectangle((M + px(6), M + px(12), M + w - px(6), M + hh + px(4)), R, fill=110)
             shadow = Image.new('RGBA', size, (40, 40, 48, 0)); shadow.putalpha(_blur(sm, px(14))); img.alpha_composite(shadow)
-            img.paste(Image.new('RGBA', size, BG), (0, 0), _shape(size, box, R, 2))
+            bg = Image.new('RGBA', size, BG); bg.putalpha(_shape(size, box, R, 2))
+            img.alpha_composite(bg)  # 不能用 paste(mask)：它把底色和阴影层的深色 RGB 直接按 mask 混，圆角边缘会出一圈深灰（阴影全透明处也会）
             ulw(self.shwnd, img, x - M, y - M)
         elif self.geo[:2] != (x, y):
             user32.SetWindowPos(self.shwnd, None, x - M, y - M, 0, 0, 0x15)
@@ -1121,9 +1238,6 @@ def set_win_icon(hwnd):
     user32.SendMessageW(hwnd, 0x80, 1, big); user32.SendMessageW(hwnd, 0x80, 0, small)  # WM_SETICON 大 / 小
     user32.SetClassLongPtrW(hwnd, -14, big); user32.SetClassLongPtrW(hwnd, -34, small)  # GCLP_HICON / GCLP_HICONSM
 
-def wa_left():
-    wa = ctypes.wintypes.RECT(); user32.SystemParametersInfoW(0x30, 0, ctypes.byref(wa), 0); return wa.left
-
 def sub_window(app, title, w, anchor=None):
     """设置 / 自检 / 记录 / 小弹窗：无边框圆角窗口。小弹窗（anchor=(屏幕x左, 屏幕y顶)）马上显示；其他的先藏着。"""
     t = tk.Toplevel(app.root); t.withdraw(); t.title(title); t.configure(bg=BG)
@@ -1136,11 +1250,38 @@ def sub_window(app, title, w, anchor=None):
     return t  # 设置 / 记录 / 自检先藏着，由 App._open 摆好位置再显示
 
 def place_side(app, t, w):
-    """放在主窗口和已经开着的子窗口左边；左边放不下就退回主窗口旁边、往下错开一点。"""
-    side = [c.win for c in CHROMES if getattr(c, 'side', False) and c.win is not t and c.win.winfo_exists() and c.win.winfo_viewable()]
-    x, y = min([app.root.winfo_x()] + [v.winfo_x() for v in side]) - px(w) - px(24), app.root.winfo_y()
-    if x < wa_left(): x, y = max(wa_left(), app.root.winfo_x() - px(w) - px(24)), app.root.winfo_y() + px(40) * len(side)
-    t.geometry(f'+{x}+{y}')
+    """新开的子窗口放在最左边，和开着的子窗口、主窗口排成一排（从左到右按现在的位置，间隔 20，顶边对齐主窗口）。
+    左边放不下就整排挪到屏幕正中；还放不下就缩小间隔。四个窗口（主页 / 设置 / 记录 / 常用词）都开着也不重叠。"""
+    side = sorted((c.win for c in CHROMES if getattr(c, 'side', False) and c.win is not t and c.win.winfo_exists() and c.win.winfo_viewable()),
+                  key=lambda v: v.winfo_x())
+    row = [(t, px(w))] + [(v, v.winfo_width()) for v in side] + [(app.root, app.root.winfo_width())]
+    wa = ctypes.wintypes.RECT(); user32.SystemParametersInfoW(0x30, 0, ctypes.byref(wa), 0)
+    total, gap, k = sum(ww for _, ww in row), px(20), len(row) - 1
+    right = app.root.winfo_x() + app.root.winfo_width()
+    if right - total - gap * k < wa.left:
+        gap = max(0, min(gap, (wa.right - wa.left - total) // max(1, k)))
+        right = (wa.left + wa.right + total + gap * k) // 2
+    x, y, moves = right, app.root.winfo_y(), []
+    for v, ww in reversed(row):
+        x -= ww
+        if v is t: t.geometry(f'+{x}+{y}')
+        elif v.winfo_x() != x: moves.append((v, x, v.winfo_y()))
+        x -= gap
+    move_together(moves)
+
+def move_together(moves):
+    """几个窗口连阴影一次挪好（DeferWindowPos，系统一起合成）。一个个 geometry() 会闪：Tk 等空闲才真挪，
+    阴影紧跟着 sync 时窗口还在原地，下一帧才追上，几个窗口先后跳一下。"""
+    if not moves: return
+    d = user32.BeginDeferWindowPos(2 * len(moves))
+    for v, x, y in moves:
+        c = v.chrome; M = px(c.M)
+        d = user32.DeferWindowPos(d, c.hwnd, None, x, y, 0, 0, 0x15)  # NOSIZE | NOZORDER | NOACTIVATE
+        if c.shown: d = user32.DeferWindowPos(d, c.shwnd, None, x - M, y - M, 0, 0, 0x15)
+    user32.EndDeferWindowPos(d)
+    for v, x, y in moves:
+        v.geometry(f'+{x}+{y}')  # Tk 记的位置也改过来（已经在那儿了，不会再挪），不然它以后重排时会挪回去
+        if v.chrome.geo: v.chrome.geo = (x, y) + v.chrome.geo[2:]
 
 BAR_BASE = (0.34, 0.68, 1.0, 0.55, 0.84, 0.40)  # 苹果 SpeechAnalyzer 图标那种 6 根圆头声波条，平时的高矮
 BAR_COL = {'loading': ('#D4D4D9', '#A9A9AF'), 'error': ('#FF9186', '#D64541')}
@@ -1189,6 +1330,8 @@ for _fn, _res, _args in ((gdi32.CreateCompatibleDC, _vp, [_vp]), (gdi32.CreateDI
                          (user32.SendMessageW, _vp, [_vp, ctypes.c_uint, _vp, _vp]), (user32.SetClassLongPtrW, _vp, [_vp, ctypes.c_int, _vp]),
                          (user32.SetWindowPos, ctypes.c_int, [_vp, _vp] + [ctypes.c_int] * 4 + [_u32]),  # HWND_TOPMOST=-1 要按指针传，按 int 传在 64 位上会坏
                          (user32.GetDC, _vp, [_vp]), (user32.ReleaseDC, ctypes.c_int, [_vp, _vp]),
+                         (user32.BeginDeferWindowPos, _vp, [ctypes.c_int]), (user32.DeferWindowPos, _vp, [_vp, _vp, _vp] + [ctypes.c_int] * 4 + [_u32]),
+                         (user32.EndDeferWindowPos, ctypes.c_int, [_vp]),
                          (user32.UpdateLayeredWindow, ctypes.c_int, [_vp, _vp, _vp, _vp, _vp, _vp, _u32, _vp, _u32])):
     _fn.restype, _fn.argtypes = _res, _args
 
@@ -1633,21 +1776,21 @@ class Dial:
 WORDS = {'loading': 'WAKING', 'ready': 'READY', 'rec': 'LISTENING', 'busy': 'THINKING', 'error': 'ERROR'}
 
 class App:
-    W, H = 400, 626
+    W, H = 400, 512  # 主画布到「记录 / 设置」下面 10；再往下是常用词那块画布（wn），两块的接缝在两排卡片中间的空隙里
 
     def __init__(self, root):
         self.root = root; root.title(TITLE); root.configure(bg=BG)
         self.chrome = Chrome(root, taskbar=True, R=48)  # 卡片 r28 + 离边 20
         root.protocol('WM_DELETE_WINDOW', quit_app)
         self.state, self.sil_since, self.shown, self.mic = 'loading', time.time(), 0.0, 'ok'
-        self.notice_until, self.ol_last, self.ol_starting, self.last = 0.0, None, 0.0, None
-        self.settings = self.check_win = self.history = self.pop = None
+        self.notice_until, self.ol_last, self.ol_starting = 0.0, None, 0.0
+        self.settings = self.check_win = self.history = self.words = self.pop = None
         self.pop_closed = (None, 0.0)  # 小弹窗刚因为焦点跑掉被关：同一次点击别又打开
         self.cur, self.pick_job = None, None  # 当前这句 [原话, 输入的英文, 中文]；等着挑的版本
 
         n = self.n = Neu(root, self.W, self.H); n.c.pack()
         # 能点的都是凸起的，凹下去的只放内容。和设置 / 记录窗口一套网格：左右离边 20，标题行一样，第一张卡片顶边 y=92，
-        # 卡片之间都隔 20，卡片圆角 28（窗口圆角 48 = 28 + 20）；「上一句」右边的复制图标和齿轮同样大、圆心在同一竖线（x=348）
+        # 卡片之间都隔 20，卡片圆角 28（窗口圆角 48 = 28 + 20）
         n.text(32, 26, 'QUILL', 18, INK, family=DISPLAY)  # 和 SETTINGS 一样的宽体大字
         n.text(33, 56, '英文语音输入', 11, SUB)
         n.button(274, 30, 30, 30, icon=I_BALL, size=9, d=3, color=ICON_C, cmd=self.to_ball)   # 缩成悬浮球
@@ -1659,19 +1802,16 @@ class App:
         self.dial = Dial(n, 200, 296, 104, (lambda: eng.start('mouse'), eng.stop))
         # 说哪种语言（出来的都是英文）：两个小胶囊和 READY 同一行、右边对齐卡片内边；选中的凹下去
         self.lang_sw = Switch(n, 276, 110, 40, 28, 4, (('en', 'EN'), ('zh', '中')), cfg['lang'], self.set_lang); n.btns.append(self.lang_sw)
-        self.b_copy = n.button(20, 438, 360, 78, r=39, icon=I_COPY, size=16, d=5, color=ICON_C, align='left', cmd=self.copy_last)  # 上一句：整条点一下复制
-        self.l_en = n.text(48, 456, '还没有记录', 12, TEXT)  # 不显示「上一句 · 时间」，英文 + 中文两行在条里上下居中
-        self.l_zh = n.text(48, 480, '', 11, SUB)
-        n.button(20, 536, 276, 64, r=32, icon=I_HIST, text='记录', size=12, color=ICON_C, d=5, cmd=self.open_history)
-        n.button(316, 536, 64, 64, icon=I_SET, size=16, d=5, color=ICON_C, cmd=self.open_settings)
+        n.button(20, 438, 276, 64, r=32, icon=I_HIST, text='记录', size=12, color=ICON_C, d=5, cmd=self.open_history)
+        n.button(316, 438, 64, 64, icon=I_SET, size=16, d=5, color=ICON_C, cmd=self.open_settings)
+        n.raised(20, 522, 360, 92, 28, d=7)  # 下面常用词卡片顶上的光伸到这块画布里，也画上，接缝才看不出来
         n.commit()
-
-        r = load_history(1) if cfg.get('hist', True) else []
-        if r: self.set_last(*r[-1])
+        self.wn = Neu(root, self.W, 122); self.wn.c.pack(); self.build_words()
         self.set_state('loading')
         self.overlay = Overlay(self); self.ball = Ball(self)
         root.after(2500, self.prewarm)
         threading.Thread(target=self.ollama_loop, daemon=True).start()
+        threading.Thread(target=self.words_loop, daemon=True).start()
         self.poll()
 
     # 子窗口
@@ -1685,7 +1825,7 @@ class App:
 
     def prewarm(self):
         """启动后先把设置、记录窗口在后台建好（藏着），第一次点开也不卡。"""
-        for attr, cls in (('settings', Settings), ('history', History)):
+        for attr, cls in (('settings', Settings), ('history', History), ('words', Words)):
             if not self.alive(attr): setattr(self, attr, cls(self))
 
     def open_settings(self): self._open('settings', Settings)
@@ -1708,15 +1848,49 @@ class App:
         for a in ('settings', 'pop'):
             if self.alive(a): getattr(self, a).build()
 
-    def copy_last(self):
-        if not self.last: return
-        set_clip(self.last); self.b_copy.set(icon=I_OK)
-        self.root.after(1200, lambda: self.b_copy.set(icon=I_COPY))
+    def build_words(self):
+        """主页最下面的常用词卡片：标题 + 灰字词表，整张卡片能点（打开常用词窗口，CardBtn）；Quill 从记录里找到可能听错的词时，
+        下面多一行「听到 → 正确写法」+ 加入 / 忽略（右对齐卡片内边）和灰字「可能听错 · 说过几次 · 例句」，最多 3 条，处理完补上下一条。
+        卡片变高窗口跟着变高（Chrome.sync 会重画圆角和阴影）。"""
+        wn = self.wn; sugs = word_sugs(); x, y, w = 20, 10, 360
+        show = sugs[:3]; h = 90 + 66 * len(show) if show else 92; H = y + h + 20  # 一直展开，最多 3 条，顺手就能点
+        wn.reset(H); wn.c.configure(height=px(H))
+        wn.raised(20, 438 - self.H, 276, 64, 32, d=5); wn.raised(316, 438 - self.H, 64, 64, 32, d=5)  # 上面记录 / 设置的阴影伸过来
+        down = wn.img.copy(); inset(down, x, y, w, h, 28, 5)  # 按下时的底图：卡片凹下去，里面的按钮下面再画上
+        wn.raised(x, y, w, h, 28, d=7)
+        wn.text(x + 20, y + 24, '常用词', 12, TEXT)
+        ws = glossary()[0]
+        wn.text(x + 20, y + 56, '、'.join(ws) if ws else '人名、项目名、中英混说的词，听错时按它改', 11, SUB, width=w - 40, lines=1)
+        for i, (hd, c, k, src) in enumerate(show):
+            ry = y + 92 + i * 66
+            wn.text(x + 20, ry, f'{hd} → {c}', 12, TEXT, width=w - 210, lines=1)
+            wn.button(x + w - 170, ry - 10, 70, 34, text='加入', size=12, cmd=lambda hd=hd, c=c: self.add_word(hd, c))
+            wn.button(x + w - 90, ry - 10, 70, 34, text='忽略', size=12, cmd=lambda hd=hd, c=c: self.ignore_word(hd, c))
+            wn.text(x + 20, ry + 26, f'可能听错 · 说过 {k} 次 · {src}', 11, SUB, width=w - 40, lines=1)
+        for b in wn.btns: b.draw(down, *b.box[:2], False)
+        wn.commit(); wn.btns.insert(0, CardBtn(wn, (x, y, w, h), down, self.edit_words))  # 点卡片任何地方 = 打开常用词窗口
 
-    def set_last(self, raw, fixed, zh, when=''):
-        self.last = fixed; c = self.n.c
-        c.itemconfigure(self.l_en, text=fit(fixed, fnt(12), px(270))); c.coords(self.l_en, px(48), px(456 if zh else 467))  # 没有中文那行（出中文）：一行上下居中
-        c.itemconfigure(self.l_zh, text=fit(zh, fnt(11), px(270)))
+    def edit_words(self): self._open('words', Words)
+
+    def add_word(self, heard, term):
+        """候选词「加入」：词表里已有这个正确写法就接在那一行后面，没有就加一行。"""
+        lines = Words.lines()
+        for i, ln in enumerate(lines):
+            t, _, alts = ln.replace('：', ':').partition(':')
+            if not ln.startswith('#') and t.strip().lower() == term.lower():
+                lines[i] = f'{t.strip()}: {alts.strip()}, {heard}' if alts.strip() else f'{t.strip()}: {heard}'; break
+        else: lines.append(f'{term}: {heard}')
+        try: WORDS_FILE.write_text('\n'.join(lines) + '\n', encoding='utf-8'); log(f'常用词加入：{term}: {heard}')
+        except Exception: log('写常用词失败', traceback.format_exc())
+        self.words_changed()
+
+    def ignore_word(self, heard, term):
+        with scan_lock: st = scan_load(); st['ignored'].append(f'{heard.lower()}\t{term}'); scan_save(st)
+        self.words_changed()
+
+    def words_changed(self):
+        self.build_words()
+        if self.alive('words'): self.words.build(keep=True)
 
     def set_key(self, vk):
         cfg['hotkey'] = vk; save_cfg(); log('快捷键改为', key_name(vk)); self.refresh_sub()
@@ -1767,10 +1941,10 @@ class App:
         self.cur[1] = text; self.overlay.result(raw, text, self.cur[2], by_key); self.finish()
 
     def finish(self):
-        """英文和中文都有了：记下来、更新主页「上一句」。"""
+        """英文和中文都有了：记下来。"""
         if not (self.cur and self.cur[1] is not None and self.cur[2] is not None): return
         raw, fixed, zh = self.cur; self.cur = None
-        save_history(raw, fixed, zh); self.set_last(raw, fixed, zh)
+        save_history(raw, fixed, zh)
         h = self.alive('history')
         if h:  # 藏着的记录窗口先记一下，打开时再重画
             if h.w.winfo_viewable(): h.build()
@@ -1781,6 +1955,28 @@ class App:
             st = ollama_status()
             if st == 'down': st = ensure_ollama()  # 没开就自己拉起，不用用户管
             post('ollama', st); time.sleep(8)
+
+    def idle(self):
+        """闲着：没在说话 / 改错，2 分钟内没说过话，改错服务正常且在显卡上（CPU 上一批要十几秒，会挡住下一句）。"""
+        return self.state == 'ready' and time.time() - last_llm[0] > 120 and self.ol_last == 'ok' and llm_opts()[1]
+
+    def words_loop(self):
+        """每 5 分钟看一次：距上次扫满一天、闲着，就扫新记录找可能听错的词。每批约 0.5~3 秒，用户一开始说话就停，下次接着扫。"""
+        time.sleep(120)
+        while True:
+            st = scan_load()
+            if cfg.get('hist', True) and time.time() - st['at'] > 86400 and self.idle():
+                new = [e for e in said_lines(hist_blocks()) if e[0] >= st['done']]  # 记录时间只到分钟：用 >，和上次最后一句同一分钟后说的就永远扫不到；重扫那几句无妨（候选 setdefault）
+                try:
+                    for part in scan_batches(new, key=lambda e: e[1]):
+                        if not self.idle(): break
+                        for h, c, src in find_candidates([t for _, t in part]): st['cands'].setdefault(f'{h.lower()}\t{c}', [h, c, src])
+                        st['done'] = part[-1][0]
+                    else: st['at'] = time.time()
+                except Exception as e: log('找候选词失败：', repr(e))
+                with scan_lock: st['ignored'] = scan_load()['ignored']; scan_save(st)  # 扫的时候用户可能点了「忽略」，别用开扫前读的盖掉
+                if st['at'] > time.time() - 60: log(f'找候选词：扫了 {len(new)} 句，{len(word_sugs())} 个待确认'); post('words')
+            time.sleep(300)
 
     def poll(self):
         try:
@@ -1807,6 +2003,7 @@ class App:
 
     def handle(self, kind, *a):
         if kind == 'state': self.set_state(a[0], *a[1:])
+        elif kind == 'words': self.build_words()  # 找到新的可能听错的词：放在主页常用词卡片里
         elif kind == 'notice':
             text, level, toast = a; self.show_notice(text, level)
             if toast: self.overlay.notice(text, level)
@@ -1841,7 +2038,7 @@ class Settings:
     only=('mic',) 或 ('ai',) 时是主页右上角 MIC / AI 小圆章点开的小弹窗：只放相关的那几块、没有卡片底，点别处就关。"""
     W, POP_W = 400, 340
     MODES = (('fast', '直接输入', '松开后直接输入改好的句子（最快）'),
-             ('pick', '让我挑选', '松开后在屏幕下方给「自然」「口语」两个版本，点一下输入；点一下快捷键 = 选第 1 个，Esc 放弃'))
+             ('pick', '让我挑选', '给「自然」「口语」两版点选；按快捷键选第 1 个，Esc 放弃'))
     ZH_OUTS = (('en', '出英文', ''), ('zh', '出中文', ''))  # 出中文：删掉口头禅 / 重复 / 改口，不翻译
     ONOFF = ((True, '开', ''), (False, '关', ''))  # 出中文时每句都送模型改错字 / 只送带改口的
     POPS = {'mic': ('mic',), 'ai': ('ol', 'mode')}
@@ -1868,14 +2065,14 @@ class Settings:
     # 每一块：先算高度（要先画卡片底再画内容），返回 (高度, 画法)
     def sec_mic(self, n, x, y, w, draw):
         devs = ['系统默认'] + eng.devices(); cur = cfg['device'] if cfg['device'] in devs else '系统默认'
-        dev_y = y + 56; track_y = dev_y + len(devs) * 50 + 6; tip_y = track_y + 22; h = tip_y + 40 - y
+        dev_y = y + 56; tip_y = dev_y + len(devs) * 44 + 2; h = tip_y + 40 - y  # 音量条放在标题那行右边，设置一页放得下不用滚
         if not draw: return h
         self.label(n, x, y, w, h, '麦克风')
         for i, name in enumerate(devs):
             on = name == cur
-            n.button(x + 20, dev_y + i * 50, w - 40, 40, r=20, text=name, icon=I_OK if on else '', size=12, on=on, align='left', cmd=lambda name=name: self.pick_dev(name))
-        n.inset(x + 20, track_y, w - 40, 10, 5, d=2.5)
-        self.bar_x, self.bar_w = x + 26, w - 52
+            n.button(x + 20, dev_y + i * 44, w - 40, 34, r=17, text=name, icon=I_OK if on else '', size=12, on=on, align='left', cmd=lambda name=name: self.pick_dev(name))
+        track_y = y + 28; n.inset(x + 100, track_y, w - 120, 10, 5, d=2.5)
+        self.bar_x, self.bar_w, self.tip_w = x + 106, w - 132, w - 40
         self.bar = n.c.create_line(px(self.bar_x), px(track_y + 5), px(self.bar_x), px(track_y + 5), width=px(4), fill=ACCENT, capstyle='round')
         self.tip = n.text(x + 20, tip_y, '', 11, SUB); self.tip_state = None
         return h
@@ -1885,7 +2082,7 @@ class Settings:
         cols, gap = 4, 10; cw = (w - 40 - gap * (cols - 1)) / cols  # 4 列网格：每个一样宽、间距一样
         chips = [(vk, x + 20 + (i % cols) * (cw + gap), (i // cols) * 46, cw) for i, vk in enumerate(keys + [None])]
         cy = chips[-1][2]
-        chip_y = y + 56; ktip_y = chip_y + cy + 48; h = ktip_y + 36 - y
+        chip_y = y + 56; h = chip_y + cy + 34 + 20 - y  # 提示字放在标题那行右边
         if not draw: return h
         self.label(n, x, y, w, h, '快捷键')
         for vk, cx, dy, cw in chips:
@@ -1895,26 +2092,26 @@ class Settings:
             else:
                 on = vk == cfg['hotkey']
                 n.button(cx, chip_y + dy, cw, 34, text=key_name(vk), size=12, on=on, cmd=lambda vk=vk: self.set_hot(vk))
-        self.ktip = n.text(x + 20, ktip_y, self.key_tip[0], 11, self.key_tip[1], width=w - 40, lines=2)
+        self.ktip = n.text(x + w - 20, y + 25, self.key_tip[0], 11, self.key_tip[1], anchor='ne', width=w - 110, lines=1)
         return h
 
     def sec_mode(self, n, x, y, w, draw):
-        h = 214
+        h = 182  # 说明一行，三排按钮间距 48
         if not draw: return h
         mode = cfg.get('mode', 'fast'); self.label(n, x, y, w, h, '输出方式')
-        rows = ((y + 14, self.MODES, mode, self.set_mode), (y + 112, self.ZH_OUTS, cfg.get('zh_out', 'en'), self.set_zh_out),
-                (y + 160, self.ONOFF, cfg.get('zh_smart', True), self.set_zh_smart))
+        rows = ((y + 14, self.MODES, mode, self.set_mode), (y + 86, self.ZH_OUTS, cfg.get('zh_out', 'en'), self.set_zh_out),
+                (y + 134, self.ONOFF, cfg.get('zh_smart', True), self.set_zh_smart))
         for by, opts, cur, cmd in rows:
             for i, (m, name, _) in enumerate(opts):
                 on = m == cur
                 n.button(x + w - 210 + i * 100, by, 90, 34, text=name, size=12, on=on, cmd=lambda m=m, cmd=cmd: cmd(m))
-        n.text(x + 20, y + 62, dict((m, t) for m, _, t in self.MODES)[mode], 11, SUB, width=w - 40, lines=2)
-        n.text(x + 20, y + 122, '说中文时', 12, TEXT)
-        n.text(x + 20, y + 170, '出中文时改错字', 12, TEXT)
+        n.text(x + 20, y + 56, dict((m, t) for m, _, t in self.MODES)[mode], 11, SUB, width=w - 40, lines=1)
+        n.text(x + 20, y + 96, '说中文时', 12, TEXT)
+        n.text(x + 20, y + 144, '出中文时改错字', 12, TEXT)
         return h
 
     def sec_ol(self, n, x, y, w, draw):
-        h = 286
+        h = 172  # 常用词在记录窗口（History.words）
         if not draw: return h
         app = self.app; st = app.ol_last
         if st == 'down' and time.time() - app.ol_starting < 30: st = 'starting'
@@ -1922,20 +2119,15 @@ class Settings:
         text, color = {'ok': ('正常', GREEN), 'no_model': (f'缺少 {LLM_MODEL}', RED), 'down': ('没有运行', ORANGE),
                        'starting': ('启动中…', ORANGE), None: ('检查中…', SUB)}[st]
         n.text(x + w - 20, y + 22, '● ' + text, 12, color, anchor='ne')
-        on_gpu = llm_opts()[1]
-        n.text(x + 20, y + 56, f'本机 Ollama · {LLM_MODEL} · ' + ('显卡' if on_gpu else 'CPU') +
-               ('\n一句约 1~2 秒；显卡被占着变慢会自动换 CPU' if on_gpu else '\n一句约 5~8 秒' + ('（显卡慢，暂时换成 CPU）' if LLM_GPU_LAYERS else '')), 11, SUB)
-        last = f'上一句改错用了 {llm_stat["secs"]:.1f} 秒（{"显卡" if llm_stat["gpu"] else "CPU"}）' if llm_stat else '还没有改过句子'
-        n.text(x + 20, y + 94, last, 11, SUB)
-        if st == 'down': n.button(x + w - 90, y + 50, 70, 34, text='启动', size=12, cmd=self.start_ol)
-        n.text(x + 20, y + 128, '不用时释放显存', 12, TEXT)
+        on_gpu = llm_opts()[1]  # 说明只留一行：在哪跑 + 上一句用了几秒
+        info = f'Ollama · {LLM_MODEL} · ' + ('显卡' if on_gpu else 'CPU' + ('（显卡慢，暂时换）' if LLM_GPU_LAYERS else ''))
+        if llm_stat: info += f' · 上一句 {llm_stat["secs"]:.1f} 秒'
+        n.text(x + 20, y + 56, info, 11, SUB, width=w - (130 if st == 'down' else 40), lines=1)
+        if st == 'down': n.button(x + w - 90, y + 46, 70, 34, text='启动', size=12, cmd=self.start_ol)
+        n.text(x + 20, y + 90, '不用时释放显存', 12, TEXT)
         cols, gap = len(KEEPS), 10; cw = (w - 40 - gap * (cols - 1)) / cols  # 和快捷键那排一样：等宽、等间距
         for i, (k, name) in enumerate(KEEPS):
-            n.button(x + 20 + i * (cw + gap), y + 160, cw, 34, text=name, size=12, on=k == cfg.get('keep', '2m'), cmd=lambda k=k: self.set_keep(k))
-        ws = glossary()[0]
-        n.text(x + 20, y + 218, '常用词', 12, TEXT)
-        n.button(x + w - 90, y + 208, 70, 34, text='编辑', size=12, cmd=self.edit_words)
-        n.text(x + 20, y + 250, '、'.join(ws) if ws else '人名、项目名、中英混说的词，听错时按它改', 11, SUB, width=w - 40, lines=1)
+            n.button(x + 20 + i * (cw + gap), y + 118, cw, 34, text=name, size=12, on=k == cfg.get('keep', '2m'), cmd=lambda k=k: self.set_keep(k))
         return h
 
     @classmethod
@@ -1986,7 +2178,7 @@ class Settings:
             self.tip_state = mic
             text, color = {'ok': ('说话时黑条会跳动', SUB), 'silent': ('10 秒没收到声音。' + MIC_HINT, ORANGE),
                            'off': ('麦克风打不开：换一个设备，或检查 Windows 设置 → 隐私和安全性 → 麦克风。', RED)}[mic]
-            c.itemconfigure(self.tip, text=fit(text, fnt(11), px(self.bar_w + 12), 2), fill=color)
+            c.itemconfigure(self.tip, text=fit(text, fnt(11), px(self.tip_w), 2), fill=color)
 
     def pick_dev(self, name):
         cfg['device'] = None if name == '系统默认' else name; save_cfg()
@@ -2007,10 +2199,6 @@ class Settings:
 
     def set_zh_smart(self, on):
         cfg['zh_smart'] = on; save_cfg(); log('出中文时改错字：', on); self.app.refresh_settings()
-
-    def edit_words(self):
-        if not WORDS_FILE.exists(): WORDS_FILE.write_text(WORDS_HEAD, encoding='utf-8')
-        os.startfile(WORDS_FILE)
 
     def record(self):
         if self.recording: return
@@ -2039,7 +2227,7 @@ def close_btn(n, w, cmd):
 class History:
     """最近 20 条记录：标题行和「记录设置」卡片固定不动，下面的卡片可以滚；列表上下边缘渐隐（内容慢慢淡出，不是一刀切）；
     右边一根细滑块，点它或拖它能快速回到顶上。"""
-    W, FADE, PAD = 400, 6, 20  # 上面渐隐带高度；固定区里卡片下面留给阴影的边（阴影约 20 才淡完，再少会被切一刀）
+    W, FADE, PAD = 400, 22, 20  # 上面渐隐带高度（短了卡片滚上去会被一刀切出半截圆角）；固定区里卡片下面留给阴影的边（阴影约 20 才淡完，再少会被切一刀）
     CARD_Y = 92                 # 设置卡片顶边，和设置窗口第一块对齐
     FADE_B, SOLID = 56, 20      # 下面渐隐带：总高、最底下实心的一段（= 窗口边距）
 
@@ -2061,15 +2249,16 @@ class History:
         fe, fz, fm = fnt(12), fnt(11), fnt(11)
         oy = n.c.canvasy(0) / S if keep else 0  # 展开 / 收起原话后还停在原来滚到的地方
         ch = 160 if on else 68  # 「记录设置」卡片：保存记录 开 / 关；开着时再加 保留几天、清空
-        top_h = self.CARD_Y + ch + self.PAD; self.lv = lv = self.view - top_h  # 固定区高度、列表视口高度
-        h = self.head; h.reset(top_h); h.c.configure(height=px(top_h))
+        h = self.head; top_h = self.CARD_Y + ch + self.PAD
+        self.lv = lv = self.view - top_h  # 固定区高度、列表视口高度
+        h.reset(top_h); h.c.configure(height=px(top_h))
         h.text(32, 26, 'HISTORY', 18, INK, family=DISPLAY)
         h.text(33, 56, f'最近 {min(20, len(recs))} 条 · 新的在上面' if on else '记录已关闭', 11, SUB)
         close_btn(h, self.W, self.w.withdraw)
         h.button(236, 28, 104, 36, r=18, text='打开文件', size=12, cmd=lambda: os.startfile(HIST) if HIST.exists() else None)
         self.prefs(h, self.CARD_Y, ch, on); h.commit()
         n.c.configure(height=px(lv))
-        cards, y = [], self.FADE
+        cards, y = [], 14  # 停着时第一行灰字在渐隐带下面，不被盖淡
         for raw, fixed, zh, when in recs:  # 卡片上面灰字：时间 · 原话（一行放不下时右边有展开钮）；卡片里只有改后的英文 + 中文，复制按钮 28 对着各自那段字上下居中
             en, cn = wrap(fixed, fe, px(280)), wrap(zh, fz, px(280))
             he, hz = len(en) * fe.metrics('linespace') / S, len(cn) * fz.metrics('linespace') / S
@@ -2082,7 +2271,7 @@ class History:
             cards.append((y, top, h, ey, he, zy, hz, lines, key if len(full) > 1 else None, fixed, zh, en, cn)); y = top + h + 20
         H = max(lv, y - 20 + self.FADE_B)  # 拉到底时最后一张卡片露在下面的渐隐带上面
         n.reset(H); n.c.configure(scrollregion=(0, 0, px(self.W), px(H)), yscrollincrement=px(20))
-        if not recs: n.text(200, self.FADE + 30, '还没有记录' if on else '记录已关闭：说的话不会存到电脑上', 11, SUB, anchor='center')
+        if not recs: n.text(200, y + 10, '还没有记录' if on else '记录已关闭：说的话不会存到电脑上', 11, SUB, anchor='center')
         for y, top, h, ey, he, zy, hz, lines, key, fixed, zh, en, cn in cards:
             n.text(40, y, '\n'.join(lines), 11, SUB)
             if key:  # 原话一行放不下：小圆钮（和复制按钮同一竖列，对着第一行灰字居中），点一下展开全文，再点收起
@@ -2133,7 +2322,7 @@ class History:
         self.arm_clear = False
         try: HIST.unlink(missing_ok=True); log('记录已清空')
         except Exception: log('清空记录失败', traceback.format_exc())
-        self.app.set_last('', '还没有记录', ''); self.app.last = None; self.build()  # 主页「上一句」也清掉
+        self.build()
 
     _fades = {}
     def fade(self, top):
@@ -2147,6 +2336,122 @@ class History:
             im = Image.new('RGBA', (w, len(t)), BG); im.putalpha(Image.fromarray(np.repeat(a[:, None], w, axis=1)))
             History._fades[top] = ImageTk.PhotoImage(im)
         return self._fades[top]
+
+
+class Words:
+    """常用词窗口（主页常用词卡片的「编辑」）：固定区是输入框（「正确写法: 听错的写法, …」，Enter 加入），下面每条一张卡片，
+    右边 改 / 删（删要连点两下）；词多了只有列表滚、边缘渐隐，和记录窗口一样。写回 words.txt 只动那一行，注释和手写的格式原样留着。"""
+    W, FADE, FADE_B, SOLID, CARD_Y, PAD = 400, 22, 56, 20, 92, 20
+    fade, scroll, _fades = History.fade, History.scroll, History._fades  # 渐隐带和记录窗口一样宽、一样高，共用
+
+    def __init__(self, app):
+        self.app = app; self.w = sub_window(app, '常用词', self.W)
+        self.editing = self.arm_del = None  # 正在改的那一行（原文）；点了一下删除的那一行
+        self.view = Settings.view_height()  # 和设置窗口一样高
+        self.head = Neu(self.w, self.W, 100); self.head.c.pack()
+        self.n = Neu(self.w, self.W, 100); self.n.c.pack()
+        self.ent = tk.Entry(self.head.c, bd=0, relief='flat', highlightthickness=0, bg=INSET, fg=TEXT, insertbackground=TEXT, font=fnt(12))
+        self.ent.bind('<Return>', lambda e: self.submit()); self.ent.bind('<Escape>', lambda e: self.cancel())
+        self.w.bind('<MouseWheel>', lambda e: self.scroll('scroll', -int(e.delta / 120) * 3, 'units'))
+        self.w.bind('<Map>', lambda e: e.widget is self.w and self.w.after(60, self.focus))  # 打开就能直接打字
+        self.build()
+
+    @staticmethod
+    def lines():
+        try: return WORDS_FILE.read_text(encoding='utf-8-sig').splitlines()
+        except OSError: return WORDS_HEAD.rstrip('\n').split('\n')
+
+    def build(self, keep=False):
+        rows = [(ln, p) for ln in self.lines() if (p := parse_word(ln))][::-1]  # 新加的在上面
+        n, h = self.n, self.head; fe, fz = fnt(12), fnt(11)
+        le, lz = fe.metrics('linespace') / S, fz.metrics('linespace') / S
+        oy = n.c.canvasy(0) / S if keep else 0
+        y, ch = self.CARD_Y, 110; top_h = y + ch + self.PAD; self.lv = lv = self.view - top_h
+        h.reset(top_h); h.c.configure(height=px(top_h))
+        h.text(32, 26, 'WORDS', 18, INK, family=DISPLAY)
+        h.text(33, 56, '常用词 · 听错时按这里的写法改', 11, SUB)
+        close_btn(h, self.W, self.w.withdraw)
+        h.button(236, 28, 104, 36, r=18, text='打开文件', size=12, cmd=self.open_file)  # 用记事本改：复杂写法 / 一次改很多
+        h.raised(20, y, 360, ch, 28, d=7)
+        h.inset(40, y + 20, 230, 40, 20, d=4)  # 输入框凹下去，按钮和它上下居中、右对齐卡片内边
+        h.c.create_window(px(56), px(y + 40), window=self.ent, anchor='w', width=px(198))
+        h.button(290, y + 23, 70, 34, text='保存' if self.editing else '加入', size=12, cmd=self.submit)
+        tip = (f'正在改「{parse_word(self.editing)[0]}」 · Enter 保存 · Esc 取消' if self.editing
+               else '例：Claude: cloud, 克劳德（冒号后面是听错的写法，可不写）')
+        h.text(40, y + 72, tip, 11, SUB, width=320, lines=1)
+        h.commit()
+        n.c.configure(height=px(lv))
+        cards, y = [], 14 + lz + 10  # 最上面一行灰字（几条），下面隔一点是卡片
+        for ln, (term, alts) in rows:
+            al = wrap('听错：' + '、'.join(alts), fz, px(240)) if alts else []
+            ch = max(48, 28 + le + (4 + len(al) * lz if al else 0))
+            cards.append((y, ch, ln, term, al)); y += ch + 20
+        H = max(lv, y - 20 + self.FADE_B)  # 拉到底时最后一张卡片露在下面的渐隐带上面
+        n.reset(H); n.c.configure(scrollregion=(0, 0, px(self.W), px(H)), yscrollincrement=px(20))
+        n.text(40, 14, f'{len(rows)} 条 · 新加的在上面' if rows else '还没有常用词：在上面输入，Enter 加入', 11, SUB)
+        for y, ch, ln, term, al in cards:  # 卡片里正确写法一行，听错的写法灰字；改 / 删两个 28 的圆钮对着卡片上下居中
+            n.raised(20, y, 360, ch, 24, d=6)
+            ty = y + 14 if al else y + (ch - le) / 2
+            n.text(40, ty, fit(term, fe, px(240)), 12, TEXT)
+            if al: n.text(40, ty + le + 4, '\n'.join(al), 11, SUB)
+            cy = y + ch / 2
+            n.button(292, cy - 14, 28, 28, icon=I_EDIT, size=10, d=3, color=ICON_C, on=ln == self.editing, cmd=lambda ln=ln: self.edit(ln))
+            n.button(332, cy - 14, 28, 28, icon=I_DEL, size=10, d=3, color=RED if ln == self.arm_del else ICON_C, cmd=lambda ln=ln: self.delete(ln))
+        self.bar = ScrollBar(n, H, lv)
+        n.commit()
+        for y, top in ((0, True), (lv - self.FADE_B, False)):  # 上下两条渐隐带，钉在视口里
+            self.bar.pin(n.c.create_image(0, 0, anchor='nw', image=self.fade(top)), y)
+        n.c.tag_raise(self.bar.thumb); n.c.yview_moveto(oy / H); self.bar.update()
+
+    def focus(self):
+        try: self.w.focus_force(); self.ent.focus_set(); self.ent.icursor('end')
+        except tk.TclError: pass
+
+    def open_file(self):
+        if not WORDS_FILE.exists(): WORDS_FILE.write_text(WORDS_HEAD, encoding='utf-8')
+        os.startfile(WORDS_FILE)
+
+    def edit(self, ln):
+        """改：这一行放进输入框，「加入」变「保存」；再点一下改钮 = 取消。"""
+        self.editing = None if self.editing == ln else ln; self.ent.delete(0, 'end')
+        if self.editing: t, alts = parse_word(ln); self.ent.insert(0, f'{t}: {", ".join(alts)}' if alts else t)
+        self.build(keep=True); self.focus()
+
+    def cancel(self):
+        self.editing = None; self.ent.delete(0, 'end'); self.build(keep=True)
+
+    def delete(self, ln):
+        """删：第一下变红，3 秒内再点一下才删（和清空记录一样）。"""
+        if self.arm_del != ln:
+            self.arm_del = ln; self.build(keep=True)
+            self.w.after(3000, lambda: self.arm_del == ln and (setattr(self, 'arm_del', None), self.build(keep=True)))
+            return
+        self.arm_del = None
+        if self.editing == ln: self.editing = None; self.ent.delete(0, 'end')
+        if self.save(ln, None): log(f'常用词删除：{ln.strip()}')
+
+    def submit(self):
+        p = parse_word(self.ent.get())
+        if not p: return
+        term, alts = p; old = self.editing
+        if not old:  # 已有这个正确写法：听错的写法并进那一行
+            old = next((ln for ln in self.lines() if (q := parse_word(ln)) and q[0].lower() == term.lower()), None)
+            if old: term, have = parse_word(old); alts = have + [a for a in alts if a.lower() not in {b.lower() for b in have}]  # 写法用原来那行的
+        new = f'{term}: {", ".join(alts)}' if alts else term
+        self.editing = None; self.ent.delete(0, 'end')
+        if self.save(old, new): log(f'常用词{"修改" if old else "加入"}：{new}')
+
+    def save(self, old, new):
+        """原文是 old 的那一行换成 new（new=None 删掉；找不到 old 就加在最后），别的行原样留着。glossary() 按修改时间自己重读。"""
+        lines = self.lines()
+        if old in lines:
+            i = lines.index(old)
+            if new is None: del lines[i]
+            else: lines[i] = new
+        elif new is not None: lines.append(new)
+        try: WORDS_FILE.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+        except Exception: log('写常用词失败', traceback.format_exc()); return False
+        self.app.words_changed(); return True
 
 
 class ScrollBar:
@@ -2320,7 +2625,7 @@ if __name__ == '__main__':
     threading.excepthook = lambda a: log('后台出错', ''.join(traceback.format_exception(a.exc_type, a.exc_value, a.exc_traceback)))
     app = App(root)
     wa = ctypes.wintypes.RECT(); user32.SystemParametersInfoW(0x30, 0, ctypes.byref(wa), 0)  # 工作区（不含任务栏），物理像素
-    root.geometry(f'+{wa.right - px(App.W) - px(60)}+{wa.top + px(12)}')
+    root.geometry(f'+{wa.right - px(App.W) - px(20)}+{wa.top + px(12)}')  # 离右边 20：四个窗口全开时排得下，不用挪
     root.deiconify(); root.update()  # 先把窗口画出来：冷启动时开麦克风要等声卡驱动一两秒，放在前面窗口会白一阵
     threading.Thread(target=lambda: (eng.open(cfg['device']), eng.load()), daemon=True).start()  # 开麦克风、载识别模型都在后台
     if cfg['lang'] == 'zh': threading.Thread(target=eng.load_zh, daemon=True).start()
@@ -2331,4 +2636,6 @@ if __name__ == '__main__':
         if a.startswith('--show='):
             for w in a[7:].split(','):  # pop:mic / pop:ai 打开小弹窗
                 name, _, arg = w.partition(':'); root.after(800, lambda f=getattr(app, 'open_' + name), arg=arg: f(arg) if arg else f())
+        if a == '--scroll-end':  # 设置窗口滚到最底下（看「改错服务」卡片；模拟滚轮 Tk 只认一部分）
+            root.after(1500, lambda: (app.settings.n.c.yview_moveto(1), app.settings.sbar.update()))
     root.mainloop()

@@ -28,6 +28,9 @@ loader = importlib.machinery.SourceFileLoader('app', str(HERE / 'app.pyw')); spe
 m = importlib.util.module_from_spec(spec); loader.exec_module(m)
 m.load_fonts(); root = tk.Tk(); root.withdraw(); m.root = root; m.S = S = root.winfo_fpixels('1i') / 96; m.setup_fonts(root)
 m.save_history = m.save_cfg = lambda *a: None
+m.WORDS_FILE = HERE / '_demo_words.txt'; m.WORDS_FILE.write_text('Claude Code: cloud code\nGitHub\nQuill\n', encoding='utf-8')  # 演示用词表，不用自己的
+m.word_sugs = lambda: [('cloud code', 'Claude Code', 3, 'open cloud code and run the tests')]  # 常用词卡片里的「可能听错」示例（不读真实记录）
+m.App.words_loop = lambda self: None  # 不扫真实记录
 typed, latest, frames = [''], [None], []
 m.paste = lambda t: typed.__setitem__(0, (typed[0] + '\n' + t).strip())  # 「粘贴」到假的输入框里
 orig = m.ulw
@@ -103,6 +106,7 @@ def build():
     gif[0].save(OUT / 'demo.gif', save_all=True, append_images=gif[1:], duration=100, loop=0, optimize=True)
     print('demo.gif', len(gif), 'frames', round((OUT / 'demo.gif').stat().st_size / 1e6, 1), 'MB', flush=True)
     for lang, _ in LINES: (HERE / f'_demo_{lang}.wav').unlink(missing_ok=True)
+    m.WORDS_FILE.unlink(missing_ok=True)
 
 threading.Thread(target=scenario, daemon=True).start()
 root.mainloop()
