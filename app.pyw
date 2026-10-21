@@ -926,8 +926,17 @@ def save_history(raw, fixed, zh):
 def set_clip(text):
     root.clipboard_clear(); root.clipboard_append(text); root.update()
 
+_last_paste = {'hwnd': None, 'text': '', 't': 0.0}
+
 def paste(text):
-    """借剪贴板粘贴到光标处，结束后恢复原剪贴板文字。"""
+    """借剪贴板粘贴到光标处，结束后恢复原剪贴板文字。
+    英文接着上一句说（同一个窗口、2 分钟内、上一句末尾不是空白、两头都是英文）时，前面自动补一个空格。"""
+    hwnd, last = user32.GetForegroundWindow(), _last_paste
+    prev = last['text']
+    if (hwnd == last['hwnd'] and time.time() - last['t'] < 120 and prev and text
+            and prev[-1].isascii() and not prev[-1].isspace() and text[0].isascii() and not text[0].isspace()):
+        text = ' ' + text
+    last.update(hwnd=hwnd, text=text, t=time.time())
     ev, box = threading.Event(), {}
     def put():
         try: box['old'] = root.clipboard_get()
