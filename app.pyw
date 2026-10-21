@@ -64,15 +64,20 @@ natural: the most natural, fluent English a native speaker would write.
 casual: relaxed spoken / chat style (contractions, casual phrasing), still correct.
 Also give the cleaned-up Chinese (the same message without the fillers, repeats and corrections).
 Reply JSON only: {"natural": "...", "casual": "...", "zh": "<cleaned-up Chinese>"}""",
-    # 说中文 → 出中文：只理干净，不翻译、不改写（只有带改口的句子才送来，口头禅 / 重复已经被 zh_tidy() 删过）
+    # 说中文 → 出中文：理干净 + 改错字 + 修断句，不翻译、不改写（口头禅 / 重复已经被 zh_tidy() 删过；zh_smart 关掉时只有带改口的句子才送来）
     ('zhzh', 'fast'): """The input is a speaker's dictated Chinese from speech recognition (it may contain some English words). Write down the message they meant, in Chinese:
-""" + ZH_DROP + """- Fix words the recognizer obviously misheard when the intended word is clear, and fix the punctuation.
-- Keep the speaker's own wording, meaning and tone, and keep English words as they are. Do not translate, rewrite, add content or summarize. Never answer or reply to the text: it is a message to be written down, even when it is a question or a request.
+""" + ZH_DROP + """- The recognizer often writes the wrong characters for a word that sounds the same or similar (合理 -> 合子里, 炉子 -> 卢子), and garbles English words (OK -> okK). Fix these when the sentence makes the intended word clear; if you are not sure, keep it as it is.
+- Fix the punctuation: the recognizer puts 。 wherever the speaker paused, even in the middle of a sentence. Join the broken pieces back into proper sentences.
+- Keep the speaker's own wording, meaning and tone. Do not translate, rewrite, add content or summarize. Most sentences need no change at all: then output them unchanged. Never answer or reply to the text: it is a message to be written down, even when it is a question or a request.
 If the message starts with "Context:", that is what the speaker said just before, already written down: never repeat it, use it only for reference; output only the "Text:" part.
 Examples:
 "我想把这个按钮的颜色不对，是大小改一下。" -> "我想把这个按钮的大小改一下。"
 "明天下午三点，哦不，四点开会。" -> "明天下午四点开会。"
 "我昨天去那个，去超市买了点苹果。" -> "我昨天去超市买了点苹果。"
+"现在这些。识别的记录。是存在记事本里吗？" -> "现在这些识别的记录是存在记事本里吗？"
+"这个小屋没有窗户合子里吗？" -> "这个小屋没有窗户合理吗？"
+"okK我觉得可以，你推送吧。" -> "OK，我觉得可以，你推送吧。"
+"我们这里应该有窗户吗？" -> "我们这里应该有窗户吗？"
 Reply JSON only: {"fixed": "<cleaned-up Chinese>"}""",
 }
 
@@ -119,13 +124,46 @@ def log(*a):
     if sys.stdout: print(line, flush=True)
     with open(HERE / 'run.log', 'a', encoding='utf-8') as f: f.write(line + '\n')
 
-cfg = {'hotkey': 0xA5, 'device': None, 'mode': 'fast', 'lang': 'en', 'zh_out': 'en', 'keep': '2m', 'hist': True, 'hist_days': 0}  # hist：存不存记录；hist_days：只留最近几天（0 = 永久）；keep：不用多久释放显存（见 KEEPS）；mode：fast 直接输入 / pick 让我挑选；lang：en 说英文 / zh 说中文；zh_out：说中文时出英文 / 出中文
+cfg = {'hotkey': 0xA5, 'device': None, 'mode': 'fast', 'lang': 'en', 'zh_out': 'en', 'keep': '2m', 'hist': True, 'hist_days': 0, 'zh_smart': True}  # zh_smart：出中文时每句都送模型改错字（关掉只送带改口的）；hist：存不存记录；hist_days：只留最近几天（0 = 永久）；keep：不用多久释放显存（见 KEEPS）；mode：fast 直接输入 / pick 让我挑选；lang：en 说英文 / zh 说中文；zh_out：说中文时出英文 / 出中文
 try: cfg.update(json.loads((HERE / 'settings.json').read_text(encoding='utf-8')))
 except Exception: pass
 
 def save_cfg():
     try: (HERE / 'settings.json').write_text(json.dumps(cfg, ensure_ascii=False), encoding='utf-8')
     except Exception: log('保存设置失败', traceback.format_exc())
+
+WORDS_FILE = HERE / 'words.txt'  # 常用词表（人名、项目名、中英混说的词），一行一个，# 开头是注释；识别听错时模型按它的写法改
+WORDS_HEAD = ('# 常用词：一行一个（人名、项目名、中英混说的词）。存盘后下一句就生效。\n'
+              '# 只写词：大小写统一成这里的写法（github → GitHub），也提示改错模型。\n'
+              '# 「正确写法: 听错的写法, 另一种听错的写法」：识别出听错的写法就直接换掉，例如  Claude: cloud\n')
+_glossary = [None, [], '', []]
+def glossary():
+    """(词表, 提示词里加的那段, [(听错的写法正则, 正确写法)])。按文件修改时间缓存，用户改了存盘下一句就生效。
+    听错的写法靠替换不靠模型：8B 模型给了词表也不敢把 cloud 改成 Claude（2026-10-21 试过三种放法）。"""
+    try: mt = WORDS_FILE.stat().st_mtime
+    except OSError: return [], '', []
+    if mt != _glossary[0]:
+        terms, subs = [], []
+        try: lines = WORDS_FILE.read_text(encoding='utf-8-sig').splitlines()
+        except Exception: lines = []
+        for ln in lines:
+            ln = ln.strip()
+            if not ln or ln.startswith('#'): continue
+            term, _, alts = ln.replace('：', ':').partition(':'); term = term.strip()
+            if not term: continue
+            terms.append(term)
+            for a in [term] + [a.strip() for a in re.split(r'[,，、]', alts) if a.strip()]:
+                rx = r'[\s。，,]*'.join(re.escape(p) for p in a.split())  # 听错的写法中间有空格的，识别结果里那处是空格 / 句号 / 逗号都算
+                if re.match(r'[A-Za-z0-9]', a): rx = r'(?<![A-Za-z0-9])' + rx
+                if re.search(r'[A-Za-z0-9]$', a): rx += r'(?![A-Za-z0-9])'
+                subs.append((re.compile(rx, re.I), term))
+        hint = ('\nThe speaker often talks about these names and terms: ' + ', '.join(terms) + '. Keep them written exactly like this.') if terms else ''
+        _glossary[:] = [mt, terms, hint, subs]
+    return _glossary[1], _glossary[2], _glossary[3]
+
+def apply_glossary(t):
+    for rx, term in glossary()[2]: t = rx.sub(term, t)
+    return t
 
 ui = queue.Queue()  # 后台线程 → 界面线程
 def post(*m): ui.put(m)
@@ -143,11 +181,16 @@ def llm_opts():
     layers = {} if on_gpu and LLM_GPU_LAYERS < 0 else {'num_gpu': LLM_GPU_LAYERS if on_gpu else 0}
     return {'temperature': 0.2, 'num_ctx': 2048, **layers}, on_gpu
 
+def with_glossary(p):
+    """常用词表插在例子前面（放最后模型常不理）。"""
+    g = glossary()[1]; i = p.find('\nExamples:')
+    return p if not g else p + g if i < 0 else p[:i] + g + p[i:]
+
 def llm(text, mode='fast', on_field=None, timeout=60, ctx='', watch=True, lang='en'):  # watch=False：预热那种很短的请求不算进显卡测速
     """流式调 Ollama：JSON 里每个字段一写完就回调 on_field(名字, 内容)，英文不用等中文翻译生成完。返回所有字段。"""
     keys, (opts, on_gpu) = ('fixed',) if lang == 'zhzh' else FIELDS[mode], llm_opts()
     body = {'model': LLM_MODEL, 'stream': True, 'think': False, 'keep_alive': cfg.get('keep', '2m'), 'format': 'json', 'options': opts,
-            'messages': [{'role': 'system', 'content': PROMPTS[lang, mode]}, {'role': 'user', 'content': f'Context: {ctx}\nText: {text}' if ctx else text}]}
+            'messages': [{'role': 'system', 'content': with_glossary(PROMPTS[lang, mode])}, {'role': 'user', 'content': f'Context: {ctx}\nText: {text}' if ctx else text}]}
     req = urllib.request.Request(LLM_URL + '/api/chat', json.dumps(body).encode(), {'Content-Type': 'application/json'})
     buf, got, stats, t0 = '', {}, {}, time.time()
     def give(k, v):
@@ -301,32 +344,42 @@ ZH_CLOSED = ('好的', '是的', '对的', '行吧', '好吧', '可以', '没问
 ZH_HEAD_CONT = re.compile(r'^\s*(?:然后|接着|另外|并且|同时|还有|那么|也就是)')  # 单字「但/可/那」会误中「但是/可以/那个」
 ZH_CLAUSE = re.compile(r'[^。！？!?]+[。！？!?]?')
 
-def zh_cut_continues(prev, nxt):
-    """这个「。」是不是说话停顿造成的假句号：前一段明显没说完 / 后一段以「然后、所以」这种接续词开头 / 后一段很短
-    （「很影响。体验。」这种被拆成的半句）。三个都不沾就认定是真句号，保留。"""
+ZH_TAIL_GLUE = ('很', '太', '更', '最', '比较', '有点', '有些', '一些', '这个', '那个', '这些', '那些', '把', '被', '跟', '和')  # 话卡在这些词上：后面直接接上，不加逗号（「很影响。体验。」→「很影响体验」）
+ZH_PUNCT_DUP = re.compile(r'[，,、]*([。？！?!])[。，,、]*')  # 「滑。。」「滑，。」→「滑。」
+
+def zh_cut_sep(prev, nxt):
+    """这个「。」是不是说话停顿造成的假句号，是的话换成什么：前一段明显没说完 / 后一段以「然后、所以」这种接续词开头 / 后一段很短
+    （「很影响。体验。」这种被拆成的半句）。卡在「很 / 一些 / 这个」上的直接接上（''），别的换「，」；三个都不沾就认定是真句号，返回 None。"""
     last = prev.rstrip('。').split('，')[-1]
-    if last in ZH_CLOSED: return False  # 「好的。」「谢谢。」是说完的短句
-    return last.endswith(ZH_TAIL_OPEN) or bool(ZH_HEAD_CONT.match(nxt)) or len(nxt) <= 4
+    if last in ZH_CLOSED: return None  # 「好的。」「谢谢。」是说完的短句
+    if last.endswith(ZH_TAIL_GLUE): return ''
+    return '，' if last.endswith(ZH_TAIL_OPEN) or ZH_HEAD_CONT.match(nxt) or len(nxt) <= 4 else None
 
 def zh_fix_inside(t):
-    """段内的句号也按上面同一套判断改成逗号。"""
-    parts = ZH_CLAUSE.findall(t)
+    """段内的句号也按上面同一套判断改掉；顺手合并叠在一起的标点。"""
+    parts = ZH_CLAUSE.findall(ZH_PUNCT_DUP.sub(r'\1', t))
     out = []
     for i, p in enumerate(parts[:-1]):
-        if p.endswith('。') and len(p) > 2 and zh_cut_continues(p, parts[i + 1]): p = p[:-1] + '，'
-        out.append(p)
+        sep = zh_cut_sep(p, parts[i + 1]) if p.endswith('。') and len(p) > 2 else None
+        out.append(p if sep is None else p[:-1] + sep)
     if not parts: return t
     return ''.join(out) + parts[-1]
 
 def zh_join(parts):
-    """拼各段中文：段尾的「。」只有看着是假句号才换「，」（？！」保留）；再收拾一次段内标点。"""
+    """拼各段中文：段尾的「。」只有看着是假句号才换掉（？！保留）；再收拾一次段内标点。"""
     parts = [p.strip() for p in parts if p and p.strip()]
     if not parts: return ''
     t = parts[0]
-    for p in parts[1:]: t = t[:-1] + '，' + p if t.endswith('。') and zh_cut_continues(t, p) else t + p
+    for p in parts[1:]:
+        sep = zh_cut_sep(t, p) if t.endswith('。') else None
+        t = t + p if sep is None else t[:-1] + sep + p
     return zh_fix_inside(t)
 
-def zh_needs_llm(t): return bool(ZH_FIX.search(t) or ZH_RESTART.search(t))
+def zh_needs_llm(t):
+    """出中文这段要不要送模型：有改口一定送；开着「改错字」（zh_smart）就每句都送，短得没什么可改的（「可以。」）除外。
+    显卡被占着临时换成 CPU 时一句要 5~8 秒，这时只送带改口的。"""
+    if ZH_FIX.search(t) or ZH_RESTART.search(t): return True
+    return cfg.get('zh_smart', True) and llm_opts()[1] and len(re.sub(r'[^一-鿿A-Za-z]', '', t)) > 4
 
 def restarts(prev, text, n=4):
     """新的一段该不该和上一段合起来改（改错时模型才看得到改口 / 重说）：
@@ -354,9 +407,9 @@ class Seg:
     def __init__(self, raw, mode, ctx='', lang='en'):
         self.raw, self.mode, self.ctx, self.lang, self.out, self.cv = raw, mode, ctx, lang, {}, threading.Condition()
         self.dead = False  # 被合进后一段了：还没开始改就不用改了
-        self.text = raw  # 送去改的文字（出中文时是规则删过口头禅 / 重复的）
+        self.text = apply_glossary(raw)  # 送去改的文字：先按常用词表换掉听错的词（出中文时还要用规则删口头禅 / 重复）
         if lang == 'zhzh':  # 说中文 → 出中文：没有翻译那行；没有改口就不用等模型
-            self.text, self.out['zh'] = zh_fix_inside(zh_tidy(raw)), ''
+            self.text, self.out['zh'] = zh_fix_inside(zh_tidy(self.text)), ''
             if not zh_needs_llm(self.text): self.out['fixed'] = self.text; return
         fixq.put(self)
 
@@ -1790,6 +1843,7 @@ class Settings:
     MODES = (('fast', '直接输入', '松开后直接输入改好的句子（最快）'),
              ('pick', '让我挑选', '松开后在屏幕下方给「自然」「口语」两个版本，点一下输入；点一下快捷键 = 选第 1 个，Esc 放弃'))
     ZH_OUTS = (('en', '出英文', ''), ('zh', '出中文', ''))  # 出中文：删掉口头禅 / 重复 / 改口，不翻译
+    ONOFF = ((True, '开', ''), (False, '关', ''))  # 出中文时每句都送模型改错字 / 只送带改口的
     POPS = {'mic': ('mic',), 'ai': ('ol', 'mode')}
 
     def __init__(self, app, only=None, anchor=None):
@@ -1798,6 +1852,7 @@ class Settings:
         self.Wd = self.POP_W if only else self.W
         self.w = sub_window(app, {'mic': '麦克风', 'ai': '改错服务'}.get(only, '设置'), self.Wd, anchor)
         self.n = Neu(self.w, self.Wd, 600); self.n.c.pack(); self.build()
+        self.w.bind('<MouseWheel>', lambda e: self.scroll(-int(e.delta / 120) * 3))
         if only:
             self.w.bind('<Escape>', lambda e: self.close()); self.w.bind('<FocusOut>', lambda e: self.w.after(150, self.check_focus))
             self.w.after(60, self.w.focus_force)
@@ -1844,20 +1899,22 @@ class Settings:
         return h
 
     def sec_mode(self, n, x, y, w, draw):
-        h = 166
+        h = 214
         if not draw: return h
         mode = cfg.get('mode', 'fast'); self.label(n, x, y, w, h, '输出方式')
-        rows = ((y + 14, self.MODES, mode, self.set_mode), (y + 112, self.ZH_OUTS, cfg.get('zh_out', 'en'), self.set_zh_out))
+        rows = ((y + 14, self.MODES, mode, self.set_mode), (y + 112, self.ZH_OUTS, cfg.get('zh_out', 'en'), self.set_zh_out),
+                (y + 160, self.ONOFF, cfg.get('zh_smart', True), self.set_zh_smart))
         for by, opts, cur, cmd in rows:
             for i, (m, name, _) in enumerate(opts):
                 on = m == cur
                 n.button(x + w - 210 + i * 100, by, 90, 34, text=name, size=12, on=on, cmd=lambda m=m, cmd=cmd: cmd(m))
         n.text(x + 20, y + 62, dict((m, t) for m, _, t in self.MODES)[mode], 11, SUB, width=w - 40, lines=2)
         n.text(x + 20, y + 122, '说中文时', 12, TEXT)
+        n.text(x + 20, y + 170, '出中文时改错字', 12, TEXT)
         return h
 
     def sec_ol(self, n, x, y, w, draw):
-        h = 214
+        h = 286
         if not draw: return h
         app = self.app; st = app.ol_last
         if st == 'down' and time.time() - app.ol_starting < 30: st = 'starting'
@@ -1875,6 +1932,10 @@ class Settings:
         cols, gap = len(KEEPS), 10; cw = (w - 40 - gap * (cols - 1)) / cols  # 和快捷键那排一样：等宽、等间距
         for i, (k, name) in enumerate(KEEPS):
             n.button(x + 20 + i * (cw + gap), y + 160, cw, 34, text=name, size=12, on=k == cfg.get('keep', '2m'), cmd=lambda k=k: self.set_keep(k))
+        ws = glossary()[0]
+        n.text(x + 20, y + 218, '常用词', 12, TEXT)
+        n.button(x + w - 90, y + 208, 70, 34, text='编辑', size=12, cmd=self.edit_words)
+        n.text(x + 20, y + 250, '、'.join(ws) if ws else '人名、项目名、中英混说的词，听错时按它改', 11, SUB, width=w - 40, lines=1)
         return h
 
     @classmethod
@@ -1882,6 +1943,16 @@ class Settings:
         """完整设置窗口的高度（记录窗口也用它，两个窗口一样高）。各块不画只量高度时用不到 self。"""
         secs = (cls.sec_mic, cls.sec_key, cls.sec_mode, cls.sec_ol)
         return 92 + sum(f(None, None, 20, 0, 360, False) for f in secs) + 20 * (len(secs) - 1) + 26
+
+    @classmethod
+    def view_height(cls):
+        """窗口实际多高：最多到屏幕工作区高度减上下各 20，超出的内容滚着看（麦克风多 / 屏幕矮时会超）。"""
+        wa = ctypes.wintypes.RECT(); user32.SystemParametersInfoW(0x30, 0, ctypes.byref(wa), 0)
+        return min(cls.full_height(), int((wa.bottom - wa.top) / S) - 40)
+
+    def scroll(self, k):
+        if self.only: return
+        self.n.c.yview('scroll', k, 'units'); self.sbar.update()
 
     def label(self, n, x, y, w, h, name):
         if not self.only: n.raised(x, y, w, h, 28, d=7)
@@ -1893,7 +1964,8 @@ class Settings:
         if self.only: x, w, y0, gap = 0, self.Wd, 6, 0
         else: x, w, y0, gap = 20, 360, 92, 20
         H = self.full_height() if not self.only else y0 + sum(s(n, x, 0, w, False) for s in secs) + 10
-        n.reset(H); n.c.configure(height=px(H))
+        V, oy = (self.view_height() if not self.only else H), n.c.canvasy(0) / S  # 改了设置重画时停在原来滚到的位置
+        n.reset(H); n.c.configure(height=px(V), scrollregion=(0, 0, px(self.Wd), px(H)), yscrollincrement=px(20))
         if not self.only:
             n.text(32, 26, 'SETTINGS', 18, INK, family=DISPLAY); n.text(33, 56, '设置', 11, SUB)
             n.button(272, 28, 70, 34, r=17, icon=I_CHECK, text='自检', size=12, cmd=app.open_checks)
@@ -1902,7 +1974,9 @@ class Settings:
         for i, s in enumerate(secs):
             if i and self.only: n.img.paste('#D6D6D6', (px(20), px(y), px(w - 20), px(y) + max(1, px(1))))  # 小弹窗里两块之间的细线
             y += s(n, x, y, w, True) + gap
+        if not self.only: self.sbar = ScrollBar(n, H, V)
         n.commit()
+        if not self.only: n.c.tag_raise(self.sbar.thumb); n.c.yview_moveto(oy / H); self.sbar.update()
 
     def tick(self, level, mic):
         if not hasattr(self, 'bar'): return
@@ -1930,6 +2004,13 @@ class Settings:
 
     def set_zh_out(self, o):
         cfg['zh_out'] = o; save_cfg(); log('说中文时输出', o); self.app.refresh_settings()
+
+    def set_zh_smart(self, on):
+        cfg['zh_smart'] = on; save_cfg(); log('出中文时改错字：', on); self.app.refresh_settings()
+
+    def edit_words(self):
+        if not WORDS_FILE.exists(): WORDS_FILE.write_text(WORDS_HEAD, encoding='utf-8')
+        os.startfile(WORDS_FILE)
 
     def record(self):
         if self.recording: return
@@ -1965,7 +2046,7 @@ class History:
     def __init__(self, app):
         self.app = app; self.w = sub_window(app, '记录', self.W); self.opened = set()  # 展开了原话的记录（时间, 原话）
         self.arm_clear = False  # 「清空记录」点了第一下：再点一下才真删
-        self.view = Settings.full_height()  # 和设置窗口一样高
+        self.view = Settings.view_height()  # 和设置窗口一样高
         self.head = Neu(self.w, self.W, 100); self.head.c.pack()  # 固定区（标题 + 设置卡片），高度 build 时按卡片定
         self.n = Neu(self.w, self.W, 100); self.n.c.pack()
         self.w.bind('<MouseWheel>', lambda e: self.scroll('scroll', -int(e.delta / 120) * 3, 'units'))
