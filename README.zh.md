@@ -39,7 +39,7 @@
 - **完全本地**：语音识别和大模型都在本机跑；记录是一个文本文件，不会离开你的电脑。
 - 软 UI（新拟态）界面、悬浮小球、带一键复制的记录、内置自检。
 
-<p>
+<p align="center">
 <img src="docs/main.png" height="300" alt="Quill 主窗口">
 &nbsp;
 <img src="docs/words.png" height="300" alt="常用词：识别出 cloud 时看上下文，打出 Claude">

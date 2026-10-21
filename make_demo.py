@@ -72,8 +72,21 @@ def finish():
     q = subprocess.Popen([sys.executable, str(HERE / 'shot.py'), 'Quill', str(OUT / 'main.png')])
     while q.poll() is None: root.update(); time.sleep(0.02)
     shot = Image.open(OUT / 'main.png').convert('RGBA'); mask = Image.new('L', shot.size, 0)  # 圆角外面透明（GitHub 深色主题下不露白角）
-    ImageDraw.Draw(mask).rounded_rectangle((3, 3, shot.width - 4, shot.height - 4), round(48 * S) - 3, fill=255)  # 往里收 3 像素：裁掉窗口边缘的深色残边; shot.putalpha(mask); shot.save(OUT / 'main.png')
+    ImageDraw.Draw(mask).rounded_rectangle((3, 3, shot.width - 4, shot.height - 4), round(48 * S) - 3, fill=255)  # 往里收 3 像素：裁掉窗口边缘的深色残边
+    shot.putalpha(mask); shot.save(OUT / 'main.png')
     build(); root.destroy()
+
+def save_gif(out, path, r=28):
+    """圆角外面透明，跟软件里的卡片一致。GIF 只有全透明/不透明两档，所以按覆盖一半以上算在里面。"""
+    pal = out[len(out) // 2].quantize(colors=127, method=Image.Quantize.MEDIANCUT)
+    pal.putpalette(pal.getpalette()[:127 * 3] + [0, 0, 0])  # 第 128 个颜色留给透明
+    W, H = out[0].size; mask = Image.new('L', (W * 4, H * 4), 0)
+    ImageDraw.Draw(mask).rounded_rectangle((0, 0, W * 4 - 1, H * 4 - 1), r * 4, fill=255)
+    outside = mask.resize((W, H), Image.LANCZOS).point(lambda v: 255 if v < 128 else 0)
+    gif = []
+    for o in out:
+        g = o.quantize(palette=pal, dither=Image.Dither.NONE); g.paste(127, mask=outside); gif.append(g)
+    gif[0].save(path, save_all=True, append_images=gif[1:], duration=100, loop=0, optimize=True, transparency=127)
 
 def build():
     """拼 GIF：上面一个输入框（凸起卡片），中间「按住右 Alt」，下面是真实的底部浮窗。坐标按 100% 写，乘 S。"""
@@ -101,10 +114,8 @@ def build():
         d.text((720 * S, 221 * S), 'input: ' + ('中文' if lang == 'zh' else 'English'), font=fl, fill=m.SUB, anchor='rm')
         if f is not None: im.paste(f, ((im.width - f.width) // 2, round(top * S)), f if f.mode == 'RGBA' else None)
         out.append(im.resize((W, round(H)), Image.LANCZOS))
-    pal = out[len(out) // 2].quantize(colors=128, method=Image.Quantize.MEDIANCUT)
-    gif = [o.quantize(palette=pal, dither=Image.Dither.NONE) for o in out]
-    gif[0].save(OUT / 'demo.gif', save_all=True, append_images=gif[1:], duration=100, loop=0, optimize=True)
-    print('demo.gif', len(gif), 'frames', round((OUT / 'demo.gif').stat().st_size / 1e6, 1), 'MB', flush=True)
+    save_gif(out, OUT / 'demo.gif')
+    print('demo.gif', len(out), 'frames', round((OUT / 'demo.gif').stat().st_size / 1e6, 1), 'MB', flush=True)
     for lang, _ in LINES: (HERE / f'_demo_{lang}.wav').unlink(missing_ok=True)
     m.WORDS_FILE.unlink(missing_ok=True)
 

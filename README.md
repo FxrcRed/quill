@@ -40,7 +40,7 @@ all of that verbatim, or send my voice to the cloud. Quill does the cleanup loca
 - **100% local** — speech recognition and the language model run on your machine. History is a plain text file that never leaves it.
 - Soft-UI (neumorphism) interface, floating mini ball, history with one-click copy, built-in self-test.
 
-<p>
+<p align="center">
 <img src="docs/main.png" height="300" alt="Quill main window">
 &nbsp;
 <img src="docs/words.png" height="300" alt="Word list: cloud is checked in context and typed as Claude">
