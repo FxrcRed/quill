@@ -76,7 +76,8 @@ Then start **Quill** from the desktop, wait for **READY**, hold **Right Alt** an
 - **EN / 中** (top right of the status card) chooses the language you speak. Output is always English.
 - Settings: microphone, hotkey (click *Record* and press any key), output mode, and a self-test that checks every part.
 - The shrink button (two arrows, top right) turns Quill to a floating ball at the edge of the screen; click it to come back.
-- History keeps the last 20 sentences: the original speech, the English, and the Chinese meaning.
+- History keeps the last 20 sentences: the original speech, the English, and the Chinese meaning. You can turn saving off, keep only the last 7 / 30 days, or clear it.
+- Ollama is started with Quill and stopped when Quill quits; the model leaves GPU memory after it sits idle (2 / 10 / 30 minutes, or never — in Settings).
 
 ## Development
 

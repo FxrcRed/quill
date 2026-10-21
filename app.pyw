@@ -1,7 +1,7 @@
 """本地英文语音输入（图形界面版）：按住快捷键或界面按钮说英文 → Parakeet 识别 → Qwen 改语病 + 中文翻译 → 粘贴到光标处。
 双击桌面「Quill」图标启动（pythonw，无黑框）。--selftest：无人值守自检，结果写 run.log 后退出。"""
 import math, ctypes, ctypes.wintypes, difflib, json, os, queue, re, shutil, socket, subprocess, sys, threading, time, traceback, urllib.error, urllib.request, wave
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 import tkinter as tk
 import tkinter.font as tkfont
@@ -15,6 +15,7 @@ TITLE = 'Quill'
 LLM_URL = 'http://127.0.0.1:11434'
 LLM_MODEL = 'qwen3:8b'
 LLM_GPU_LAYERS = -1   # -1 = 放显卡（Ollama 自动，一句约 1.5 秒）；0 = 全用 CPU（约 5~8 秒）。显卡被别的程序占着变慢时会自动临时改用 CPU
+KEEPS = (('2m', '2 分钟'), ('10m', '10 分钟'), ('30m', '30 分钟'), (-1, '不释放'))  # 不用多久后把模型从显存卸掉（约 5~6GB），设置里选；一直说话时每次都续上，不会卸
 SHOW_SECONDS = 3      # 底部浮窗的结果自动消失；点一下固定，再点关闭
 RATE = 16000
 SELFTEST = '--selftest' in sys.argv
@@ -118,7 +119,7 @@ def log(*a):
     if sys.stdout: print(line, flush=True)
     with open(HERE / 'run.log', 'a', encoding='utf-8') as f: f.write(line + '\n')
 
-cfg = {'hotkey': 0xA5, 'device': None, 'mode': 'fast', 'lang': 'en', 'zh_out': 'en'}  # mode：fast 直接输入 / pick 让我挑选；lang：en 说英文 / zh 说中文；zh_out：说中文时出英文 / 出中文
+cfg = {'hotkey': 0xA5, 'device': None, 'mode': 'fast', 'lang': 'en', 'zh_out': 'en', 'keep': '2m', 'hist': True, 'hist_days': 0}  # hist：存不存记录；hist_days：只留最近几天（0 = 永久）；keep：不用多久释放显存（见 KEEPS）；mode：fast 直接输入 / pick 让我挑选；lang：en 说英文 / zh 说中文；zh_out：说中文时出英文 / 出中文
 try: cfg.update(json.loads((HERE / 'settings.json').read_text(encoding='utf-8')))
 except Exception: pass
 
@@ -145,7 +146,7 @@ def llm_opts():
 def llm(text, mode='fast', on_field=None, timeout=60, ctx='', watch=True, lang='en'):  # watch=False：预热那种很短的请求不算进显卡测速
     """流式调 Ollama：JSON 里每个字段一写完就回调 on_field(名字, 内容)，英文不用等中文翻译生成完。返回所有字段。"""
     keys, (opts, on_gpu) = ('fixed',) if lang == 'zhzh' else FIELDS[mode], llm_opts()
-    body = {'model': LLM_MODEL, 'stream': True, 'think': False, 'keep_alive': '30m', 'format': 'json', 'options': opts,
+    body = {'model': LLM_MODEL, 'stream': True, 'think': False, 'keep_alive': cfg.get('keep', '2m'), 'format': 'json', 'options': opts,
             'messages': [{'role': 'system', 'content': PROMPTS[lang, mode]}, {'role': 'user', 'content': f'Context: {ctx}\nText: {text}' if ctx else text}]}
     req = urllib.request.Request(LLM_URL + '/api/chat', json.dumps(body).encode(), {'Content-Type': 'application/json'})
     buf, got, stats, t0 = '', {}, {}, time.time()
@@ -182,10 +183,19 @@ def watch_gpu(st, on_gpu, secs):
 def llm_warm():
     """只把模型载入内存（不生成），说话的同时就能载好。"""
     try:
-        body = {'model': LLM_MODEL, 'keep_alive': '30m', 'options': llm_opts()[0]}
+        body = {'model': LLM_MODEL, 'keep_alive': cfg.get('keep', '2m'), 'options': llm_opts()[0]}
         urllib.request.urlopen(urllib.request.Request(LLM_URL + '/api/generate', json.dumps(body).encode(), {'Content-Type': 'application/json'}), timeout=60).read()
         last_llm[0] = time.time()
     except Exception as e: log('预热改错失败：', repr(e))
+
+def apply_keep():
+    """释放显存的时间改了：模型正在显存里就用新时间重新计时（没载着就不去载）。"""
+    try:
+        with urllib.request.urlopen(LLM_URL + '/api/ps', timeout=2) as r:
+            if not any(m['name'].split(':latest')[0] == LLM_MODEL for m in json.loads(r.read()).get('models', [])): return
+        body = {'model': LLM_MODEL, 'keep_alive': cfg.get('keep', '2m')}
+        urllib.request.urlopen(urllib.request.Request(LLM_URL + '/api/generate', json.dumps(body).encode(), {'Content-Type': 'application/json'}), timeout=30).read()
+    except Exception as e: log('更新释放显存时间失败：', repr(e))
 
 def llm_error(e):
     if isinstance(e, (socket.timeout, TimeoutError)) or 'timed out' in str(e): return '改错太慢超时了，已直接用原话。'
@@ -201,10 +211,34 @@ def ollama_status():
     except Exception:
         return 'down'
 
+ollama_proc = [None]  # Quill 自己拉起的 Ollama 进程；退出时只关它，不动用户本来开着的
+ollama_owned = [False]  # 这台机器上 Ollama 只给 Quill 用：启动时已经在跑的也算 Quill 的，退出一起关
 def start_ollama():
     exe = shutil.which('ollama') or os.path.expandvars(r'%LOCALAPPDATA%\Programs\Ollama\ollama.exe')
-    try: subprocess.Popen([exe, 'serve'], creationflags=0x08000000, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try: ollama_proc[0] = subprocess.Popen([exe, 'serve'], creationflags=0x08000000, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception: log('启动 Ollama 失败', traceback.format_exc()); notify('找不到改错服务 Ollama，可能没装好。', 'err')
+
+def stop_ollama():
+    """退出时关掉 Ollama。只关 Quill 拉起的那个；启动时就已经在跑的（ollama_owned）也关——这机器上只有 Quill 用它。"""
+    p = ollama_proc[0]
+    try:
+        if p is not None and p.poll() is None:
+            subprocess.run(['taskkill', '/F', '/T', '/PID', str(p.pid)], creationflags=0x08000000, capture_output=True, timeout=10)
+        elif ollama_owned[0]:
+            subprocess.run(['taskkill', '/F', '/T', '/IM', 'ollama.exe'], creationflags=0x08000000, capture_output=True, timeout=10)
+        log('已关闭改错服务')
+    except Exception: log('关闭 Ollama 失败', traceback.format_exc())
+
+def ensure_ollama(wait=20):
+    """改错服务没开就自己拉起（用户不该管这个）。返回等待后的最新状态。"""
+    st = ollama_status()
+    if st != 'down': ollama_owned[0] = True; return st
+    log('改错服务没开，自动启动')
+    start_ollama(); end = time.time() + wait
+    while time.time() < end:
+        time.sleep(1); st = ollama_status()
+        if st != 'down': ollama_owned[0] = True; log('改错服务已自动启动'); return st
+    log('自动启动改错服务没成功'); return st
 
 
 # ---- 录音 / 识别 ----
@@ -257,6 +291,41 @@ def zh_tidy(t):
     t = re.sub(r'[，,、]\s*(?=[，,、。？！?!])', '', t)  # 删完剩下的空逗号
     return t.lstrip('，,、。 ') or t
 
+# 中文标点收尾：SenseVoice 按声学停顿补「。」，卡壳一下就在句子中间冒一个。
+# 能证明「还没说完」的两种信号才把句号改成逗号，别的一律保留（宁可少改也不把真句号吃掉）。
+ZH_TAIL_OPEN = ('的', '和', '跟', '把', '被', '在', '是', '要', '很', '太', '更', '最', '比较', '一些', '有点', '这个', '那个',
+                '因为', '所以', '如果', '虽然', '但是', '而且', '然后', '或者', '还有', '就是', '其实', '关于', '对于', '已经',
+                '可以', '应该', '需要', '觉得', '认为', '希望', '想要的')
+ZH_TAIL_FRAG = re.compile(r'^(?:很|太|更|最|比较|有点|有些|一点|已经|正在|马上|可以|应该|需要|就是|因为|如果|虽然|所以|但是|而且)')  # 句子以这些开头、又不到逗号就断了 = 半句
+ZH_CLOSED = ('好的', '是的', '对的', '行吧', '好吧', '可以', '没问题', '收到', '明白', '了解', '谢谢')  # 说完的短句，别合
+ZH_HEAD_CONT = re.compile(r'^\s*(?:然后|接着|另外|并且|同时|还有|那么|也就是)')  # 单字「但/可/那」会误中「但是/可以/那个」
+ZH_CLAUSE = re.compile(r'[^。！？!?]+[。！？!?]?')
+
+def zh_cut_continues(prev, nxt):
+    """这个「。」是不是说话停顿造成的假句号：前一段明显没说完 / 后一段以「然后、所以」这种接续词开头 / 后一段很短
+    （「很影响。体验。」这种被拆成的半句）。三个都不沾就认定是真句号，保留。"""
+    last = prev.rstrip('。').split('，')[-1]
+    if last in ZH_CLOSED: return False  # 「好的。」「谢谢。」是说完的短句
+    return last.endswith(ZH_TAIL_OPEN) or bool(ZH_HEAD_CONT.match(nxt)) or len(nxt) <= 4
+
+def zh_fix_inside(t):
+    """段内的句号也按上面同一套判断改成逗号。"""
+    parts = ZH_CLAUSE.findall(t)
+    out = []
+    for i, p in enumerate(parts[:-1]):
+        if p.endswith('。') and len(p) > 2 and zh_cut_continues(p, parts[i + 1]): p = p[:-1] + '，'
+        out.append(p)
+    if not parts: return t
+    return ''.join(out) + parts[-1]
+
+def zh_join(parts):
+    """拼各段中文：段尾的「。」只有看着是假句号才换「，」（？！」保留）；再收拾一次段内标点。"""
+    parts = [p.strip() for p in parts if p and p.strip()]
+    if not parts: return ''
+    t = parts[0]
+    for p in parts[1:]: t = t[:-1] + '，' + p if t.endswith('。') and zh_cut_continues(t, p) else t + p
+    return zh_fix_inside(t)
+
 def zh_needs_llm(t): return bool(ZH_FIX.search(t) or ZH_RESTART.search(t))
 
 def restarts(prev, text, n=4):
@@ -287,7 +356,7 @@ class Seg:
         self.dead = False  # 被合进后一段了：还没开始改就不用改了
         self.text = raw  # 送去改的文字（出中文时是规则删过口头禅 / 重复的）
         if lang == 'zhzh':  # 说中文 → 出中文：没有翻译那行；没有改口就不用等模型
-            self.text, self.out['zh'] = zh_tidy(raw), ''
+            self.text, self.out['zh'] = zh_fix_inside(zh_tidy(raw)), ''
             if not zh_needs_llm(self.text): self.out['fixed'] = self.text; return
         fixq.put(self)
 
@@ -490,11 +559,11 @@ class Engine:
         post('thinking', raw)
         if job.mode == 'pick':
             opts = [join_parts([s.get(k) for s in segs]) for k in ('natural', 'casual')]
-            log(f'识别（{len(segs)} 段）：', raw, '| 自然：', opts[0], '| 口语：', opts[1], f'| 松开后 {time.time() - t:.1f}s')
+            log(f'识别（{len(segs)} 段）：', *((raw, '| 自然：', opts[0], '| 口语：', opts[1]) if cfg.get('hist', True) else ('（记录已关，不记内容）',)), f'| 松开后 {time.time() - t:.1f}s')
             post('pick', raw, opts, job.by_key)
         else:
-            fixed = ''.join(s.get('fixed') for s in segs) if job.seg_lang == 'zhzh' else join_parts([s.get('fixed') for s in segs])
-            log(f'识别（{len(segs)} 段）：', raw, '| 改后：', fixed, f'| 松开后 {time.time() - t:.1f}s')
+            fixed = zh_join([s.get('fixed') for s in segs]) if job.seg_lang == 'zhzh' else join_parts([s.get('fixed') for s in segs])
+            log(f'识别（{len(segs)} 段）：', *((raw, '| 改后：', fixed) if cfg.get('hist', True) else ('（记录已关，不记内容）',)), f'| 松开后 {time.time() - t:.1f}s')
             if job.by_key: paste(fixed)
             else: root.after(0, lambda: set_clip(fixed))
             post('fixed', raw, fixed, job.by_key)
@@ -593,8 +662,12 @@ class AsrProc:
 
 eng = Engine()
 
+HIST = HERE / 'history.txt'
+HIST_DAYS = ((7, '7 天'), (30, '30 天'), (0, '永久'))
+
 def save_history(raw, fixed, zh):
-    with open(HERE / 'history.txt', 'a', encoding='utf-8') as f:
+    if not cfg.get('hist', True): return  # 用户关了记录：什么都不写
+    with open(HIST, 'a', encoding='utf-8') as f:
         f.write(f'{datetime.now():%Y-%m-%d %H:%M}\n说：{raw}\n改：{fixed}\n译：{zh}\n\n')
 
 
@@ -1540,7 +1613,7 @@ class App:
         n.button(316, 536, 64, 64, icon=I_SET, size=16, d=5, color=ICON_C, cmd=self.open_settings)
         n.commit()
 
-        r = load_history(1)
+        r = load_history(1) if cfg.get('hist', True) else []
         if r: self.set_last(*r[-1])
         self.set_state('loading')
         self.overlay = Overlay(self); self.ball = Ball(self)
@@ -1635,7 +1708,7 @@ class App:
         if not p: return
         raw, opts, by_key = p
         if i is None: log('放弃了这句'); self.cur = None; return self.overlay.hide()
-        text = opts[i]; log('选了', ('自然', '口语')[i], '：', text)
+        text = opts[i]; log('选了', ('自然', '口语')[i], *(('：', text) if cfg.get('hist', True) else ()))
         if by_key: threading.Thread(target=paste, args=(text,), daemon=True).start()
         else: set_clip(text); self.show_notice('已复制到剪贴板，去要输入的地方按 Ctrl+V。', 'ok')
         self.cur[1] = text; self.overlay.result(raw, text, self.cur[2], by_key); self.finish()
@@ -1652,7 +1725,9 @@ class App:
 
     def ollama_loop(self):
         while True:
-            post('ollama', ollama_status()); time.sleep(8)
+            st = ollama_status()
+            if st == 'down': st = ensure_ollama()  # 没开就自己拉起，不用用户管
+            post('ollama', st); time.sleep(8)
 
     def poll(self):
         try:
@@ -1782,7 +1857,7 @@ class Settings:
         return h
 
     def sec_ol(self, n, x, y, w, draw):
-        h = 122
+        h = 214
         if not draw: return h
         app = self.app; st = app.ol_last
         if st == 'down' and time.time() - app.ol_starting < 30: st = 'starting'
@@ -1796,6 +1871,10 @@ class Settings:
         last = f'上一句改错用了 {llm_stat["secs"]:.1f} 秒（{"显卡" if llm_stat["gpu"] else "CPU"}）' if llm_stat else '还没有改过句子'
         n.text(x + 20, y + 94, last, 11, SUB)
         if st == 'down': n.button(x + w - 90, y + 50, 70, 34, text='启动', size=12, cmd=self.start_ol)
+        n.text(x + 20, y + 128, '不用时释放显存', 12, TEXT)
+        cols, gap = len(KEEPS), 10; cw = (w - 40 - gap * (cols - 1)) / cols  # 和快捷键那排一样：等宽、等间距
+        for i, (k, name) in enumerate(KEEPS):
+            n.button(x + 20 + i * (cw + gap), y + 160, cw, 34, text=name, size=12, on=k == cfg.get('keep', '2m'), cmd=lambda k=k: self.set_keep(k))
         return h
 
     @classmethod
@@ -1845,6 +1924,10 @@ class Settings:
     def set_mode(self, m):
         cfg['mode'] = m; save_cfg(); log('输出方式改为', m); self.app.refresh_settings()
 
+    def set_keep(self, k):
+        cfg['keep'] = k; save_cfg(); log('释放显存：', k); self.app.refresh_settings()
+        threading.Thread(target=apply_keep, daemon=True).start()
+
     def set_zh_out(self, o):
         cfg['zh_out'] = o; save_cfg(); log('说中文时输出', o); self.app.refresh_settings()
 
@@ -1873,20 +1956,18 @@ def close_btn(n, w, cmd):
 
 
 class History:
-    """最近 20 条记录：标题行固定不动，下面的卡片可以滚；列表上下边缘渐隐（内容慢慢淡出，不是一刀切）；
+    """最近 20 条记录：标题行和「记录设置」卡片固定不动，下面的卡片可以滚；列表上下边缘渐隐（内容慢慢淡出，不是一刀切）；
     右边一根细滑块，点它或拖它能快速回到顶上。"""
-    W, TOP, FADE = 400, 74, 18  # 标题区高度（不跟着滚）、上面渐隐带高度；第一条内容顶边 = 74 + 18 = 92，和设置窗口对齐
+    W, FADE, PAD = 400, 6, 20  # 上面渐隐带高度；固定区里卡片下面留给阴影的边（阴影约 20 才淡完，再少会被切一刀）
+    CARD_Y = 92                 # 设置卡片顶边，和设置窗口第一块对齐
     FADE_B, SOLID = 56, 20      # 下面渐隐带：总高、最底下实心的一段（= 窗口边距）
 
     def __init__(self, app):
         self.app = app; self.w = sub_window(app, '记录', self.W); self.opened = set()  # 展开了原话的记录（时间, 原话）
+        self.arm_clear = False  # 「清空记录」点了第一下：再点一下才真删
         self.view = Settings.full_height()  # 和设置窗口一样高
-        h = self.head = Neu(self.w, self.W, self.TOP); h.c.pack()
-        h.text(32, 26, 'HISTORY', 18, INK, family=DISPLAY); self.count = h.text(33, 56, '', 11, SUB)
-        close_btn(h, self.W, self.w.withdraw)
-        h.button(236, 28, 104, 36, r=18, text='打开文件', size=12, cmd=lambda: os.startfile(HERE / 'history.txt') if (HERE / 'history.txt').exists() else None)
-        h.commit()
-        self.n = Neu(self.w, self.W, self.view - self.TOP, view=self.view - self.TOP); self.n.c.pack()
+        self.head = Neu(self.w, self.W, 100); self.head.c.pack()  # 固定区（标题 + 设置卡片），高度 build 时按卡片定
+        self.n = Neu(self.w, self.W, 100); self.n.c.pack()
         self.w.bind('<MouseWheel>', lambda e: self.scroll('scroll', -int(e.delta / 120) * 3, 'units'))
         self.build()
 
@@ -1894,9 +1975,19 @@ class History:
         self.n.c.yview(*a); self.bar.update()
 
     def build(self, keep=False):
-        n = self.n; recs = list(reversed(load_history(20)))
+        on = cfg.get('hist', True)
+        n = self.n; recs = list(reversed(load_history(20))) if on else []
         fe, fz, fm = fnt(12), fnt(11), fnt(11)
         oy = n.c.canvasy(0) / S if keep else 0  # 展开 / 收起原话后还停在原来滚到的地方
+        ch = 160 if on else 68  # 「记录设置」卡片：保存记录 开 / 关；开着时再加 保留几天、清空
+        top_h = self.CARD_Y + ch + self.PAD; self.lv = lv = self.view - top_h  # 固定区高度、列表视口高度
+        h = self.head; h.reset(top_h); h.c.configure(height=px(top_h))
+        h.text(32, 26, 'HISTORY', 18, INK, family=DISPLAY)
+        h.text(33, 56, f'最近 {min(20, len(recs))} 条 · 新的在上面' if on else '记录已关闭', 11, SUB)
+        close_btn(h, self.W, self.w.withdraw)
+        h.button(236, 28, 104, 36, r=18, text='打开文件', size=12, cmd=lambda: os.startfile(HIST) if HIST.exists() else None)
+        self.prefs(h, self.CARD_Y, ch, on); h.commit()
+        n.c.configure(height=px(lv))
         cards, y = [], self.FADE
         for raw, fixed, zh, when in recs:  # 卡片上面灰字：时间 · 原话（一行放不下时右边有展开钮）；卡片里只有改后的英文 + 中文，复制按钮 28 对着各自那段字上下居中
             en, cn = wrap(fixed, fe, px(280)), wrap(zh, fz, px(280))
@@ -1908,10 +1999,9 @@ class History:
             zy = max(ey + he + 8, ey + he / 2 + 34 - hz / 2)  # 两个按钮之间至少隔 6
             h = (max(zy + hz + 14, zy + hz / 2 + 24) if zh else max(ey + he + 14, ey + he / 2 + 24)) - top  # 出中文的没有中文那行
             cards.append((y, top, h, ey, he, zy, hz, lines, key if len(full) > 1 else None, fixed, zh, en, cn)); y = top + h + 20
-        H = max(self.view - self.TOP, y - 20 + self.FADE_B)  # 拉到底时最后一张卡片露在下面的渐隐带上面
+        H = max(lv, y - 20 + self.FADE_B)  # 拉到底时最后一张卡片露在下面的渐隐带上面
         n.reset(H); n.c.configure(scrollregion=(0, 0, px(self.W), px(H)), yscrollincrement=px(20))
-        self.head.c.itemconfigure(self.count, text=f'最近 {len(recs)} 条 · 新的在上面')
-        if not recs: n.text(200, 100, '还没有记录', 11, SUB, anchor='center')
+        if not recs: n.text(200, self.FADE + 30, '还没有记录' if on else '记录已关闭：说的话不会存到电脑上', 11, SUB, anchor='center')
         for y, top, h, ey, he, zy, hz, lines, key, fixed, zh, en, cn in cards:
             n.text(40, y, '\n'.join(lines), 11, SUB)
             if key:  # 原话一行放不下：小圆钮（和复制按钮同一竖列，对着第一行灰字居中），点一下展开全文，再点收起
@@ -1923,14 +2013,46 @@ class History:
             for t, cy in ((fixed, ey + he / 2), (zh, zy + hz / 2))[:2 if zh else 1]:
                 b = n.button(332, cy - 14, 28, 28, icon=I_COPY, size=10, d=3, color=ICON_C)
                 b.cmd = lambda t=t, b=b: (set_clip(t), b.set(icon=I_OK), b.n.c.after(1200, lambda: b.set(icon=I_COPY)))
-        self.bar = ScrollBar(n, H, self.view - self.TOP)
+        self.bar = ScrollBar(n, H, lv)
         n.commit()
-        for y, top in ((0, True), (self.view - self.TOP - self.FADE_B, False)):  # 上下两条渐隐带，钉在视口里
+        for y, top in ((0, True), (lv - self.FADE_B, False)):  # 上下两条渐隐带，钉在视口里
             self.bar.pin(n.c.create_image(0, 0, anchor='nw', image=self.fade(top)), y)
         n.c.tag_raise(self.bar.thumb); n.c.yview_moveto(oy / H); self.bar.update()
 
     def toggle(self, key):
         self.opened ^= {key}; self.build(keep=True)
+
+    def prefs(self, n, y, h, on):
+        """记录设置卡片：右边是 3 列网格（每格 70 宽、间隔 10，右对齐），开 / 关占后两列，清空跨后两列，上下对齐。"""
+        x, w = 20, 360; col = lambda i: x + w - 20 - (3 - i) * 70 - (2 - i) * 10
+        n.raised(x, y, w, h, 28, d=7)
+        n.text(x + 20, y + 24, '保存记录', 12, TEXT)
+        for i, (v, name) in enumerate(((True, '开'), (False, '关'))):
+            n.button(col(i + 1), y + 14, 70, 34, text=name, size=12, on=v == on, cmd=lambda v=v: self.set_hist(v))
+        if not on: return
+        n.text(x + 20, y + 70, '只留最近', 12, TEXT)
+        for i, (d, name) in enumerate(HIST_DAYS):
+            n.button(col(i), y + 60, 70, 34, text=name, size=12, on=d == cfg.get('hist_days', 0), cmd=lambda d=d: self.set_days(d))
+        n.text(x + 20, y + 116, f'共 {len(hist_blocks())} 条', 11, SUB)
+        self.clear_btn = n.button(col(1), y + 106, 150, 34, text='再点一下确认' if self.arm_clear else '清空记录', size=12,
+                                  color=RED if self.arm_clear else TEXT, cmd=self.clear)
+
+    def set_hist(self, v):
+        cfg['hist'] = v; save_cfg(); log('保存记录：', '开' if v else '关'); self.arm_clear = False; self.build()
+
+    def set_days(self, d):
+        cfg['hist_days'] = d; save_cfg(); log('记录只留：', d or '永久'); trim_history(); self.build()
+
+    def clear(self):
+        """删掉 history.txt（撤不回）：第一下变红「再点一下确认」，3 秒内再点才删。"""
+        if not self.arm_clear:
+            self.arm_clear = True; self.build(keep=True)
+            self.w.after(3000, lambda: self.arm_clear and (setattr(self, 'arm_clear', False), self.build(keep=True)))
+            return
+        self.arm_clear = False
+        try: HIST.unlink(missing_ok=True); log('记录已清空')
+        except Exception: log('清空记录失败', traceback.format_exc())
+        self.app.set_last('', '还没有记录', ''); self.app.last = None; self.build()  # 主页「上一句」也清掉
 
     _fades = {}
     def fade(self, top):
@@ -2050,9 +2172,22 @@ def mix(a, b, t):
     ca, cb = (int(a[i:i + 2], 16) for i in (1, 3, 5)), (int(b[i:i + 2], 16) for i in (1, 3, 5))
     return '#' + ''.join(f'{round(x + (y - x) * t):02x}' for x, y in zip(ca, cb))
 
-def load_history(n):
-    try: blocks = (HERE / 'history.txt').read_text(encoding='utf-8').strip().split('\n\n')
+def hist_blocks():
+    try: return [b for b in HIST.read_text(encoding='utf-8').strip().split('\n\n') if b.strip()]
     except Exception: return []
+
+def trim_history():
+    """只留最近 hist_days 天的记录（0 = 永久不删）。启动时和改保留期限时跑一次；一年也就几 MB，整个重写不费事。"""
+    days = cfg.get('hist_days', 0)
+    if not days or not HIST.exists(): return
+    cut = f'{datetime.now() - timedelta(days=days):%Y-%m-%d %H:%M}'
+    blocks = hist_blocks(); keep = [b for b in blocks if b[:16] >= cut]
+    if len(keep) == len(blocks): return
+    try: HIST.write_text(''.join(b + '\n\n' for b in keep), encoding='utf-8'); log(f'记录：删掉 {days} 天前的 {len(blocks) - len(keep)} 条')
+    except Exception: log('清理旧记录失败', traceback.format_exc())
+
+def load_history(n):
+    blocks = hist_blocks()
     out = []
     for b in blocks[-n:]:
         d = {l[:2]: l[2:] for l in b.splitlines()[1:]}
@@ -2076,6 +2211,7 @@ def quit_app():
     try:
         if eng.stream: eng.stream.close()
     except Exception: pass
+    stop_ollama()  # 自己拉起的改错服务跟着关，别一直占着显存
     os._exit(0)
 
 
@@ -2089,6 +2225,7 @@ if __name__ == '__main__':
         sys.exit(0)
     (HERE / 'run.log').write_text('', encoding='utf-8')
     log('启动' + ('（自检模式）' if SELFTEST else ''))
+    trim_history()
     try: ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('local.voice-input')  # 任务栏显示自己的图标
     except Exception: pass
     try: ctypes.windll.shcore.SetProcessDpiAwareness(1)  # 高分屏下不模糊；坐标按 S 缩放
