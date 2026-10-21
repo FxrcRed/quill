@@ -2,7 +2,7 @@
 # Right-click -> "Run with PowerShell", or:  powershell -ExecutionPolicy Bypass -File setup.ps1
 # Options:
 #   -Mirror        download models from hf-mirror.com (faster in mainland China)
-#   -NoOllama      skip installing Ollama / pulling qwen3:8b
+#   -NoOllama      skip installing Ollama / pulling qwen3:4b
 #   -NoShortcut    do not create the desktop shortcut
 param([switch]$Mirror, [switch]$NoOllama, [switch]$NoShortcut)
 $ErrorActionPreference = 'Stop'
@@ -31,7 +31,8 @@ $lib = Join-Path $here '.venv\Lib\site-packages\sherpa_onnx\lib'
 Get-ChildItem -Path (Join-Path $here '.venv') -Recurse -Include 'onnxruntime.dll', 'sherpa-onnx-c*-api.dll' -ErrorAction SilentlyContinue |
     Where-Object { $_.DirectoryName -ne $lib } | ForEach-Object { Copy-Item $_.FullName $lib -Force }
 
-# 3. Speech models (Parakeet for English ~650 MB, SenseVoice for Chinese ~240 MB)
+# 3. Speech models (Parakeet for live English text ~650 MB, Whisper large-v3-turbo for the final English text ~1.6 GB,
+#    SenseVoice for Chinese ~240 MB). Whisper runs on an NVIDIA GPU; without one Quill just uses Parakeet.
 Step 'Downloading speech models (skips files you already have)'
 $env:HF_HUB_DISABLE_XET = '1'
 if ($Mirror) { $env:HF_ENDPOINT = 'https://hf-mirror.com' }
@@ -42,6 +43,8 @@ jobs = {
     'models/parakeet': ('istupakov/parakeet-tdt-0.6b-v3-onnx',
                         ['config.json', 'vocab.txt', 'encoder-model.int8.onnx', 'decoder_joint-model.int8.onnx']),
     'models/sensevoice': ('csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17', ['tokens.txt', 'model.int8.onnx']),
+    'models/whisper': ('deepdml/faster-whisper-large-v3-turbo-ct2',
+                       ['config.json', 'preprocessor_config.json', 'tokenizer.json', 'vocabulary.json', 'model.bin']),
 }
 for d, (repo, files) in jobs.items():
     for f in files:
@@ -51,9 +54,9 @@ for d, (repo, files) in jobs.items():
 $py | .venv\Scripts\python.exe -
 if ($LASTEXITCODE -ne 0) { throw 'Model download failed (try: setup.ps1 -Mirror)' }
 
-# 4. Ollama + qwen3:8b (grammar fixing / translation)
+# 4. Ollama + qwen3:4b (grammar fixing / translation; qwen3:8b is optional, pick it in Settings)
 if (-not $NoOllama) {
-    Step 'Checking Ollama and qwen3:8b'
+    Step 'Checking Ollama and qwen3:4b'
     if (-not (Get-Command ollama -ErrorAction SilentlyContinue)) {
         if (Get-Command winget -ErrorAction SilentlyContinue) {
             winget install --id Ollama.Ollama -e --accept-source-agreements --accept-package-agreements
@@ -61,11 +64,11 @@ if (-not $NoOllama) {
         } else { Write-Host 'Please install Ollama from https://ollama.com/download, then run this script again.' -ForegroundColor Yellow }
     }
     if (Get-Command ollama -ErrorAction SilentlyContinue) {
-        # Already have a qwen3:8b (e.g. built from a GGUF)? Keep it: pulling would re-download 5 GB.
-        if ((ollama list | Out-String) -match '(?m)^qwen3:8b\s') { Write-Host '  have qwen3:8b' }
+        # Already have qwen3:4b (e.g. built from a GGUF)? Keep it: pulling would re-download it.
+        if ((ollama list | Out-String) -match '(?m)^qwen3:4b\s') { Write-Host '  have qwen3:4b' }
         else {
-            Write-Host '  pulling qwen3:8b (~5 GB). If it is very slow, download a Q4_K_M GGUF of Qwen3-8B and use "ollama create qwen3:8b -f Modelfile".'
-            ollama pull qwen3:8b
+            Write-Host '  pulling qwen3:4b (~2.6 GB). For the higher-quality option run "ollama pull qwen3:8b" (~5 GB) and pick it in Settings.'
+            ollama pull qwen3:4b
         }
     }
 }

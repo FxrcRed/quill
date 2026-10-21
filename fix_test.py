@@ -15,6 +15,8 @@ CASES = [  # 造的句子，仿真实识别里的错误类型（重说、切在�
     ["Well, it's very weird because it's very late in night, but I'm still studying.", "Studying math is a very Casher things for me."],
     ["I mean relax myself. Do some running'cause it my old school make me The", "make me very tired."],
     ["Can you, can you tell me how to, how to fix this bug?"],
+    ["Here is a thing.", "What I want to show you.", "Is the app.", "Quail, not the old one.", "I don't know.", "If there is some.", "Problem or not?"],  # 识别在每个停顿补句号
+    ["When I open the window and click the button.", "Okay."],  # 结尾单独一个短词：别把前一句重写一遍
 ]
 ZH_CASES = [  # 说中文模式（fix_test.py zh）
     ["嗯，我想我想把这个按钮的颜色不对，是大小改一下。", "然后那个记录页面也要加一个滚动条，方便我回到最上面。"],
@@ -56,7 +58,7 @@ def run(mode='fast', lang='en', out='en'):
         for s in segs[:-1]:  # 和 Job.update 一样：停顿前是半句话就不切，连着下一段
             buf = (buf + ' ' + s).strip()
             if m.sentence_end(buf): job.add(buf); buf = ''
-        job.add((buf + ' ' + segs[-1]).strip())
+        job.add((buf + ' ' + segs[-1]).strip()); job.whole()  # 和 Job.finish 一样：松开后整句重改
         res = (m.zh_join if job.seg_lang == 'zhzh' else m.join_parts)([s.get('fixed' if job.mode == 'fast' else 'natural') for s in job.segs])
         print('说：', ' | '.join(segs)); print('改：', res, f'（{time.time() - t1:.1f}s）'); print()
     print(f'共 {time.time() - t0:.1f}s')

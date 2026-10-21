@@ -13,7 +13,9 @@ from PIL import Image, ImageChops, ImageDraw, ImageEnhance, ImageFilter, ImageFo
 HERE = Path(__file__).parent
 TITLE = 'Quill'
 LLM_URL = 'http://127.0.0.1:11434'
-LLM_MODEL = 'qwen3:8b'
+LLM_MODEL = 'qwen3:4b'  # 设置「改错模型」里选（cfg['llm']）：4B 约 2.9GB 显存、快约 35%；8B 约 4.5GB，很乱的话（重说、改口）改得更准
+LLM_MODELS = (('qwen3:4b', '标准 4B'), ('qwen3:8b', '高质量 8B'))
+WHISPER_TIMEOUT = 8   # 松开后 Whisper 整段识别最多等几秒，超时 / 出错就用实时识别（Parakeet）的结果
 LLM_GPU_LAYERS = -1   # -1 = 放显卡（Ollama 自动，一句约 1.5 秒）；0 = 全用 CPU（约 5~8 秒）。显卡被别的程序占着变慢时会自动临时改用 CPU
 KEEPS = (('2m', '2 分钟'), ('10m', '10 分钟'), ('30m', '30 分钟'), (-1, '不释放'))  # 不用多久后把模型从显存卸掉（约 5~6GB），设置里选；一直说话时每次都续上，不会卸
 SHOW_SECONDS = 3      # 底部浮窗的结果自动消失；点一下固定，再点关闭
@@ -128,6 +130,7 @@ def log(*a):
 cfg = {'hotkey': 0xA5, 'device': None, 'mode': 'fast', 'lang': 'en', 'zh_out': 'en', 'keep': '2m', 'hist': True, 'hist_days': 0, 'zh_smart': True}  # zh_smart：出中文时每句都送模型改错字（关掉只送带改口的）；hist：存不存记录；hist_days：只留最近几天（0 = 永久）；keep：不用多久释放显存（见 KEEPS）；mode：fast 直接输入 / pick 让我挑选；lang：en 说英文 / zh 说中文；zh_out：说中文时出英文 / 出中文
 try: cfg.update(json.loads((HERE / 'settings.json').read_text(encoding='utf-8')))
 except Exception: pass
+if cfg.get('llm') in dict(LLM_MODELS): LLM_MODEL = cfg['llm']
 
 def save_cfg():
     try: (HERE / 'settings.json').write_text(json.dumps(cfg, ensure_ascii=False), encoding='utf-8')
@@ -292,8 +295,9 @@ def with_glossary(p):
     g = glossary()[1]; i = p.find('\nExamples:')
     return p if not g else p + g if i < 0 else p[:i] + g + p[i:]
 
-def llm(text, mode='fast', on_field=None, timeout=60, ctx='', watch=True, lang='en'):  # watch=False：预热那种很短的请求不算进显卡测速
-    """流式调 Ollama：JSON 里每个字段一写完就回调 on_field(名字, 内容)，英文不用等中文翻译生成完。返回所有字段。"""
+def llm(text, mode='fast', on_field=None, timeout=60, ctx='', watch=True, lang='en', stop=None):  # watch=False：预热那种很短的请求不算进显卡测速
+    """流式调 Ollama：JSON 里每个字段一写完就回调 on_field(名字, 内容)，英文不用等中文翻译生成完。返回所有字段。
+    stop()：返回 True 就断开（Ollama 跟着停），这段不用了（比如松开后要整句重改），别让它挡着后面的请求。"""
     keys, (opts, on_gpu) = ('fixed',) if lang == 'zhzh' else FIELDS[mode], llm_opts()
     body = {'model': LLM_MODEL, 'stream': True, 'think': False, 'keep_alive': cfg.get('keep', '2m'), 'format': 'json', 'options': opts,
             'messages': [{'role': 'system', 'content': with_glossary(PROMPTS[lang, mode])}, {'role': 'user', 'content': f'Context: {ctx}\nText: {text}' if ctx else text}]}
@@ -304,6 +308,7 @@ def llm(text, mode='fast', on_field=None, timeout=60, ctx='', watch=True, lang='
         if on_field: on_field(k, v)
     with urllib.request.urlopen(req, timeout=timeout) as r:
         for line in r:
+            if stop and stop(): return got
             if not line.strip(): continue
             m = json.loads(line); buf += m.get('message', {}).get('content', '')
             for k in keys:
@@ -345,6 +350,16 @@ def apply_keep():
         body = {'model': LLM_MODEL, 'keep_alive': cfg.get('keep', '2m')}
         urllib.request.urlopen(urllib.request.Request(LLM_URL + '/api/generate', json.dumps(body).encode(), {'Content-Type': 'application/json'}), timeout=30).read()
     except Exception as e: log('更新释放显存时间失败：', repr(e))
+
+def set_llm(name):
+    """换改错模型：先把旧的从显存卸掉（两个一起载着 8GB 显存放不下），再把新的载上。"""
+    global LLM_MODEL
+    old, LLM_MODEL = LLM_MODEL, name; cfg['llm'] = name; save_cfg(); log('改错模型：', name)
+    def go():
+        try: urllib.request.urlopen(urllib.request.Request(LLM_URL + '/api/generate', json.dumps({'model': old, 'keep_alive': 0}).encode(), {'Content-Type': 'application/json'}), timeout=30).read()
+        except Exception as e: log('卸载旧改错模型失败：', repr(e))
+        llm_warm()
+    threading.Thread(target=go, daemon=True).start()
 
 def llm_error(e):
     if isinstance(e, (socket.timeout, TimeoutError)) or 'timed out' in str(e): return '改错太慢超时了，已直接用原话。'
@@ -497,10 +512,11 @@ def zh_needs_llm(t):
 def restarts(prev, text, n=4):
     """新的一段该不该和上一段合起来改（改错时模型才看得到改口 / 重说）：
     text 开头 n 个词（中文 6 个字）在 prev 里原样出现过（停下来又从头重说）；或者 text 以「不对 / 我是说 / no / I mean」这种改口开头；
-    或者上一段太短（「嗯，我想。」这种没说完的）。"""
+    或者上一段太短（「嗯，我想。」这种没说完的）；或者这一段太短（单独剩一个「Okay.」，模型会把 Context 重写一遍进来）。"""
     if CJK.search(text): n = 6
     a, b = words(prev), words(text)[:n]
     if len(a) < (6 if CJK.search(prev) else 3) or FIX_START.match(text.lstrip(' ，,')): return True
+    if len(words(text)) < (6 if CJK.search(text) else 3): return True
     return len(b) == n and any(a[i:i + n] == b for i in range(len(a) - n + 1))
 
 def join_parts(parts):
@@ -517,12 +533,12 @@ def join_parts(parts):
 
 class Seg:
     """一段话：识别好的原文 + 改错结果（后台按顺序改，每个字段一出来就能用）。"""
-    def __init__(self, raw, mode, ctx='', lang='en'):
+    def __init__(self, raw, mode, ctx='', lang='en', fix=True):
         self.raw, self.mode, self.ctx, self.lang, self.out, self.cv = raw, mode, ctx, lang, {}, threading.Condition()
         self.dead = False  # 被合进后一段了：还没开始改就不用改了
         self.text = raw  # 送去改的文字，prep() 在后台换词 / 理干净
         if lang == 'zhzh': self.out['zh'] = ''  # 说中文 → 出中文：没有翻译那行
-        fixq.put(self)
+        if fix: fixq.put(self)  # fix=False：只记原话给浮窗显示（松开后 Whisper 整段重认，说话时不用先改）
 
     def prep(self):
         """后台（fix_worker）里做：先按常用词表换掉听错的词，出中文再用规则删口头禅 / 重复。返回还要不要送模型改。
@@ -546,7 +562,7 @@ def fix_worker():
         s = fixq.get()
         if s.dead: continue
         try:
-            if s.prep(): llm(s.text, s.mode, s.put, ctx=s.ctx, lang=s.lang)
+            if s.prep(): llm(s.text, s.mode, s.put, ctx=s.ctx, lang=s.lang, stop=lambda: s.dead)
         except Exception as e:
             log('改错失败：', repr(e)); err = '（' + llm_error(e) + '）'
             if s.lang == 'zhzh': notify(llm_error(e), 'warn')  # 没有翻译那行可以放提示
@@ -554,6 +570,18 @@ def fix_worker():
                 if k not in s.out: s.put(k, err if k == 'zh' else s.text)
 
 
+REC_DIR, REC_KEEP = HERE / 'recordings', 50
+def save_rec(audio):
+    """settings.json 里 "save_audio": true 时把每句录音存成 wav（拿来对比识别模型；不进 git，只留最近 REC_KEEP 句）。"""
+    try:
+        REC_DIR.mkdir(exist_ok=True)
+        with wave.open(str(REC_DIR / f'{datetime.now():%Y%m%d-%H%M%S}.wav'), 'wb') as w:
+            w.setnchannels(1); w.setsampwidth(2); w.setframerate(RATE)
+            w.writeframes((np.clip(audio.reshape(-1), -1, 1) * 32767).astype(np.int16).tobytes())
+        for old in sorted(REC_DIR.glob('*.wav'))[:-REC_KEEP]: old.unlink()
+    except Exception: log('存录音失败', traceback.format_exc())
+
+WHOLE_MAX = 80  # 松开后整句重改的上限（词）：更长的话等太久，照旧用分段改好的结果
 class Job:
     """一次录音。说话时每 0.5 秒识别一次给浮窗实时显示；遇到停顿就把前面那句定下来、先送去改错，松开后只剩最后一段要处理。"""
     def __init__(self, by_key, mode, lang='en', out='en'):
@@ -562,6 +590,7 @@ class Job:
         self.seg_lang = 'zhzh' if lang == 'zh' and out == 'zh' else lang  # 改错用哪套提示词
         if self.seg_lang == 'zhzh': self.mode = 'fast'  # 「让我挑选」是挑英文的说法，出中文时直接输入
         self.spec, self.last_part = None, ''  # 说话停下来时先改着的那段（松开时原话没变就直接用）
+        self.defer = self.seg_lang == 'en' and eng.wh is not None  # 说英文且 Whisper 能用：说话时只显示，松开后整段重认再改一次
 
     def raw(self, segs): return ('' if self.lang == 'zh' else ' ').join(s.raw for s in segs)  # 中文段之间不加空格
 
@@ -578,7 +607,7 @@ class Job:
         sp, self.spec = self.spec, None
         if sp and (sp.raw, sp.ctx) == (text, ctx): return self.segs.append(sp)  # 停顿时已经先改上了
         if sp: sp.dead = True
-        self.segs.append(Seg(text, self.mode, ctx, self.seg_lang))
+        self.segs.append(Seg(text, self.mode, ctx, self.seg_lang, fix=not self.defer))
 
     def speculate(self, part):
         """出中文：识别出来的尾巴 0.5 秒没变（停下来了）就先送去改，松开时多半不用再等模型。"""
@@ -608,13 +637,32 @@ class Job:
             text = eng.recognize(tail, self.lang) if has_speech(tail) or not self.segs and len(tail) > RATE * 0.3 else ''  # 结尾只剩呼吸声时不识别，免得冒出 "Yeah."
             if text: self.add(text)
             self.pos = len(a)
+            if self.defer: self.rewhisper(a)
+            else: self.whole()
             return list(self.segs)
+
+    def rewhisper(self, a):
+        """说英文：整段录音给 Whisper 重认，结果当一段去改。Parakeet 什么都没听到时不送（Whisper 对着没声音会编一句）；
+        Whisper 出错 / 超时就用 Parakeet 拼起来的原话。"""
+        raw = self.raw(self.segs)
+        text = (eng.whisper(a) if raw else '') or raw
+        self.segs = [Seg(text, self.mode, '', self.seg_lang)] if text else []
+
+    def whole(self):
+        """松开后整句重改：识别在每个停顿都补句号（「Is the program.」），分段单独改时半句话改不动语法。
+        切过段、又不太长（WHOLE_MAX 个词以内）就把全部原话合成一段重改，前面分段的结果不要了（正在改的那段会断开）。
+        代价：松开后要等整句改完（20 秒的话约 1.5~2 秒）。出中文不用（规则 + 停顿时先改着已经够好）。"""
+        if len(self.segs) < 2 or self.seg_lang == 'zhzh' or len(words(self.raw(self.segs))) > WHOLE_MAX: return
+        raw = self.raw(self.segs)
+        for s in self.segs: s.dead = True
+        self.segs = [Seg(raw, self.mode, '', self.seg_lang)]
 
 
 class Engine:
     def __init__(self):
         self.asr, self.load_error, self.loaded = None, '', threading.Event()
         self.zh, self.zh_error, self.zh_loaded, self.zh_started = None, '', threading.Event(), False  # 中文识别（SenseVoice），第一次切到「中」才载
+        self.wh = None  # Whisper（说英文时松开后整段再认一遍），载不了就是 None
         self.stream, self.rec, self.src, self.chunks, self.probe, self.peak = None, False, None, [], None, 0.0
         self.key_paused, self.busy, self.picking, self.job, self.tried = False, False, False, None, False  # tried：已经试过打开麦克风
 
@@ -656,9 +704,27 @@ class Engine:
         finally:
             self.loaded.set()
         post('state', self.idle_state())
+        if self.asr: threading.Thread(target=self.load_wh, daemon=True).start()
         if self.asr and ollama_status() == 'ok':
             try: llm('hello', watch=False, lang=cfg['lang']); log('改错模型已预热', '（显卡）' if llm_opts()[1] else '（CPU）')
             except Exception as e: log('预热改错失败：', e)
+
+    def load_wh(self):
+        """Whisper（松开后整段再认一遍）：没装 / 显卡用不了就算了，照旧只用 Parakeet，不提示用户。"""
+        if not (HERE / 'models' / 'whisper' / 'model.bin').exists(): return log('没有 models\\whisper，只用 Parakeet')
+        try: t = time.time(); self.wh = AsrProc('wh'); log(f'整段识别（Whisper）已加载 {time.time() - t:.1f}s')
+        except Exception as e: log('Whisper 加载失败，只用 Parakeet：', e)
+
+    def whisper(self, a):
+        """整段识别，最多等 WHISPER_TIMEOUT 秒；出错 / 超时返回 ''（调用方用 Parakeet 的结果）。"""
+        if not self.wh: return ''
+        got = []
+        def run():
+            try: got.append(self.wh.recognize(a))
+            except Exception as e: log('Whisper 出错：', repr(e))
+        th = threading.Thread(target=run, daemon=True); t = time.time(); th.start(); th.join(WHISPER_TIMEOUT)
+        if not got: log(f'Whisper 没出结果（{time.time() - t:.1f}s），用实时识别的'); return ''
+        log(f'Whisper {time.time() - t:.1f}s'); return got[0]
 
     def load_zh(self):
         if self.zh_started: return
@@ -725,6 +791,7 @@ class Engine:
         log(f'录到 {len(audio) / RATE:.1f}s，音量峰值 {peak:.4f}')
         if len(audio) < RATE * 0.3: return notify('按得太短了：按住说完一整句再松开。', 'warn', True)
         if peak < 0.003: post('mic_bad'); return notify(MIC_HINT, 'err', True)
+        if cfg.get('save_audio'): save_rec(audio)
         post('state', 'busy', job.by_key)
         self.ev(job.lang).wait()
         if not self.model(job.lang): return notify(self.error(job.lang), 'err', True)
@@ -794,13 +861,24 @@ def asr_worker(lang):
                                                                 language='zh', use_itn=True, num_threads=4)
             def rec(a):
                 st = r.create_stream(); st.accept_waveform(RATE, a); r.decode_stream(st); return st.result.text
+        elif lang == 'wh':  # 松开后整段再认一遍（Whisper large-v3-turbo，显卡，约 1GB 显存）：比 Parakeet 按段认准得多，还能带上常用词
+            cuda = Path(os.path.expandvars(r'%LOCALAPPDATA%\Programs\Ollama\lib\ollama\cuda_v12'))  # 借 Ollama 自带的 cuBLAS（只 add_dll_directory 不够，要放 PATH）
+            if cuda.exists(): os.environ['PATH'] = str(cuda) + os.pathsep + os.environ['PATH']
+            from faster_whisper import WhisperModel
+            m = WhisperModel(str(HERE / 'models' / 'whisper'), device='cuda', compute_type='int8_float16')
+            m.transcribe(np.zeros(RATE, np.float32), language='en')  # 先跑一次：缺库在这里就报出来，第一句也不用等
+            def rec(a):
+                terms = [t for t in glossary()[0] if t.isascii()]
+                segs, _ = m.transcribe(a, language='en', beam_size=1, condition_on_previous_text=False,
+                                       initial_prompt=('Glossary: ' + ', '.join(terms) + '.') if terms else None)
+                return ' '.join(s.text.strip() for s in segs)
         else:
             import onnx_asr
             m = onnx_asr.load_model('nemo-parakeet-tdt-0.6b-v3', HERE / 'models' / 'parakeet', quantization='int8')
             rec = lambda a: m.recognize(a, sample_rate=RATE)
     except Exception:
         log('识别子进程加载失败', lang, traceback.format_exc())
-        return send('models\\%s 里的文件可能缺了' % ('sensevoice' if lang == 'zh' else 'parakeet'))
+        return send('models\\%s 里的文件可能缺了' % {'zh': 'sensevoice', 'wh': 'whisper'}.get(lang, 'parakeet'))
     send('OK')
     while len(h := inp.read(4)) == 4:  # 主程序退出、管道关掉就结束
         a = np.frombuffer(inp.read(int.from_bytes(h, 'little') * 4), np.float32)
@@ -2129,7 +2207,7 @@ class Settings:
         return h
 
     def sec_ol(self, n, x, y, w, draw):
-        h = 172  # 常用词在记录窗口（History.words）
+        h = 220  # 常用词在主页；改错模型一排（和「说中文时」那排一样右对齐）+ 释放显存一排
         if not draw: return h
         app = self.app; st = app.ol_last
         if st == 'down' and time.time() - app.ol_starting < 30: st = 'starting'
@@ -2142,10 +2220,13 @@ class Settings:
         if llm_stat: info += f' · 上一句 {llm_stat["secs"]:.1f} 秒'
         n.text(x + 20, y + 56, info, 11, SUB, width=w - (130 if st == 'down' else 40), lines=1)
         if st == 'down': n.button(x + w - 90, y + 46, 70, 34, text='启动', size=12, cmd=self.start_ol)
-        n.text(x + 20, y + 90, '不用时释放显存', 12, TEXT)
+        n.text(x + 20, y + 96, '改错模型', 12, TEXT)
+        for i, (k, name) in enumerate(LLM_MODELS):
+            n.button(x + w - 210 + i * 100, y + 86, 90, 34, text=name, size=12, on=k == LLM_MODEL, cmd=lambda k=k: self.set_llm(k))
+        n.text(x + 20, y + 138, '不用时释放显存', 12, TEXT)
         cols, gap = len(KEEPS), 10; cw = (w - 40 - gap * (cols - 1)) / cols  # 和快捷键那排一样：等宽、等间距
         for i, (k, name) in enumerate(KEEPS):
-            n.button(x + 20 + i * (cw + gap), y + 118, cw, 34, text=name, size=12, on=k == cfg.get('keep', '2m'), cmd=lambda k=k: self.set_keep(k))
+            n.button(x + 20 + i * (cw + gap), y + 166, cw, 34, text=name, size=12, on=k == cfg.get('keep', '2m'), cmd=lambda k=k: self.set_keep(k))
         return h
 
     @classmethod
@@ -2211,6 +2292,10 @@ class Settings:
     def set_keep(self, k):
         cfg['keep'] = k; save_cfg(); log('释放显存：', k); self.app.refresh_settings()
         threading.Thread(target=apply_keep, daemon=True).start()
+
+    def set_llm(self, k):
+        if k == LLM_MODEL: return
+        set_llm(k); self.app.refresh_settings()
 
     def set_zh_out(self, o):
         cfg['zh_out'] = o; save_cfg(); log('说中文时输出', o); self.app.refresh_settings()

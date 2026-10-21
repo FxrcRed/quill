@@ -32,7 +32,7 @@
 - **不只改语法**：去掉语气词、结巴、说一半放弃的话和改口（「不对，我是说……」），修正时态、冠词、单复数。
 - **说中文，出英文**：主页点一下 **EN / 中** 就能切换，中英混着说也行。
 - **也可以说中文、出干净的中文**：设置 →「说中文时」选「出中文」。嗯、呃、口吃、重复按规则直接删，只有带改口（不对 / 我是说……）的句子才交给大模型，大部分句子松开后约半秒出字。
-- **快**：说话时，已经说完的句子就在后台先改；英文通常松开后约 0.5 秒出字（N 卡）。
+- **准**：松开后用 Whisper 把整段话再认一遍，再一次理顺；英文通常松开后 2~3 秒出字（N 卡）。
 - **两种输出方式**：「直接输入」，或者「让我挑选」（给自然版、口语版两种）。
 - **看得到改了什么**：屏幕下方的小浮窗显示实时识别、改过的词和中文意思。
 - **记得你的常用词**：主页下面的常用词表（人名、项目名、工具名）。写 `Claude: cloud`，识别出 cloud 时 Quill 看上下文判断是不是 Claude。闲着时每天扫一次记录，把可能听错的词列出来，点一下加入或忽略。
@@ -49,13 +49,14 @@
 
 ```
 按住快捷键 → 麦克风（16 kHz）
-          → 语音识别    英文：NVIDIA Parakeet TDT 0.6B v3（ONNX，CPU）
+          → 语音识别    英文：说话时 NVIDIA Parakeet TDT 0.6B v3（ONNX，CPU）出实时文字，
+                              松开后 Whisper large-v3-turbo（faster-whisper，显卡）整段再认一遍，带上你的常用词
                         中文：SenseVoice Small（sherpa-onnx，CPU）
-          → 理顺 / 翻译  Qwen3 8B（Ollama，有显卡用显卡，慢了自动换 CPU）
+          → 理顺 / 翻译  Qwen3 4B（Ollama，有显卡用显卡，慢了自动换 CPU；设置里可换成 8B）
           → 粘贴到光标处
 ```
 
-在一句话说完的停顿处分段，前面的句子在你还在说的时候就已经改好了。识别跑在单独的进程里，界面不会卡。
+Whisper 整段认，比按停顿一段段认准得多（不会把半句话认成别的词）；没有 N 卡时只用 Parakeet。识别跑在单独的进程里，界面不会卡。
 
 ## 安装
 
@@ -67,8 +68,8 @@ cd quill
 powershell -ExecutionPolicy Bypass -File setup.ps1 -Mirror     # 国内网络加 -Mirror，从 hf-mirror.com 下模型
 ```
 
-`setup.ps1` 会装好 [uv](https://github.com/astral-sh/uv) 和 Python 3.12（不用自己装 Python）、依赖包、两个语音模型（约 0.9 GB）、
-[Ollama](https://ollama.com) 和 `qwen3:8b`（约 5 GB），并在桌面建快捷方式。可以重复运行，已有的会跳过。
+`setup.ps1` 会装好 [uv](https://github.com/astral-sh/uv) 和 Python 3.12（不用自己装 Python）、依赖包、三个语音模型（约 2.5 GB）、
+[Ollama](https://ollama.com) 和 `qwen3:4b`（约 2.6 GB；想要更准可以再 `ollama pull qwen3:8b`，在设置里换），并在桌面建快捷方式。可以重复运行，已有的会跳过。
 
 装好后双击桌面上的 **Quill**，等出现 **READY**，按住 **右 Alt** 说话。
 
@@ -95,6 +96,7 @@ powershell -ExecutionPolicy Bypass -File setup.ps1 -Mirror     # 国内网络加
 
 - NVIDIA 的 [Parakeet TDT 0.6B v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3)（CC-BY-4.0），[istupakov](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx) 导出的 ONNX 版，用 [onnx-asr](https://github.com/istupakov/onnx-asr) 运行
 - FunAudioLLM 的 [SenseVoice](https://github.com/FunAudioLLM/SenseVoice)，用 [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) 运行
+- OpenAI 的 [Whisper large-v3-turbo](https://huggingface.co/openai/whisper-large-v3-turbo)（MIT），用 [faster-whisper](https://github.com/SYSTRAN/faster-whisper) 运行
 - [Qwen3](https://github.com/QwenLM/Qwen3)（Apache-2.0），由 [Ollama](https://ollama.com) 提供服务
 - 字体：[Noto Sans SC](https://github.com/notofonts/noto-cjk) 和 [Michroma](https://github.com/googlefonts/Michroma-font)（SIL OFL 1.1）
 
