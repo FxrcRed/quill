@@ -1422,7 +1422,7 @@ class Overlay:
         user32.SetWindowLongW(self.hwnd, -20, ex & ~0x80000); user32.SetWindowLongW(self.hwnd, -20, ex | 0x80000)  # 分层：要先清掉再设，否则 UpdateLayeredWindow 报参数错误（87）
         self.mode, self.d, self.visible, self.pinned, self.inside, self.hover, self.timer = None, {}, False, False, False, None, None
         self.mouse_down = False  # 上一帧鼠标键是不是按着（点浮窗外面就关）
-        self.cards, self.base, self.hits, self.wgeo, self.bar_c, self.h = {}, None, [], None, (0, 0), self.ROW_H
+        self.cards, self.base, self.hits, self.wgeo, self.bar_c, self.h, self.ck = {}, None, [], None, (0, 0), self.ROW_H, None
         self.backdrop = (None, None)  # 浮窗后面那块屏幕的模糊图：(屏幕上的范围, 图)，一次截得比浮窗高，浮窗变高时直接从里面裁
         self.sm, self.lv, self.t0 = [0.0] * 6, 0.0, time.time()
 
@@ -1470,10 +1470,12 @@ class Overlay:
         """液态玻璃卡片的固定部分（按高度缓存）：under = 卡片外圈的柔和投影；face = 圆角面的形状（玻璃底每帧贴在这里）；
         over = 玻璃上的光：顶部一层往下淡出的高光、贴着边缘的一圈亮光（上面亮、往下几乎没有，是光不是框）、底部一点点暗。
         没有描边。投影只在卡片外面（卡片是透的，垫在下面会透出来）。"""
-        if h not in self.cards:
-            M, W = self.M, self.W; size = (px(W + 2 * M), px(h + 2 * M)); box = (px(M), px(M), px(M + W), px(M + h)); R = px(26)
+        pill = self.mode != 'pick'; key = self.ck = (h, pill)  # 一行样式两头是半圆（胶囊）；挑版本那张高，还是普通圆角
+        if key not in self.cards:
+            M, W = self.M, self.W; size = (px(W + 2 * M), px(h + 2 * M)); box = (px(M), px(M), px(M + W), px(M + h))
+            R = px(h / 2) if pill else px(26)
             face = _shape(size, box, R, 2)
-            sh = Image.new('L', size, 0); ImageDraw.Draw(sh).rounded_rectangle((px(M + 8), px(M + 10), px(M + W - 8), px(M + h + 6)), R, fill=80)
+            sh = Image.new('L', size, 0); ImageDraw.Draw(sh).rounded_rectangle((px(M + 8), px(M + 10), px(M + W - 8), px(M + h + 6)), min(R, px((h - 4) / 2)), fill=80)
             under = Image.new('RGBA', size, (30, 30, 40, 0)); under.putalpha(ImageChops.multiply(_blur(sh, px(14)), ImageChops.invert(face)))
             ys = (np.arange(size[1]) - box[1]) / max(1, box[3] - box[1])  # 卡片里从上到下 0→1
             col = lambda v: Image.fromarray(np.repeat(np.clip(v, 0, 255).astype(np.uint8)[:, None], size[0], axis=1))
@@ -1485,8 +1487,8 @@ class Overlay:
             over = Image.new('RGBA', size, (255, 255, 255, 0)); over.putalpha(light)
             dark = Image.new('RGBA', size, (40, 40, 50, 0)); dark.putalpha(ImageChops.multiply(col(22 * np.clip((ys - 0.65) / 0.35, 0, 1)), face))
             over.alpha_composite(dark)
-            self.cards[h] = {'under': under, 'face': face, 'over': over}
-        return self.cards[h]
+            self.cards[key] = {'under': under, 'face': face, 'over': over}
+        return self.cards[key]
 
     def layer(self, h):
         """一张透明的内容层（文字、图标画在上面，blit 时盖在玻璃上）。"""
@@ -1633,12 +1635,13 @@ class Overlay:
         if self.visible and self.mode in ('rec', 'busy', 'result'): self.blit(level)
 
     def blit(self, level=0.0):
-        c = self.cards[self.h]; img = c['under'].copy()
+        c = self.cards[self.ck]; img = c['under'].copy()
         wa = ctypes.wintypes.RECT(); user32.SystemParametersInfoW(0x30, 0, ctypes.byref(wa), 0)
         x, y = wa.left + (wa.right - wa.left - img.width) // 2, wa.bottom - img.height + px(self.M) - px(18)
         geo = (img.width, img.height, x, y)
         if not self.visible: self.refresh_backdrop()  # 露面之前截后面的屏幕（这时还截不到自己）
-        img.paste(self.glass((x, y, x + img.width, y + img.height)), (0, 0), c['face'])
+        g = self.glass((x, y, x + img.width, y + img.height)); g.putalpha(ImageChops.multiply(g.getchannel('A'), c['face']))
+        img.alpha_composite(g)  # 不能用 paste(玻璃, 蒙版)：会把投影层的深色 RGB 混进圆角边缘，一圈黑边
         img.alpha_composite(c['over']); img.alpha_composite(self.base)
         if self.mode in ('rec', 'busy', 'result'):
             st = 'ready' if self.mode == 'result' else self.mode; t = time.time() - self.t0
