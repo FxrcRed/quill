@@ -41,6 +41,8 @@
 
 <img src="docs/main.png" width="300" alt="Quill 主窗口">
 
+<img src="docs/words.png" width="760" alt="常用词：识别出 cloud 时看上下文，打出 Claude">
+
 ## 原理
 
 ```
@@ -83,6 +85,7 @@ powershell -ExecutionPolicy Bypass -File setup.ps1 -Mirror     # 国内网络加
 - `e2e_test.py [zh]`：不用麦克风的端到端测试（按实时速度喂一段 wav）。
 - `fix_test.py [pick] [zh]`：改了提示词后，用真实说法对比改错效果。
 - `term_test.py`：测模型能不能分清听错的名字（cloud → Claude）和普通词。
+- `make_words_demo.py`：重新生成常用词演示图。
 - `make_demo.py`：重新生成上面的 GIF 和截图。
 - 这个项目是和 Claude Code 一起做的。
 

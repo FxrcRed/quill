@@ -42,6 +42,8 @@ all of that verbatim, or send my voice to the cloud. Quill does the cleanup loca
 
 <img src="docs/main.png" width="300" alt="Quill main window">
 
+<img src="docs/words.png" width="760" alt="Word list: cloud is checked in context and typed as Claude">
+
 ## How it works
 
 ```
@@ -87,6 +89,7 @@ Then start **Quill** from the desktop, wait for **READY**, hold **Right Alt** an
 - `e2e_test.py [zh]` — end-to-end test without a microphone (feeds a wav at real-time speed).
 - `fix_test.py [pick] [zh]` — compare correction output on real-world phrases after changing prompts.
 - `term_test.py` — checks how well the model tells a misheard name (cloud → Claude) from the ordinary word.
+- `make_words_demo.py` — regenerates the word-list image.
 - `make_demo.py` — regenerates the GIF and screenshot above.
 - The project was built together with Claude Code.
 
