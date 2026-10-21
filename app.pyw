@@ -2346,7 +2346,7 @@ class Words:
 
     def __init__(self, app):
         self.app = app; self.w = sub_window(app, '常用词', self.W)
-        self.editing = self.arm_del = None  # 正在改的那一行（原文）；点了一下删除的那一行
+        self.editing = self.arm_del = self.arm_job = None  # 正在改的那一行（原文）；点了一下删除的那一行；它 3 秒后变回来的计时
         self.view = Settings.view_height()  # 和设置窗口一样高
         self.head = Neu(self.w, self.W, 100); self.head.c.pack()
         self.n = Neu(self.w, self.W, 100); self.n.c.pack()
@@ -2423,32 +2423,40 @@ class Words:
     def delete(self, ln):
         """删：第一下变红，3 秒内再点一下才删（和清空记录一样）。"""
         if self.arm_del != ln:
+            if self.arm_job: self.w.after_cancel(self.arm_job)  # 换了一行或重新点：前一个 3 秒计时作废，不然它会提前把这次的红色撤掉
             self.arm_del = ln; self.build(keep=True)
-            self.w.after(3000, lambda: self.arm_del == ln and (setattr(self, 'arm_del', None), self.build(keep=True)))
+            self.arm_job = self.w.after(3000, self.disarm)
             return
-        self.arm_del = None
+        self.disarm(build=False)
         if self.editing == ln: self.editing = None; self.ent.delete(0, 'end')
         if self.save(ln, None): log(f'常用词删除：{ln.strip()}')
+
+    def disarm(self, build=True):
+        if self.arm_job: self.w.after_cancel(self.arm_job)
+        self.arm_del = self.arm_job = None
+        if build: self.build(keep=True)
 
     def submit(self):
         p = parse_word(self.ent.get())
         if not p: return
-        term, alts = p; old = self.editing
-        if not old:  # 已有这个正确写法：听错的写法并进那一行
-            old = next((ln for ln in self.lines() if (q := parse_word(ln)) and q[0].lower() == term.lower()), None)
-            if old: term, have = parse_word(old); alts = have + [a for a in alts if a.lower() not in {b.lower() for b in have}]  # 写法用原来那行的
+        term, alts = p; old, drop = self.editing, None
+        other = next((ln for ln in self.lines() if ln != self.editing and (q := parse_word(ln)) and q[0].lower() == term.lower()), None)
+        if other:  # 别的行已有这个正确写法（新加的，或改成了它）：听错的写法并进那一行，写法用那行的；正在改的那行删掉，免得两行重复
+            term, have = parse_word(other); alts = have + [a for a in alts if a.lower() not in {b.lower() for b in have}]
+            old, drop = other, self.editing
         new = f'{term}: {", ".join(alts)}' if alts else term
         self.editing = None; self.ent.delete(0, 'end')
-        if self.save(old, new): log(f'常用词{"修改" if old else "加入"}：{new}')
+        if self.save(old, new, drop): log(f'常用词{"修改" if old else "加入"}：{new}')
 
-    def save(self, old, new):
-        """原文是 old 的那一行换成 new（new=None 删掉；找不到 old 就加在最后），别的行原样留着。glossary() 按修改时间自己重读。"""
+    def save(self, old, new, drop=None):
+        """原文是 old 的那一行换成 new（new=None 删掉；找不到 old 就加在最后），drop 那一行删掉，别的行原样留着。glossary() 按修改时间自己重读。"""
         lines = self.lines()
         if old in lines:
             i = lines.index(old)
             if new is None: del lines[i]
             else: lines[i] = new
         elif new is not None: lines.append(new)
+        if drop in lines: lines.remove(drop)
         try: WORDS_FILE.write_text('\n'.join(lines) + '\n', encoding='utf-8')
         except Exception: log('写常用词失败', traceback.format_exc()); return False
         self.app.words_changed(); return True
