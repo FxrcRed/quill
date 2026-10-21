@@ -6,14 +6,14 @@ HERE = Path(__file__).parent
 loader = importlib.machinery.SourceFileLoader('app', str(HERE / 'app.pyw')); spec = importlib.util.spec_from_loader('app', loader)
 m = importlib.util.module_from_spec(spec); loader.exec_module(m)
 
-CASES = [  # 来自 history.txt 的真实说法（段的切法是按当时的停顿猜的）
-    ["Well, here's some adaptation I want to", "Challenge Today So in the setting page The record on the right up It's not necessary, so you can remove it."],
-    ["In the setting page. I want every round rectangle to", "I want every round rectangle of Keyboard shot cards Has um same distance between each other."],
-    ["I have dinner with Alin, and he was", "I have dinner with Alin, and he is Fifteen kilograms. heavier than yes last year he said"],
-    ["And I want you to add a a little bar on the side of Record page So I can, I can, uh, quickly go back to the top."],
+CASES = [  # 造的句子，仿真实识别里的错误类型（重说、切在半句、识别错词、改口；段的切法模拟停顿）
+    ["Well, here's some change I want to", "Change Today So in the profile page The button on the right up It's not necessary, so you can remove it."],
+    ["In the menu page. I want every round button to", "I want every round button of Short cut list Has um same distance between each other."],
+    ["I had lunch with Tom, and he was", "I had lunch with Tom, and he is Ten centimeters. taller than yes last year he said"],
+    ["And I want you to add a a little arrow on the side of Search page So I can, I can, uh, quickly go back to the top."],
     ["I want to change the the color, no, I mean the size of the the button."],
-    ["Well, it's very weird because it's very late in night, but I'm still live coding.", "Vibe coding is a very Casher things for me."],
-    ["I mean heal myself. Do some exercise'cause it my previous job make me The", "make me very tired."],
+    ["Well, it's very weird because it's very late in night, but I'm still studying.", "Studying math is a very Casher things for me."],
+    ["I mean relax myself. Do some running'cause it my old school make me The", "make me very tired."],
     ["Can you, can you tell me how to, how to fix this bug?"],
 ]
 ZH_CASES = [  # 说中文模式（fix_test.py zh）
@@ -24,19 +24,19 @@ ZH_CASES = [  # 说中文模式（fix_test.py zh）
     ["帮我把这个PR merge一下，然后呃，通知一下team。"],
 ]
 
-ZHZH_CASES = [  # 说中文 → 出中文（fix_test.py zhzh）：history.txt 里的真实识别结果。前半是该改的（同音字、英文词、假句号），后半是不该动的
-    ["卢子门的理解没错，就是这样。"],
-    ["不过话要说回来，这个小屋没有窗户合子里吗？"],
-    ["我有个疑问，就是现在我做的项目，你可以帮我推送到cloud里面的archK。factsects吗？"],
-    ["你可以直接登到我的本地的cloud吗？"],
-    ["记录里面的这些设置，不要跟着我的滚轮一起滑。。"],
-    ["A组第一条okK我觉得可以保持没有窗户。然后A组第二条。你的建议。okK就是从小溪那边拉电线过来。"],
-    ["关于毛巾这个事情，我是有一个疑问的，就是说我之前导入的模型的整一个小屋里面的东西是可以。改动的吗？比如说我现在想把床拿走，我只是假设。"],
-    ["关于那个地图，我感觉就可以做成是玩家解锁一点，然后阴影就消除一点，等到全部解锁之后，", "这个地图一整个就可以。看清楚了还是说怎么样。我只是突然想到。这个点。"],
-    ["阁楼上衣柜的故事有点。做坐。"],
-    ["挂着的毛巾我觉得故事可以，但是这样子的话呢，就是要修改一下这个毛巾的模型里的样子。"],
-    ["我们这里应该有窗户吗？"],
-    ["是不是我在这里登录了，你就可以帮我用了。"],
+ZHZH_CASES = [  # 说中文 → 出中文（fix_test.py zhzh）：造的句子，仿真实识别结果的错误类型。前半是该改的（同音字、英文词、假句号），后半是不该动的
+    ["这个思路的方向没措，就是这样。"],
+    ["不过话要说回来，这个阳台没有栏杆合子里吗？"],
+    ["我有个疑问，就是现在我写的这份报告，你可以帮我放到cloud里面的archK。factsects吗？"],
+    ["你可以直接连到我电脑上的cloud吗？"],
+    ["设置页面的这些按钮，不要跟着页面一起滑。。"],
+    ["第一个方案okK我觉得可以保留原来的颜色。然后第二个方案。你的建议。okK就是把字体再调大一点。"],
+    ["关于酒店这个事情，我是有一个疑问的，就是说我们之前订的那个房间是可以。退掉的吗？比如说我现在想换一家，我只是假设。"],
+    ["关于那个相册，我感觉就可以做成是每上传一张，然后封面就换一张，等到全部传完之后，", "这个相册一整个就可以。按时间排好了还是说怎么样。我只是突然想到。这个点。"],
+    ["厨房里那个柜子的位置有点。做坐。"],
+    ["墙上那幅画我觉得颜色可以，但是这样子的话呢，就是要修改一下这个画框的样子。"],
+    ["我们这里应该放个书架吗？"],
+    ["是不是我在这里填好了，你就可以帮我提交了。"],
     ["我把照片都备份到云盘了，你帮我看看还剩多少空间。"],
     ["明天下午三点，哦不，四点开会。"],
 ]
