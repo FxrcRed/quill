@@ -6,7 +6,7 @@
 
 **Offline voice typing for Windows.**
 Hold a key, speak messy English *or Chinese*, let go — clean, natural English is typed at your cursor.
-Stutters, "um"s, restarts and self-corrections are removed. Nothing leaves your computer.
+Stutters, "um"s, restarts and self-corrections are removed, and the names you use every day are spelled right. Prefer to keep it in Chinese? It can output clean Chinese too. Nothing leaves your computer.
 
 [中文说明](README.zh.md) · MIT · Windows 10/11
 
@@ -74,7 +74,7 @@ Then start **Quill** from the desktop, wait for **READY**, hold **Right Alt** an
 
 ## Usage tips
 
-- **EN / 中** (top right of the status card) chooses the language you speak. Output is always English.
+- **EN / 中** (top right of the status card) chooses the language you speak. Output is English, unless you set *When speaking Chinese* → 出中文 in Settings.
 - Settings: microphone, hotkey (click *Record* and press any key), output mode, and a self-test that checks every part.
 - The shrink button (two arrows, top right) turns Quill to a floating ball at the edge of the screen; click it to come back.
 - History keeps the last 20 sentences: the original speech, the English, and the Chinese meaning. You can turn saving off, keep only the last 7 / 30 days, or clear it.
