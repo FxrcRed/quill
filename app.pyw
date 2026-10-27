@@ -538,12 +538,12 @@ def join_parts(parts):
 
 class Seg:
     """一段话：识别好的原文 + 改错结果（后台按顺序改，每个字段一出来就能用）。"""
-    def __init__(self, raw, mode, ctx='', lang='en', fix=True):
+    def __init__(self, raw, mode, ctx='', lang='en'):
         self.raw, self.mode, self.ctx, self.lang, self.out, self.cv = raw, mode, ctx, lang, {}, threading.Condition()
         self.dead = False  # 被合进后一段了：还没开始改就不用改了
         self.text = raw  # 送去改的文字，prep() 在后台换词 / 理干净
         if lang == 'zhzh': self.out['zh'] = ''  # 说中文 → 出中文：没有翻译那行
-        if fix: fixq.put(self)  # fix=False：只记原话给浮窗显示（松开后 Whisper 整段重认，说话时不用先改）
+        fixq.put(self)
 
     def prep(self):
         """后台（fix_worker）里做：先按常用词表换掉听错的词，出中文再用规则删口头禅 / 重复。返回还要不要送模型改。
@@ -596,8 +596,12 @@ class Job:
         if self.seg_lang == 'zhzh': self.mode = 'fast'  # 「让我挑选」是挑英文的说法，出中文时直接输入
         self.spec, self.last_part = None, ''  # 说话停下来时先改着的那段（松开时原话没变就直接用）
         self.defer = eng.wh is not None and (self.seg_lang == 'en' or lang == 'zh' and cfg.get('zh_whisper', True))  # 说中文要 zh_whisper 开着； 说英文且 Whisper 能用：说话时只显示，松开后整段重认再改一次
+        # 松开后出结果的办法三选一：defer = Whisper 整段重认（rewhisper）/ 出中文 = 停顿时先改着（speculate）/ 其余 = 切过段就整句重改（whole）
+        self.spec_on, self.whole_on = self.seg_lang == 'zhzh' and not self.defer, self.seg_lang != 'zhzh' and not self.defer
+        self.heard = []  # 每次识别出来的原文：浮窗实时显示、Whisper 出错时的退路，各种模式一样（分段合并不改变拼起来的结果）
 
     def raw(self, segs): return ('' if self.lang == 'zh' else ' ').join(s.raw for s in segs)  # 中文段之间不加空格
+    def heard_text(self): return ('' if self.lang == 'zh' else ' ').join(self.heard)
 
     def plan(self, text):
         """text 加进来会变成哪一段：(被合并掉的上一段, 合并后的原话, 参考的前一句)。"""
@@ -607,12 +611,14 @@ class Job:
         return None, text, self.segs[-1].raw if self.segs else ''
 
     def add(self, text):  # 前一句一起送去当参考，分开改也能保持时态一致
+        self.heard.append(text)
+        if self.defer: return  # 说话时只显示；松开后 rewhisper 把整段重认的结果当一段改，这里的分段 / 合并 / 先改都用不上
         prev, text, ctx = self.plan(text)
         if prev: self.segs.pop(); prev.dead = True
         sp, self.spec = self.spec, None
         if sp and (sp.raw, sp.ctx) == (text, ctx): return self.segs.append(sp)  # 停顿时已经先改上了
         if sp: sp.dead = True
-        self.segs.append(Seg(text, self.mode, ctx, self.seg_lang, fix=not self.defer))
+        self.segs.append(Seg(text, self.mode, ctx, self.seg_lang))
 
     def speculate(self, part):
         """出中文：识别出来的尾巴 0.5 秒没变（停下来了）就先送去改，松开时多半不用再等模型。"""
@@ -633,8 +639,8 @@ class Job:
                 else: self.skip = cut  # 半句话：先不切，连着后面一起识别
             tail = a[self.pos:]
             part = eng.recognize(tail, self.lang) if has_speech(tail) else ''
-            if self.seg_lang == 'zhzh' and not self.defer: self.speculate(part)  # 松开后要 Whisper 重认的话，先改着的白改了
-            return self.raw(self.segs), part
+            if self.spec_on: self.speculate(part)  # 松开后要 Whisper 重认的话（defer），先改着的白改了
+            return self.heard_text(), part
 
     def finish(self, a):
         with self.lock:
@@ -643,13 +649,13 @@ class Job:
             if text: self.add(text)
             self.pos = len(a)
             if self.defer: self.rewhisper(a)
-            else: self.whole()
+            elif self.whole_on: self.whole()
             return list(self.segs)
 
     def rewhisper(self, a):
         """说英文：整段录音给 Whisper 重认，结果当一段去改。Parakeet 什么都没听到时不送（Whisper 对着没声音会编一句）；
         Whisper 出错 / 超时就用 Parakeet 拼起来的原话。"""
-        raw = self.raw(self.segs)
+        raw = self.heard_text()
         text = (eng.whisper(a, self.lang == 'zh') if raw else '') or raw
         self.segs = [Seg(text, self.mode, '', self.seg_lang)] if text else []
 
@@ -657,8 +663,8 @@ class Job:
         """松开后整句重改：识别在每个停顿都补句号（「Is the program.」），分段单独改时半句话改不动语法。
         切过段、又不太长（WHOLE_MAX 个词以内）就把全部原话合成一段重改，前面分段的结果不要了（正在改的那段会断开）。
         代价：松开后要等整句改完（20 秒的话约 1.5~2 秒）。出中文不用（规则 + 停顿时先改着已经够好）。"""
-        if len(self.segs) < 2 or self.seg_lang == 'zhzh' or len(words(self.raw(self.segs))) > WHOLE_MAX: return
-        raw = self.raw(self.segs)
+        if not self.whole_on or len(self.segs) < 2 or len(words(self.heard_text())) > WHOLE_MAX: return
+        raw = self.heard_text()
         for s in self.segs: s.dead = True
         self.segs = [Seg(raw, self.mode, '', self.seg_lang)]
 
