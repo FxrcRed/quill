@@ -309,6 +309,8 @@ FIELDS = {'fast': ('fixed', 'zh'), 'pick': ('natural', 'casual', 'zh')}
 gpu = {'off_until': 0.0, 'slow': 0}  # 显卡变慢（被别的程序占着）时暂时改用 CPU
 last_llm = [0.0]
 llm_stat = {}  # 上一次改错：用了几秒、是不是显卡
+lat = {}  # 松开后各阶段的时间点（分段计时日志用，见 Engine._work）
+def mark(k): lat[k] = time.time()
 
 def llm_opts():
     on_gpu = LLM_GPU_LAYERS != 0 and time.time() > gpu['off_until']
@@ -330,12 +332,14 @@ def llm(text, mode='fast', on_field=None, timeout=60, ctx='', watch=True, lang='
     buf, got, stats, t0 = '', {}, {}, time.time()
     def give(k, v):
         got[k] = v
+        if k in ('fixed', 'natural', 'casual'): mark('llm_en')
         if on_field: on_field(k, v)
     with urllib.request.urlopen(req, timeout=timeout) as r:
         for line in r:
             if stop and stop(): return got
             if not line.strip(): continue
             m = json.loads(line); buf += m.get('message', {}).get('content', '')
+            if buf and 'llm_first' not in lat: mark('llm_first')
             for k in keys:
                 hit = k not in got and re.search(r'"%s"\s*:\s*"((?:[^"\\]|\\.)*)"' % k, buf)
                 if hit: give(k, json.loads('"' + hit.group(1) + '"').strip())
@@ -358,6 +362,11 @@ def watch_gpu(st, on_gpu, secs):
     if gpu['slow'] >= 2:
         gpu['off_until'], gpu['slow'] = time.time() + 900, 0
         log('显卡太慢，15 分钟内改用 CPU'); notify('显卡被别的程序占着，改错先换成 CPU（慢一点），15 分钟后再试显卡。', 'warn')
+
+def keep_secs():
+    k = cfg.get('keep', '2m')
+    try: return float('inf') if k == -1 else float(str(k).rstrip('mh')) * (3600 if str(k).endswith('h') else 60)
+    except ValueError: return 120.0
 
 def llm_warm():
     """只把模型载入内存（不生成），说话的同时就能载好。"""
@@ -668,21 +677,22 @@ class Job:
             return self.heard_text(), part
 
     def finish(self, a):
+        wait = eng.whisper_start(a, self.lang == 'zh') if self.defer else None  # 整段先送去 Whisper（显卡），不等实时识别手上那一轮（update 占着 lock），下面 Parakeet 认尾巴（CPU）同时进行；Parakeet 什么都没听到时结果不要
         with self.lock:
             tail = a[self.pos:]
             text = eng.recognize(tail, self.lang) if has_speech(tail) or not self.segs and len(tail) > RATE * 0.3 else ''  # 结尾只剩呼吸声时不识别，免得冒出 "Yeah."
             if text: self.add(text)
-            self.pos = len(a)
-            if self.defer: self.rewhisper(a)
+            self.pos = len(a); mark('tail')
+            if self.defer: self.rewhisper(wait)
             elif self.whole_on: self.whole()
             return list(self.segs)
 
-    def rewhisper(self, a):
+    def rewhisper(self, wait):
         """说英文：整段录音给 Whisper 重认，结果当一段去改。Parakeet 什么都没听到时不送（Whisper 对着没声音会编一句）；
         Whisper 出错 / 超时就用 Parakeet 拼起来的原话。"""
         raw = self.heard_text()
-        text = (eng.whisper(a, self.lang == 'zh') if raw else '') or raw
-        self.segs = [Seg(text, self.mode, '', self.seg_lang)] if text else []
+        text = (wait() if raw else '') or raw
+        mark('wh'); self.segs = [Seg(text, self.mode, '', self.seg_lang)] if text else []
 
     def whole(self):
         """松开后整句重改：识别在每个停顿都补句号（「Is the program.」），分段单独改时半句话改不动语法。
@@ -756,16 +766,22 @@ class Engine:
                 self.wh_state = {'NOGPU': 'nogpu', 'NOLIB': 'nolib'}.get(str(e), 'error'); log('Whisper 没加载，只用 Parakeet：', self.wh_state, e)
         finally: self.wh_done.set(); post('mode')
 
-    def whisper(self, a, zh=False):
-        """整段识别，最多等 WHISPER_TIMEOUT 秒；出错 / 超时返回 ''（调用方用 Parakeet 的结果）。"""
-        if not self.wh: return ''
-        got = []
+    def whisper_start(self, a, zh=False):
+        """整段识别在后台开跑，返回 wait()：最多等 WHISPER_TIMEOUT 秒；出错 / 超时返回 ''（调用方用 Parakeet 的结果）。
+        松开后和 Parakeet 认尾巴同时进行（一个在显卡、一个在 CPU）。"""
+        if not self.wh: return lambda: ''
+        got = []; t = time.time()
         def run():
             try: got.append(zh_punct(self.wh.recognize(a, zh=True)) if zh else self.wh.recognize(a))
             except Exception as e: log('Whisper 出错：', repr(e))
-        th = threading.Thread(target=run, daemon=True); t = time.time(); th.start(); th.join(WHISPER_TIMEOUT)
-        if not got: log(f'Whisper 没出结果（{time.time() - t:.1f}s），用实时识别的'); return ''
-        log(f'Whisper {time.time() - t:.1f}s'); return got[0]
+        th = threading.Thread(target=run, daemon=True); th.start()
+        def wait():
+            th.join(max(0.0, WHISPER_TIMEOUT - (time.time() - t)))
+            if not got: log(f'Whisper 没出结果（{time.time() - t:.1f}s），用实时识别的'); return ''
+            log(f'Whisper {time.time() - t:.1f}s'); return got[0]
+        return wait
+
+    def whisper(self, a, zh=False): return self.whisper_start(a, zh)()
 
     def load_zh(self):
         if self.zh_started: return
@@ -803,7 +819,7 @@ class Engine:
         self.job = job = Job(src == 'key', cfg.get('mode', 'fast'), cfg['lang'], cfg.get('zh_out', 'en'))
         log('开始录音', src); post('state', 'rec', src == 'key')
         threading.Thread(target=self.live, args=(job,), daemon=True).start()
-        if time.time() - last_llm[0] > 1200: threading.Thread(target=llm_warm, daemon=True).start()  # 闲了很久：边说边把模型载回来
+        if time.time() - last_llm[0] > min(1200, keep_secs() - 10): threading.Thread(target=llm_warm, daemon=True).start()  # 闲到快被卸掉（或已卸掉）：边说边把模型载回来；释放显存设 2 分钟时原来要闲 20 分钟才预热，2~20 分钟之间松开后要现载模型（多 2~5 秒）
 
     def live(self, job):
         while True:
@@ -816,7 +832,7 @@ class Engine:
 
     def stop(self):
         if not self.rec: return
-        self.rec = False; self.busy = True
+        self.rec = False; self.busy = True; lat.clear(); mark('rel')
         threading.Thread(target=self.work, args=(self.audio(), self.job), daemon=True).start()
 
     def work(self, audio, job):
@@ -848,6 +864,9 @@ class Engine:
             log(f'识别（{len(segs)} 段）：', *((raw, '| 改后：', fixed) if cfg.get('hist', True) else ('（记录已关，不记内容）',)), f'| 松开后 {time.time() - t:.1f}s')
             if job.by_key: paste(fixed)
             else: root.after(0, lambda: set_clip(fixed))
+            if not job.by_key: mark('paste')
+            r0 = lat.get('rel', t)  # 分段计时（松开后第几秒）：尾巴识别 / Whisper / 改错首字 / 英文写完 / 粘贴
+            log('计时 ' + ' '.join(f'{n}={lat[k] - r0:.2f}' for n, k in (('尾巴', 'tail'), ('Whisper', 'wh'), ('首字', 'llm_first'), ('英文', 'llm_en'), ('粘贴', 'paste')) if k in lat))
             post('fixed', raw, fixed, job.by_key)
         self.busy = False; post('state', 'ready')  # 中文翻译还在后台出，不耽误说下一句
         post('zh', raw, ''.join(s.get('zh') for s in segs))
@@ -909,6 +928,9 @@ def asr_worker(lang):
             from faster_whisper import WhisperModel
             m = WhisperModel(str(HERE / 'models' / 'whisper'), device='cuda', compute_type='int8_float16')
             list(m.transcribe(np.random.default_rng(0).normal(0, 0.05, RATE * 2).astype(np.float32), language='en')[0])  # 先真跑一次（transcribe 返回生成器，不取结果就什么都没算）：缺 cuBLAS 在这里就报出来，第一句也不用等编译
+            for lg, bm in (('en', 1), ('zh', 5)):  # 再各用 20 秒的静音跑一次英文 / 中文的解码设置：第一句真话不用再等 CUDA 初始化（结果不要）
+                try: list(m.transcribe(np.zeros(RATE * 20, np.float32), language=lg, beam_size=bm, condition_on_previous_text=False)[0])
+                except Exception: pass
             def rec(a, zh=False):
                 terms = [t for t in glossary()[0] if t.isascii()]
                 if zh: prompt, kw = '以下是普通话的句子，使用简体中文。' + ('常用词：' + '、'.join(terms) + '。' if terms else ''), dict(language='zh', beam_size=5)
@@ -1000,8 +1022,11 @@ def paste(text):
         set_clip(text); ev.set()
     root.after(0, put); ev.wait(2); time.sleep(0.05)
     for vk, fl in ((0x11, 0), (0x56, 0), (0x56, 2), (0x11, 2)): user32.keybd_event(vk, 0, fl, 0)
-    time.sleep(0.5)
-    if box.get('old') is not None: root.after(0, lambda: set_clip(box['old']))
+    mark('paste')
+    def restore():  # 等目标程序读完剪贴板再还原；放后台，不拖着浮窗出结果 / 回到 ready
+        time.sleep(0.5)
+        if box.get('old') is not None: root.after(0, lambda: set_clip(box['old']))
+    threading.Thread(target=restore, daemon=True).start()
 
 
 # ---- 自检 ----
