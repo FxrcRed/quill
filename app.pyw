@@ -16,7 +16,7 @@ LLM_URL = 'http://127.0.0.1:11434'
 LLM_MODEL = 'qwen3:4b'  # 设置「改错模型」里选（cfg['llm']）：4B 约 2.9GB 显存、快约 35%；8B 约 4.5GB，很乱的话（重说、改口）改得更准
 LLM_MODELS = (('qwen3:4b', '标准 4B'), ('qwen3:8b', '高质量 8B'))
 WHISPER_TIMEOUT = 8   # 松开后 Whisper 整段识别最多等几秒，超时 / 出错就用实时识别（Parakeet）的结果
-LLM_GPU_LAYERS = -1   # -1 = 放显卡（Ollama 自动，一句约 1.5 秒）；0 = 全用 CPU（约 5~8 秒）。显卡被别的程序占着变慢时会自动临时改用 CPU
+LLM_GPU_LAYERS = -1   # （启动时按有没有 NVIDIA 显卡重新定，见 nvidia_gpu）-1 = 放显卡（Ollama 自动，一句约 1.5 秒）；0 = 全用 CPU（约 5~8 秒）。显卡被别的程序占着变慢时会自动临时改用 CPU
 KEEPS = (('2m', '2 分钟'), ('10m', '10 分钟'), ('30m', '30 分钟'), (-1, '不释放'))  # 不用多久后把模型从显存卸掉（约 5~6GB），设置里选；一直说话时每次都续上，不会卸
 SHOW_SECONDS = 3      # 底部浮窗的结果自动消失；点一下固定，再点关闭
 RATE = 16000
@@ -135,6 +135,31 @@ if cfg.get('llm') in dict(LLM_MODELS): LLM_MODEL = cfg['llm']
 def save_cfg():
     try: (HERE / 'settings.json').write_text(json.dumps(cfg, ensure_ascii=False), encoding='utf-8')
     except Exception: log('保存设置失败', traceback.format_exc())
+
+# ---- 显卡 / Whisper 用的 cuBLAS ----
+_gpu_name = []
+def nvidia_gpu():
+    """NVIDIA 显卡型号，没有返回 ''（nvidia-smi 查一次，缓存）。QUILL_FORCE_CPU=1：假装没有显卡，测降级用。"""
+    if not _gpu_name:
+        name = ''
+        if not os.environ.get('QUILL_FORCE_CPU'):
+            exe = shutil.which('nvidia-smi') or r'C:\Windows\System32\nvidia-smi.exe'
+            try:
+                r = subprocess.run([exe, '--query-gpu=name', '--format=csv,noheader'], capture_output=True, text=True, timeout=8, creationflags=0x08000000)
+                if r.returncode == 0 and r.stdout.strip(): name = r.stdout.strip().splitlines()[0].strip()
+            except Exception: pass
+        _gpu_name.append(name)
+    return _gpu_name[0]
+
+def cublas_dirs():
+    """Whisper 要的 cuBLAS 12 在哪：先找 .venv 里 pip 装的（nvidia-cublas-cu12，setup.ps1 会装），找不到再借 Ollama 自带的（老用户）。
+    QUILL_HIDE_CUBLAS=1：假装都没有，测缺库提示用。"""
+    if os.environ.get('QUILL_HIDE_CUBLAS'): return []
+    ds = [Path(p) / 'nvidia' / 'cublas' / 'bin' for p in sys.path]
+    ds.append(Path(os.path.expandvars(r'%LOCALAPPDATA%\Programs\Ollama\lib\ollama\cuda_v12')))
+    return [d for d in ds if (d / 'cublas64_12.dll').exists()]
+
+LLM_GPU_LAYERS = -1 if nvidia_gpu() else 0  # 没有 NVIDIA 显卡：改错直接用 CPU，别让 watch_gpu 去测速
 
 WORDS_FILE = HERE / 'words.txt'  # 常用词表（人名、项目名、中英混说的词），一行一个，# 开头是注释；识别听错时模型按它的写法改
 WORDS_HEAD = ('# 常用词：一行一个（人名、项目名、中英混说的词）。存盘后下一句就生效。\n'
@@ -668,6 +693,7 @@ class Engine:
         self.asr, self.load_error, self.loaded = None, '', threading.Event()
         self.zh, self.zh_error, self.zh_loaded, self.zh_started = None, '', threading.Event(), False  # 中文识别（SenseVoice），第一次切到「中」才载
         self.wh = None  # Whisper（说英文时松开后整段再认一遍），载不了就是 None
+        self.wh_state, self.wh_done = 'loading', threading.Event()  # loading / ok / nogpu 没有 NVIDIA 显卡 / nolib 缺 cuBLAS / nomodel 没下 Whisper 模型 / error
         self.stream, self.rec, self.src, self.chunks, self.probe, self.peak = None, False, None, [], None, 0.0
         self.key_paused, self.busy, self.picking, self.job, self.tried = False, False, False, None, False  # tried：已经试过打开麦克风
 
@@ -716,9 +742,12 @@ class Engine:
 
     def load_wh(self):
         """Whisper（松开后整段再认一遍）：没装 / 显卡用不了就算了，照旧只用 Parakeet，不提示用户。"""
-        if not (HERE / 'models' / 'whisper' / 'model.bin').exists(): return log('没有 models\\whisper，只用 Parakeet')
-        try: t = time.time(); self.wh = AsrProc('wh'); log(f'整段识别（Whisper）已加载 {time.time() - t:.1f}s')
-        except Exception as e: log('Whisper 加载失败，只用 Parakeet：', e)
+        try:
+            if not (HERE / 'models' / 'whisper' / 'model.bin').exists(): self.wh_state = 'nomodel'; return log('没有 models\\whisper，只用 Parakeet')
+            try: t = time.time(); self.wh = AsrProc('wh'); self.wh_state = 'ok'; log(f'整段识别（Whisper）已加载 {time.time() - t:.1f}s')
+            except Exception as e:
+                self.wh_state = {'NOGPU': 'nogpu', 'NOLIB': 'nolib'}.get(str(e), 'error'); log('Whisper 没加载，只用 Parakeet：', self.wh_state, e)
+        finally: self.wh_done.set()
 
     def whisper(self, a, zh=False):
         """整段识别，最多等 WHISPER_TIMEOUT 秒；出错 / 超时返回 ''（调用方用 Parakeet 的结果）。"""
@@ -867,11 +896,12 @@ def asr_worker(lang):
             def rec(a):
                 st = r.create_stream(); st.accept_waveform(RATE, a); r.decode_stream(st); return st.result.text
         elif lang == 'wh':  # 松开后整段再认一遍（Whisper large-v3-turbo，显卡，约 1GB 显存）：比 Parakeet 按段认准得多，还能带上常用词
-            cuda = Path(os.path.expandvars(r'%LOCALAPPDATA%\Programs\Ollama\lib\ollama\cuda_v12'))  # 借 Ollama 自带的 cuBLAS（只 add_dll_directory 不够，要放 PATH）
-            if cuda.exists(): os.environ['PATH'] = str(cuda) + os.pathsep + os.environ['PATH']
+            if not nvidia_gpu(): return send('NOGPU')
+            ds = cublas_dirs()  # 要放进 PATH（只 add_dll_directory 不够）
+            if ds: os.environ['PATH'] = str(ds[0]) + os.pathsep + os.environ['PATH']
             from faster_whisper import WhisperModel
             m = WhisperModel(str(HERE / 'models' / 'whisper'), device='cuda', compute_type='int8_float16')
-            m.transcribe(np.zeros(RATE, np.float32), language='en')  # 先跑一次：缺库在这里就报出来，第一句也不用等
+            list(m.transcribe(np.random.default_rng(0).normal(0, 0.05, RATE * 2).astype(np.float32), language='en')[0])  # 先真跑一次（transcribe 返回生成器，不取结果就什么都没算）：缺 cuBLAS 在这里就报出来，第一句也不用等编译
             def rec(a, zh=False):
                 terms = [t for t in glossary()[0] if t.isascii()]
                 if zh: prompt, kw = '以下是普通话的句子，使用简体中文。' + ('常用词：' + '、'.join(terms) + '。' if terms else ''), dict(language='zh', beam_size=5)
@@ -882,8 +912,9 @@ def asr_worker(lang):
             import onnx_asr
             m = onnx_asr.load_model('nemo-parakeet-tdt-0.6b-v3', HERE / 'models' / 'parakeet', quantization='int8')
             rec = lambda a: m.recognize(a, sample_rate=RATE)
-    except Exception:
+    except Exception as e:
         log('识别子进程加载失败', lang, traceback.format_exc())
+        if lang == 'wh' and 'cublas' in str(e).lower(): return send('NOLIB')
         return send('models\\%s 里的文件可能缺了' % {'zh': 'sensevoice', 'wh': 'whisper'}.get(lang, 'parakeet'))
     send('OK')
     while len(h := inp.read(4)) == 4:  # 主程序退出、管道关掉就结束
@@ -920,6 +951,17 @@ class AsrProc:
                 self.p.stdin.write(msg); self.p.stdin.flush(); return self._recv()
 
 eng = Engine()
+
+def mode_summary():
+    """当前是哪种模式，对速度 / 质量有什么影响（自检和主页状态用）：返回 (ok|warn, 一句人话)。"""
+    g, st = nvidia_gpu(), eng.wh_state
+    ai = 'AI 改错用显卡' if g and LLM_GPU_LAYERS else 'AI 改错用 CPU，每句约 5~8 秒' if not g else 'AI 改错暂时用 CPU'
+    if st == 'ok': return 'ok', f'完整模式（{g}）：松开后 Whisper 整段重认，{ai}'
+    if st == 'loading': return 'ok', '整段识别（Whisper）载入中…'
+    if st == 'nogpu': return 'warn', f'没有 NVIDIA 显卡：只用 Parakeet 实时识别（英文准确率略低，没有松开后整段重认），{ai}'
+    if st == 'nolib': return 'warn', '缺显卡运行库（cuBLAS）：Whisper 没启用，先只用 Parakeet。运行 setup.ps1 可补上'
+    if st == 'nomodel': return 'warn', '没下载 Whisper 模型：先只用 Parakeet（更准的整段重认要运行 setup.ps1 下载）'
+    return 'warn', 'Whisper 没载入成功，先只用 Parakeet，详情见 run.log'
 
 HIST = HERE / 'history.txt'
 HIST_DAYS = ((7, '7 天'), (30, '30 天'), (0, '永久'))
@@ -962,7 +1004,9 @@ def run_checks(report, interactive):
     """report(序号, 'run'|'ok'|'fail'|'warn', 说明, 附加按钮)；返回是否全部通过。"""
     ok = True
     report(0, 'run', '加载中…'); eng.loaded.wait(180)
-    if eng.asr: report(0, 'ok', '已加载')
+    if eng.asr:
+        if eng.wh_state == 'loading': report(0, 'run', '加载整段识别（Whisper）…'); eng.wh_done.wait(120)
+        lv, msg = mode_summary(); report(0, lv, '已加载 · ' + msg)
     else: report(0, 'fail', eng.load_error or '还没加载完'); ok = False
 
     secs = 3 if interactive else 1
