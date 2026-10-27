@@ -60,7 +60,7 @@ Whisper 整段认，比按停顿一段段认准得多（不会把半句话认成
 
 ## 安装
 
-**需要：** Windows 10/11 · 16 GB 内存 · 约 8 GB 硬盘。推荐 6 GB 以上显存的 N 卡（只用 CPU 也能跑，每句要 5~8 秒）。
+**需要：** 仅 Windows 10/11（不支持 macOS / Linux）· 16 GB 内存 · 约 8 GB 硬盘。推荐 6 GB 以上显存的 N 卡（没有 N 卡也能跑：不用 Whisper、只用 Parakeet，英文略不准，改错每句 5~8 秒）。
 
 ```powershell
 git clone https://github.com/FxrcRed/quill.git
@@ -69,7 +69,7 @@ powershell -ExecutionPolicy Bypass -File setup.ps1 -Mirror     # 国内网络加
 ```
 
 `setup.ps1` 会装好 [uv](https://github.com/astral-sh/uv) 和 Python 3.12（不用自己装 Python）、依赖包、三个语音模型（约 2.5 GB）、
-[Ollama](https://ollama.com) 和 `qwen3:4b`（约 2.6 GB；想要更准可以再 `ollama pull qwen3:8b`，在设置里换），并在桌面建快捷方式。可以重复运行，已有的会跳过。
+[Ollama](https://ollama.com) 和 `qwen3:4b`（约 2.6 GB；想要更准可以再 `ollama pull qwen3:8b`，在设置里换），并在桌面建快捷方式。有 N 卡时还会往 venv 里装 Whisper 要的 cuBLAS（`nvidia-cublas-cu12`，约 0.5 GB），没有就跳过它和 Whisper 模型。可以重复运行，已有的会跳过。以后缺东西，Quill 的「设置 → 准备」会说缺什么，按钮直接运行 `setup.ps1`。
 
 装好后双击桌面上的 **Quill**，等出现 **READY**，按住 **右 Alt** 说话。
 
