@@ -84,11 +84,11 @@ Reply JSON only: {"fixed": "<cleaned-up Chinese>"}""",
 }
 
 MIC_HINT = '麦克风没有声音：先按笔记本的麦克风静音键（常见 F4 或 Fn+F4，灯亮=静音），或在设置里换一个麦克风。'
-MIC_SHORT = '麦克风没声音：按静音键（F4 / Fn+F4），或去设置换一个麦克风。'
 # 软 UI（neumorphism）配色：同一种浅灰底，凸起/凹陷全靠左上白光、右下灰影
 BG, INSET, LIGHT, DARK = '#E6E6E6', '#DFDFDF', '#FFFFFF', '#BDBDBD'
 INK, TEXT, SUB, TICK, TICK_MAJ = '#1E1E1E', '#1E1E1E', '#8C8C8C', '#C6C6C6', '#8F8F8F'  # 字只用两种颜色：TEXT 正文 / SUB 说明（INK 是声波条那些画的东西）
 GREEN, ORANGE, RED, TOAST_BG = '#2F9E5B', '#D9822B', '#D64541', '#EFEFEF'
+YELLOW = '#E5B93C'  # 主页 READY 右边的状态点：待机（没声音）
 FONT, FONT_BOLD = 'Microsoft YaHei UI', None  # 启动时有 fonts\NotoSansSC 就换成 Noto Sans SC Medium / Bold（思源黑体，SIL OFL 开源）
 DISPLAY, ICON = 'Bahnschrift', 'Segoe MDL2 Assets'  # 启动时换成项目里的 Michroma 宽体 / Segoe Fluent Icons（有的话）
 I_SET, I_COPY, I_HIST, I_OK, I_CHECK = '', '', '', '', ''
@@ -96,6 +96,8 @@ I_MIN, I_CLOSE, I_MIC, I_BALL = '\uE921', '\uE8BB', '\uE720', '\uE73F'
 I_DOWN, I_UP = '\uE70D', '\uE70E'  # 记录里展开 / 收起原话
 I_EDIT, I_DEL = '\uE70F', '\uE74D'  # 常用词窗口：改 / 删
 I_PIN = '\uE718'  # 浮窗固定后右边的图钉
+HIST_DY = 4
+NAV_DY = -4  # 导航按钮里宽体字比按钮中线低 4 像素（实测：按钮身 656~700，字心 682.5），整排上提
 ICON_C = '#555555'  # 图标按钮平时的颜色
 S = 1.0  # 屏幕缩放（150% = 1.5），界面坐标都按 100% 写，画的时候乘 S
 
@@ -351,6 +353,13 @@ def llm(text, mode='fast', on_field=None, timeout=60, ctx='', watch=True, lang='
     last_llm[0] = time.time()
     if watch: llm_stat.update(secs=time.time() - t0, gpu=on_gpu); watch_gpu(stats, on_gpu, time.time() - t0)
     return got
+
+def llm_hello():
+    """预热：用下一句真会用的那套提示词（语言 + 输出 + 模式，和 Job 一样算）跑一次；Ollama 只缓存一份提示词，用错了第一句照样慢。"""
+    if ollama_status() != 'ok': return
+    sl = 'zhzh' if cfg['lang'] == 'zh' and cfg.get('zh_out', 'en') == 'zh' else cfg['lang']
+    try: llm('hello', 'fast' if sl == 'zhzh' else cfg.get('mode', 'fast'), watch=False, lang=sl); return True
+    except Exception as e: log('预热改错失败：', e)
 
 def watch_gpu(st, on_gpu, secs):
     """显卡上每秒不到 15 个字（正常约 45），连着两次就 15 分钟内改用 CPU（CPU 约 9 个/秒，但稳定）。"""
@@ -752,9 +761,7 @@ class Engine:
             self.loaded.set()
         post('state', self.idle_state())
         if self.asr: threading.Thread(target=self.load_wh, daemon=True).start()
-        if self.asr and ollama_status() == 'ok':
-            try: llm('hello', watch=False, lang=cfg['lang']); log('改错模型已预热', '（显卡）' if llm_opts()[1] else '（CPU）')
-            except Exception as e: log('预热改错失败：', e)
+        if self.asr and llm_hello(): log('改错模型已预热', '（显卡）' if llm_opts()[1] else '（CPU）')
 
     def load_wh(self):
         """Whisper（松开后整段再认一遍）：没装 / 显卡用不了就算了，照旧只用 Parakeet，不提示用户。"""
@@ -1255,7 +1262,7 @@ class Btn:
         if self.kind == 'ring':
             ring(img, x + w / 2, y + h / 2, w / 2 - 1, self.color, fill='#D8D8D8' if pressed else None)
         elif self.kind == 'inset' or self.on or pressed:
-            inset(img, x, y, w, h, self.r, self.d + 2 if pressed and (self.kind == 'inset' or self.on) else self.d * 0.8)
+            inset(img, x, y, w, h, self.r, self.d * INSET_K)  # 凹下去的深度 = 凸起的 INSET_K 倍（同样的深度，凹的比凸的看着更重）
         else:
             raised(img, x, y, w, h, self.r, self.d)
 
@@ -1341,9 +1348,10 @@ class Switch:
         self.lab = []
         for i, (v, t) in enumerate(self.opts):
             x, y, w, h = self.box(i); lx, ly = x - self.x + self.ox, y - self.y + self.oy
-            if v == self.value or v == self.down: inset(im, lx, ly, w, h, h / 2, 4 if v == self.down else 2.4)
-            else: raised(im, lx, ly, w, h, h / 2, 3)
-            self.lab.append(c.create_text(px(x + w / 2), px(y + h / 2), text=t, font=fnt(12), fill=TEXT, tags='txt'))
+            if v == self.value or v == self.down:  # 和按钮按下去同一个逻辑（Btn.draw）：先画凸起的边，再在里面压出凹面，所以外沿还留着一圈凸边
+                raised(im, lx, ly, w, h, h / 2, ELEV); inset(im, lx, ly, w, h, h / 2, ELEV * INSET_K)
+            else: raised(im, lx, ly, w, h, h / 2, ELEV)
+            self.lab.append(c.create_text(px(x + w / 2), px(y + h / 2), text=t, font=fnt(11), fill=ICON_C, tags='txt'))
         self.ph = ImageTk.PhotoImage(im); c.itemconfigure(self.tile, image=self.ph)
 
     def contains(self, x, y):
@@ -1464,7 +1472,7 @@ def move_together(moves):
         if v.chrome.geo: v.chrome.geo = (x, y) + v.chrome.geo[2:]
 
 BAR_BASE = (0.34, 0.68, 1.0, 0.55, 0.84, 0.40)  # 苹果 SpeechAnalyzer 图标那种 6 根圆头声波条，平时的高矮
-BAR_COL = {'loading': ('#D4D4D9', '#A9A9AF'), 'error': ('#FF9186', '#D64541')}
+BAR_COL = {'error': ('#FF9186', '#D64541')}
 BARS, ACCENT = ('#4A4A50', '#0E0E10'), INK  # 声波条上深灰下黑；外圈刻度亮起来的颜色
 
 def bar_heights(state, lv, t, sm):
@@ -1930,7 +1938,7 @@ class Dial:
     def make(self):
         r = self.rad; X0, Y0, N = math.floor((self.cx - r) * S), math.floor((self.cy - r) * S), px(2 * r) + 1
         up = self.n.img.crop((X0, Y0, X0 + N, Y0 + N)); dn = up.copy()
-        inset(dn, self.cx - r - X0 / S, self.cy - r - Y0 / S, 2 * r, 2 * r, r, d=7)
+        inset(dn, self.cx - r - X0 / S, self.cy - r - Y0 / S, 2 * r, 2 * r, r, d=ELEV * INSET_K)
         self.base, self.N = (up.convert('RGBA'), dn.convert('RGBA')), N
         self.photo = ImageTk.PhotoImage(self.base[0]); self.n.c.create_image(X0, Y0, anchor='nw', image=self.photo)
         self.ox, self.oy = (self.cx - r) * S - X0, (self.cy - r) * S - Y0
@@ -1956,10 +1964,13 @@ class Dial:
         out = self.base[self.down].copy(); out.alpha_composite(L.resize((self.N, self.N), Image.BOX)); self.photo.paste(out)
 
 
+INSET_K = 0.5  # 凹下去的阴影深度 / 凸起的深度
+ELEV = 5  # 主页所有凸起（卡片、导航、右上角三个图标、候选词按钮）的凸起高度：阴影深度都用它，感觉一样高
+NAV = ((20, 153), (185, 153), (350, 30))  # 主页导航一排：历史 / 常用词 / 设置，高 30（和右上角三个图标一样），宽 153 / 153 / 30，间距 12，设置圆的右边缘 = 卡片内边
 WORDS = {'loading': 'WAKING', 'ready': 'READY', 'rec': 'LISTENING', 'busy': 'THINKING', 'error': 'ERROR'}
 
 class App:
-    W, H = 400, 512  # 主画布到「记录 / 设置」下面 10；再往下是常用词那块画布（wn），两块的接缝在两排卡片中间的空隙里
+    W, H = 400, 508  # 主画布到导航一排下面 6；卡片顶上的光（约 10 高）要整个落在 wn 里，接缝才不出线；再往下是常用词那块画布（wn），两块的接缝在两排卡片中间的空隙里
 
     def __init__(self, root):
         self.root = root; root.title(TITLE); root.configure(bg=BG)
@@ -1970,24 +1981,28 @@ class App:
         self.first_shown = False
         self.settings = self.check_win = self.ready_win = self.history = self.words = self.pop = None
         self.cur, self.pick_job = None, None  # 当前这句 [原话, 输入的英文, 中文]；等着挑的版本
+        self.waiting = {}  # 英文出了、中文还没出就开始说下一句的那些：原话 → [原话, 英文, None]，中文到了再记
 
         n = self.n = Neu(root, self.W, self.H); n.c.pack()
         # 能点的都是凸起的，凹下去的只放内容。和设置 / 记录窗口一套网格：左右离边 20，标题行一样，第一张卡片顶边 y=92，
         # 卡片之间都隔 20，卡片圆角 28（窗口圆角 48 = 28 + 20）
-        n.text(32, 26, 'QUILL', 18, INK, family=DISPLAY)  # 和 SETTINGS 一样的宽体大字
-        n.text(33, 56, '英文语音输入', 11, SUB)
-        n.button(274, 30, 30, 30, icon=I_BALL, size=9, d=3, color=ICON_C, cmd=self.to_ball)   # 缩成悬浮球
-        n.button(312, 30, 30, 30, icon=I_MIN, size=8, d=3, color=ICON_C, cmd=self.minimize)
-        n.button(350, 30, 30, 30, icon=I_CLOSE, size=8, d=3, color=ICON_C, cmd=quit_app)
-        n.raised(20, 92, 360, 326, 28, d=7)                      # 状态卡片（凸起，和设置里的卡片一样）：大字 + 提示 + 刻度和声波条；按住中间那圈说话时那圈凹下去
-        self.word = n.text(44, 108, '', 22, INK, family=DISPLAY)
-        self.sub = n.text(45, 150, '', 11, SUB)
-        self.dial = Dial(n, 200, 296, 104, (lambda: eng.start('mouse'), eng.stop))
+        n.text(33, 26, 'QUILL', 18, INK, family=DISPLAY)  # 和 SETTINGS 一样的宽体大字（不加粗，见 HANDOFF §5）
+        n.text(34, 56, '英文语音输入', 11, SUB)
+        n.button(261, 33, 30, 30, icon=I_BALL, size=8, d=ELEV, color=ICON_C, cmd=self.to_ball)   # 缩成悬浮球
+        n.button(299, 33, 30, 30, icon=I_MIN, size=8, d=ELEV, color=ICON_C, cmd=self.minimize)
+        n.button(337, 33, 30, 30, icon=I_CLOSE, size=8, d=ELEV, color=ICON_C, cmd=quit_app)
+        n.raised(20, 92, 360, 360, 28, d=ELEV)                      # 状态卡片（凸起，和设置里的卡片一样）：大字 + 提示 + 刻度和声波条；按住中间那圈说话时那圈凹下去
+        self.dots = {}; self.dot = n.c.create_image(0, 0, anchor='center', tags='txt')  # 状态点（PIL 抗锯齿画的圆，Tk 自带的 oval 没有抗锯齿看着不圆）：绿 = 麦克风有输入，黄 = 没声音（待机），红 = 不可用
+        self.word = n.text(40, 109, '', 15, INK, family=DISPLAY)  # 左边缘都对在 40：QUILL / READY / HISTORY / 候选词
+        self.sub = n.text(200, 416, '', 11, SUB, anchor='n'); n.c.itemconfigure(self.sub, justify='center')  # 提示放圆盘下面居中
+        n.raised(200 - 124, 148, 248, 248, 124, d=ELEV)  # 圆盘本身是凸起的大圆（能点 = 凸起），整页的视觉主角；按住时凹下去
+        self.dial = Dial(n, 200, 272, 124, (lambda: eng.start('mouse'), eng.stop))
         # 说哪种语言（出来的都是英文）：两个小胶囊和 READY 同一行、右边对齐卡片内边；选中的凹下去
-        self.lang_sw = Switch(n, 276, 110, 40, 28, 4, (('en', 'EN'), ('zh', '中')), cfg['lang'], self.set_lang); n.btns.append(self.lang_sw)
-        n.button(20, 438, 276, 64, r=32, icon=I_HIST, text='记录', size=12, color=ICON_C, d=5, cmd=self.open_history)
-        n.button(316, 438, 64, 64, icon=I_SET, size=16, d=5, color=ICON_C, cmd=self.open_settings)
-        n.raised(20, 522, 360, 92, 28, d=7)  # 下面常用词卡片顶上的光伸到这块画布里，也画上，接缝才看不出来
+        self.lang_sw = Switch(n, 299, 105, 30, 30, 8, (('en', 'EN'), ('zh', 'CN')), cfg['lang'], self.set_lang); n.btns.append(self.lang_sw)
+        n.button(20, 472, 153, 30, r=15, d=ELEV, cmd=self.open_history)
+        n.button(185, 472, 153, 30, r=15, d=ELEV, cmd=self.edit_words)
+        n.button(350, 472, 30, 30, icon=I_SET, size=10, d=ELEV, color=ICON_C, cmd=self.open_settings)
+        self.nav_label(n, 96.5, I_HIST, 'HISTORY'); self.nav_label(n, 261.5, I_EDIT, 'WORDS')
         n.commit()
         self.wn = Neu(root, self.W, 122); self.wn.c.pack(); self.build_words()
         self.set_state('loading')
@@ -1996,6 +2011,13 @@ class App:
         threading.Thread(target=self.ollama_loop, daemon=True).start()
         threading.Thread(target=self.words_loop, daemon=True).start()
         self.poll()
+
+    def nav_label(self, n, cx, icon, label):
+        """导航按钮里的字：图标 + 宽体小标题，一起在按钮里居中；图标和文字的垂直中心对齐（HIST_DY 实测补偿）。"""
+        fi, ft = fnt(11, family=ICON), fnt(11, family=DISPLAY); gap = px(10)
+        x0 = px(cx) - (fi.measure(icon) + gap + ft.measure(label)) / 2
+        n.c.create_text(x0, px(487) + HIST_DY + NAV_DY, text=icon, font=fi, fill=ICON_C, anchor='w', tags='txt')
+        n.c.create_text(x0 + fi.measure(icon) + gap, px(487) + NAV_DY, text=label, font=ft, fill=ICON_C, anchor='w', tags='txt')
 
     # 子窗口
     def _open(self, attr, cls):
@@ -2041,27 +2063,28 @@ class App:
         """主页最下面的常用词卡片：标题 + 灰字词表，整张卡片能点（打开常用词窗口，CardBtn）；Quill 从记录里找到可能听错的词时，
         下面多一行「听到 → 正确写法」+ 加入 / 忽略（右对齐卡片内边）和灰字「可能听错 · 说过几次 · 例句」，最多 3 条，处理完补上下一条。
         卡片变高窗口跟着变高（Chrome.sync 会重画圆角和阴影）。"""
-        wn = self.wn; sugs = word_sugs(); x, y, w = 20, 10, 360
-        show = sugs[:3]  # 一直展开，最多 3 条，顺手就能点
+        wn = self.wn; sugs = word_sugs(); x, y, w = 20, 14, 360
+        show = sugs[:1]; extra = len(sugs) - 1  # 只显示第一条，其余写「还有 N 条」，点卡片进常用词窗口；没有候选就没有这张卡片
         f12, f11 = fnt(12), fnt(11); lh12, lh11 = f12.metrics('linespace') / S, f11.metrics('linespace') / S
-        rows = [(wrap(f'{hd} → {c}', f12, px(w - 240)), wrap(f'可能听错 · 说过 {k} 次 · {src}', f11, px(w - 40))[:3]) for hd, c, k, src in show]
-        rows = [(a, b if len(b) < 3 else fit('\n'.join(b), f11, px(w - 40), 3).split('\n')) for a, b in rows]  # 听到 → 正确写法全显示；例句最多 3 行
-        rh = [66 + (len(a) - 1) * lh12 + (len(b) - 1) * lh11 for a, b in rows]
-        h = round(90 + sum(rh)) if show else 92; H = y + h + 20
+        # 「听到」「→ 正确写法」永远分两行（听到的灰字、正确写法黑字，太长用省略号）；下面灰字例句最多 2 行
+        rows = [([fit(hd, f12, px(w - 170)), fit(f'→ {c}', f12, px(w - 170))], fit(f'可能听错 · 说过 {k} 次 · {src}', f11, px(w), 2).split('\n')) for hd, c, k, src in show]
+        BH = 34  # 按钮高；文字块（可能折成两行）和按钮组在 m 高的格子里各自垂直居中
+        mm = [BH for a, b in rows]
+        rh = [m + 4 + len(b) * lh11 + 16 for (a, b), m in zip(rows, mm)]  # 一行 = 格子 + 灰字 + 16 间距（分隔线画在间距正中）
+        h = round(20 + sum(rh) + 4 + (18 if extra > 0 else 0)) if show else 0; H = y + h + 20 if show else 14  # 没有卡片时只剩窗口下边的 20 留白（主画布下面已有 6）
         wn.reset(H); wn.c.configure(height=px(H))
-        wn.raised(20, 438 - self.H, 276, 64, 32, d=5); wn.raised(316, 438 - self.H, 64, 64, 32, d=5)  # 上面记录 / 设置的阴影伸过来
-        down = wn.img.copy(); inset(down, x, y, w, h, 28, 5)  # 按下时的底图：卡片凹下去，里面的按钮下面再画上
-        wn.raised(x, y, w, h, 28, d=7)
-        wn.text(x + 20, y + 24, '常用词', 12, TEXT)
-        ws = glossary()[0]
-        wn.text(x + 20, y + 56, '、'.join(ws) if ws else '人名、项目名、中英混说的词，听错时按它改', 11, SUB, width=w - 40, lines=1)
-        ry = y + 92
-        for (hd, c, k, src), (a, b), r in zip(show, rows, rh):
-            wn.text(x + 20, ry, '\n'.join(a), 12, TEXT)
-            wn.button(x + w - 200, ry - 10, 56, 34, text='加入', size=12, cmd=lambda hd=hd, c=c: self.add_word(hd, c))
-            wn.button(x + w - 138, ry - 10, 56, 34, text='修改', size=12, cmd=lambda hd=hd, c=c: self.fix_word(hd, c))
-            wn.button(x + w - 76, ry - 10, 56, 34, text='忽略', size=12, cmd=lambda hd=hd, c=c: self.ignore_word(hd, c))
-            wn.text(x + 20, ry + 26 + (len(a) - 1) * lh12, '\n'.join(b), 11, SUB)
+        for nx, nw in NAV: wn.raised(nx, 472 - self.H, nw, 30, 15, d=ELEV)  # 上面三个导航按钮的阴影伸过来
+        if not show: wn.commit(); return
+        down = wn.img.copy()  # 试验：候选词不要卡片框，直接放在窗口底色上（点这一块仍打开常用词窗口，按下时没有凹陷效果）；想要框回来：inset(down, x, y, w, h, 28, 5) + wn.raised(x, y, w, h, 28, d=7)
+        if extra > 0: wn.text(x + w, y + h - 30, f'还有 {extra} 条', 11, SUB, anchor='ne')
+        ry = y + 20
+        for i, ((hd, c, k, src), (a, b), r, m) in enumerate(zip(show, rows, rh, mm)):
+            if i: wn.c.create_line(px(x), px(ry - 8), px(x + w), px(ry - 8), fill='#DCDCDC', width=1)
+            ty = ry + (m - 2 * lh12) / 2; wn.text(x, ty, a[0], 12, SUB); wn.text(x, ty + lh12, a[1], 12, TEXT)
+            for bx, bw, t, fn in ((158, 56, '加入', self.add_word), (96, 56, '修改', self.fix_word)):  # 两列等宽 56、间距 6
+                wn.button(x + w - bx, ry + (m - BH) / 2, bw, BH, text=t, size=11, d=ELEV, color=ICON_C, cmd=lambda fn=fn, hd=hd, c=c: fn(hd, c))
+            wn.button(x + w - 34, ry + (m - BH) / 2, BH, BH, icon=I_CLOSE, size=8, d=ELEV, color=ICON_C, cmd=lambda hd=hd, c=c: self.ignore_word(hd, c))  # 忽略 = 一个叉（圆），右边缘 = 卡片内边 20
+            wn.text(x, ry + m + 4, '\n'.join(b), 11, SUB)  # 灰字和上面的文字同一左边缘
             ry += r
         for b in wn.btns: b.draw(down, *b.box[:2], False)
         wn.commit(); wn.btns.insert(0, CardBtn(wn, (x, y, w, h), down, self.edit_words))  # 点卡片任何地方 = 打开常用词窗口
@@ -2103,11 +2126,7 @@ class App:
         cfg['lang'] = lang; save_cfg(); log('说话语言：', lang)
         self.lang_sw.select(lang)
         if lang == 'zh' and not eng.zh_started: threading.Thread(target=eng.load_zh, daemon=True).start()
-        def warm():  # 两种语言的提示词不一样，Ollama 只缓存一份：先用新提示词跑一次，切完说的第一句不慢
-            if ollama_status() == 'ok':
-                try: llm('hello', watch=False, lang=lang)
-                except Exception: pass
-        threading.Thread(target=warm, daemon=True).start()
+        threading.Thread(target=llm_hello, daemon=True).start()  # 两种语言的提示词不一样：先用新提示词跑一次，切完说的第一句不慢
         if self.state in ('loading', 'ready', 'error'): self.set_state(eng.idle_state())
 
     def sub_text(self):
@@ -2115,7 +2134,7 @@ class App:
         return self.sub_base() + f'（{short}）' if short and self.state == 'ready' else self.sub_base()
 
     def sub_base(self):
-        return {'loading': '第一次打开要十几秒', 'ready': f'按住「{key_name(cfg["hotkey"])}」或按住中间这一圈，说' + ('中文' if cfg['lang'] == 'zh' else '英文'),
+        return {'loading': 'Initializing...', 'ready': f'按住「{key_name(cfg["hotkey"])}」或按住中间这一圈',
                 'rec': '说完松开', 'busy': '改语病 + 翻译，几秒钟', 'error': eng.error()}[self.state]
 
     def refresh_sub(self):
@@ -2127,10 +2146,20 @@ class App:
         self.n.c.itemconfigure(self.sub, text=fit(text, fnt(11), px(312), 2), fill={'err': RED, 'ok': GREEN}.get(level, ORANGE))
         self.root.after(15100, self.refresh_sub)
 
+    def update_dot(self):
+        """READY 右边的状态点：红 = 出错 / 麦克风没打开，黄 = 麦克风 10 秒没声音（待机），绿 = 正常有输入。"""
+        c = self.n.c; x0, y0, x1, y1 = c.bbox(self.word); cy = (y0 + y1) / 2
+        col = RED if self.state == 'error' or self.mic == 'off' else YELLOW if self.mic == 'silent' else GREEN
+        if col not in self.dots:
+            n = px(6) + 2; ss = 8; im = Image.new('RGBA', (n * ss, n * ss), (0, 0, 0, 0))
+            ImageDraw.Draw(im).ellipse((ss, ss, (n - 1) * ss, (n - 1) * ss), fill=col)
+            self.dots[col] = ImageTk.PhotoImage(im.resize((n, n), Image.LANCZOS))
+        c.coords(self.dot, x1 + px(15), cy); c.itemconfigure(self.dot, image=self.dots[col])
+
     def set_state(self, s, toast=False):
         self.state = s
         self.n.c.itemconfigure(self.word, text=WORDS[s], fill=RED if s == 'error' else INK)
-        self.refresh_sub()
+        self.refresh_sub(); self.update_dot()
         if s == 'rec': self.overlay.listen(toast)
         if s == 'busy': self.overlay.think('')
         if s == 'error': self.show_notice(eng.error(), 'err')
@@ -2149,7 +2178,13 @@ class App:
     def finish(self):
         """英文和中文都有了：记下来。"""
         if not (self.cur and self.cur[1] is not None and self.cur[2] is not None): return
-        raw, fixed, zh = self.cur; self.cur = None
+        self.record(*self.cur); self.cur = None
+
+    def park(self):
+        """新的一句要占 cur 了：上一句英文已经输入、中文还在出，先挂起来，中文到了照样记进记录（以前直接被盖掉，记录里少一句）。"""
+        if self.cur and self.cur[1] is not None and self.cur[2] is None: self.waiting[self.cur[0]] = self.cur
+
+    def record(self, raw, fixed, zh):
         save_history(raw, fixed, zh)
         h = self.alive('history')
         if h:  # 藏着的记录窗口先记一下，打开时再重画
@@ -2195,8 +2230,7 @@ class App:
         mic = 'off' if eng.tried and eng.stream is None else 'silent' if time.time() - self.sil_since > 10 else 'ok'  # 还没开过麦克风时不算「没打开」
         if mic != self.mic:
             self.mic = mic
-            if mic == 'silent': self.show_notice(MIC_SHORT, 'warn')
-            if mic == 'off': self.show_notice('麦克风没打开：去设置换一个设备。', 'err')
+            self.update_dot()
         self.dial.frame(self.state, self.shown)
         for a in ('settings', 'pop'):
             if self.alive(a): getattr(self, a).tick(self.shown, mic)
@@ -2217,14 +2251,15 @@ class App:
         elif kind == 'live': self.overlay.live(*a)
         elif kind == 'thinking': self.overlay.think(a[0])
         elif kind == 'fixed':
-            raw, fixed, by_key = a; self.cur = [raw, fixed, None]; self.overlay.result(raw, fixed, None, by_key)
+            raw, fixed, by_key = a; self.park(); self.cur = [raw, fixed, None]; self.overlay.result(raw, fixed, None, by_key)
             if not by_key: self.show_notice('已复制到剪贴板，去要输入的地方按 Ctrl+V。', 'ok')
         elif kind == 'pick':
-            raw, opts, by_key = a; self.cur, self.pick_job, eng.picking = [raw, None, None], a, True
+            raw, opts, by_key = a; self.park(); self.cur, self.pick_job, eng.picking = [raw, None, None], a, True
             self.overlay.pick(raw, opts)
         elif kind == 'zh':
             raw, zh = a
             if self.cur and self.cur[0] == raw: self.cur[2] = zh; self.overlay.set_zh(zh); self.finish()
+            elif raw in self.waiting: w = self.waiting.pop(raw); self.record(w[0], w[1], zh)
         elif kind == 'choose': self.choose(a[0])
         elif kind == 'ollama':
             st = a[0]
@@ -2396,6 +2431,7 @@ class Settings:
 
     def set_zh_out(self, o):
         cfg['zh_out'] = o; save_cfg(); log('说中文时输出', o); self.app.refresh_settings()
+        if cfg['lang'] == 'zh': threading.Thread(target=llm_hello, daemon=True).start()  # 换了提示词，同上
 
     def set_zh_whisper(self, on):
         cfg['zh_whisper'] = on; save_cfg(); log('说中文时用 Whisper 整段重认：', on); self.app.refresh_settings()
