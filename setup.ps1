@@ -39,7 +39,7 @@ if ($hasGpu) {
 # Windows loads its own old System32\onnxruntime.dll and the Chinese recognizer crashes.
 $lib = Join-Path $here '.venv\Lib\site-packages\sherpa_onnx\lib'
 Get-ChildItem -Path (Join-Path $here '.venv') -Recurse -Include 'onnxruntime.dll', 'sherpa-onnx-c*-api.dll' -ErrorAction SilentlyContinue |
-    Where-Object { $_.DirectoryName -ne $lib } | ForEach-Object { Copy-Item $_.FullName $lib -Force }
+    Where-Object { $_.DirectoryName -ne $lib } | ForEach-Object { Copy-Item $_.FullName $lib -Force -ErrorAction SilentlyContinue }
 
 # 3. Speech models (Parakeet for live English text ~650 MB, Whisper large-v3-turbo for the final English text ~1.6 GB,
 #    SenseVoice for Chinese ~240 MB). Whisper needs an NVIDIA GPU; without one it is skipped and Quill just uses Parakeet.

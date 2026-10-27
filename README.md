@@ -64,7 +64,7 @@ Without an NVIDIA GPU, Quill uses Parakeet only. Recognition runs in separate pr
 ## Install
 
 **Requirements:** Windows 10/11 · 16 GB RAM · ~8 GB disk. An NVIDIA GPU with 6 GB+ VRAM is recommended
-(CPU-only works, but each sentence takes about 5–8 s to fix).
+(CPU-only works: without an NVIDIA GPU Quill skips Whisper and uses Parakeet only, a bit less accurate, and each sentence takes about 5–8 s to fix).
 
 ```powershell
 git clone https://github.com/FxrcRed/quill.git
@@ -75,7 +75,8 @@ powershell -ExecutionPolicy Bypass -File setup.ps1          # add -Mirror in mai
 `setup.ps1` installs [uv](https://github.com/astral-sh/uv) and Python 3.12 (no system Python needed), the Python packages,
 the three speech models (~2.5 GB), [Ollama](https://ollama.com) and `qwen3:4b` (~2.6 GB), and creates a desktop shortcut.
 For higher-quality cleanup, also run `ollama pull qwen3:8b` (~5 GB) and pick it in Settings.
-Re-running it is safe; it skips what you already have.
+With an NVIDIA GPU it also installs cuBLAS (`nvidia-cublas-cu12`, ~0.5 GB) into the venv for Whisper; without one it skips that and the Whisper model.
+Re-running it is safe; it skips what you already have. If something is missing later, Quill's **Settings → Setup** window says what and has a button that runs `setup.ps1`.
 
 Then start **Quill** from the desktop, wait for **READY**, hold **Right Alt** and speak.
 
