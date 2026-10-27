@@ -60,7 +60,7 @@ Whisper 整段认，比按停顿一段段认准得多（不会把半句话认成
 
 ## 安装
 
-**需要：** Windows 10/11 · 16 GB 内存 · 约 8 GB 硬盘。推荐 6 GB 以上显存的 N 卡（没有 N 卡也能跑：不用 Whisper、只用 Parakeet，英文略不准，改错每句 5~8 秒）。
+**需要：** 仅 Windows 10/11（不支持 macOS / Linux）· 16 GB 内存 · 约 8 GB 硬盘。推荐 6 GB 以上显存的 N 卡（没有 N 卡也能跑：不用 Whisper、只用 Parakeet，英文略不准，改错每句 5~8 秒）。
 
 ```powershell
 git clone https://github.com/FxrcRed/quill.git

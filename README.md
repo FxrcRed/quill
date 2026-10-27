@@ -63,7 +63,7 @@ Without an NVIDIA GPU, Quill uses Parakeet only. Recognition runs in separate pr
 
 ## Install
 
-**Requirements:** Windows 10/11 · 16 GB RAM · ~8 GB disk. An NVIDIA GPU with 6 GB+ VRAM is recommended
+**Requirements:** Windows 10/11 only (no macOS / Linux) · 16 GB RAM · ~8 GB disk. An NVIDIA GPU with 6 GB+ VRAM is recommended
 (CPU-only works: without an NVIDIA GPU Quill skips Whisper and uses Parakeet only, a bit less accurate, and each sentence takes about 5–8 s to fix).
 
 ```powershell
