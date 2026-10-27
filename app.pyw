@@ -1347,16 +1347,11 @@ def set_win_icon(hwnd):
     user32.SendMessageW(hwnd, 0x80, 1, big); user32.SendMessageW(hwnd, 0x80, 0, small)  # WM_SETICON 大 / 小
     user32.SetClassLongPtrW(hwnd, -14, big); user32.SetClassLongPtrW(hwnd, -34, small)  # GCLP_HICON / GCLP_HICONSM
 
-def sub_window(app, title, w, anchor=None):
-    """设置 / 自检 / 记录 / 小弹窗：无边框圆角窗口。小弹窗（anchor=(屏幕x左, 屏幕y顶)）马上显示；其他的先藏着。"""
+def sub_window(app, title, w):
+    """设置 / 自检 / 记录 / 常用词：无边框圆角窗口，先藏着，由 App._open 摆好位置再显示。"""
     t = tk.Toplevel(app.root); t.withdraw(); t.title(title); t.configure(bg=BG)
-    Chrome(t, owner=app.chrome.hwnd, R=40 if anchor else 48); t.chrome.side = not anchor  # 子窗口卡片 r28 离边 20；小弹窗按钮 r20 离边 20
-    if anchor:
-        wa = ctypes.wintypes.RECT(); user32.SystemParametersInfoW(0x30, 0, ctypes.byref(wa), 0)
-        x = min(max(wa.left + px(8), anchor[0]), wa.right - px(w) - px(8)); y = anchor[1]
-        t.geometry(f'+{x}+{y}')
-        t.after(10, lambda: (t.deiconify(), t.chrome.sync()))  # 内容画好后再露面
-    return t  # 设置 / 记录 / 自检先藏着，由 App._open 摆好位置再显示
+    Chrome(t, owner=app.chrome.hwnd, R=48); t.chrome.side = True  # 子窗口卡片 r28 离边 20
+    return t
 
 def place_side(app, t, w):
     """新开的子窗口放在最左边，和开着的子窗口、主窗口排成一排（从左到右按现在的位置，间隔 20，顶边对齐主窗口）。
@@ -1897,7 +1892,6 @@ class App:
         self.state, self.sil_since, self.shown, self.mic = 'loading', time.time(), 0.0, 'ok'
         self.notice_until, self.ol_last, self.ol_starting = 0.0, None, 0.0
         self.settings = self.check_win = self.history = self.words = self.pop = None
-        self.pop_closed = (None, 0.0)  # 小弹窗刚因为焦点跑掉被关：同一次点击别又打开
         self.cur, self.pick_job = None, None  # 当前这句 [原话, 输入的英文, 中文]；等着挑的版本
 
         n = self.n = Neu(root, self.W, self.H); n.c.pack()
@@ -2159,33 +2153,20 @@ class App:
 
 
 class Settings:
-    """设置窗口：麦克风 / 快捷键 / 输出方式 / 改错服务 四块卡片。
-    only=('mic',) 或 ('ai',) 时是主页右上角 MIC / AI 小圆章点开的小弹窗：只放相关的那几块、没有卡片底，点别处就关。"""
-    W, POP_W = 400, 340
+    """设置窗口：麦克风 / 快捷键 / 输出方式 / 改错服务 四块卡片。"""
+    W = 400
     MODES = (('fast', '直接输入', '松开后直接输入改好的句子（最快）'),
              ('pick', '让我挑选', '给「自然」「口语」两版点选；按快捷键选第 1 个，Esc 放弃'))
     ZH_OUTS = (('en', '出英文', ''), ('zh', '出中文', ''))  # 出中文：删掉口头禅 / 重复 / 改口，不翻译
     ONOFF = ((True, '开', ''), (False, '关', ''))  # 出中文时每句都送模型改错字 / 只送带改口的
-    POPS = {'mic': ('mic',), 'ai': ('ol', 'mode')}
 
-    def __init__(self, app, only=None, anchor=None):
-        self.app, self.only, self.recording = app, only, False
+    def __init__(self, app):
+        self.app, self.recording = app, False
         self.key_tip = ('按住快捷键说话，松开自动输入到光标处', SUB)
-        self.Wd = self.POP_W if only else self.W
-        self.w = sub_window(app, {'mic': '麦克风', 'ai': '改错服务'}.get(only, '设置'), self.Wd, anchor)
+        self.Wd = self.W
+        self.w = sub_window(app, '设置', self.Wd)
         self.n = Neu(self.w, self.Wd, 600); self.n.c.pack(); self.build()
         self.w.bind('<MouseWheel>', lambda e: self.scroll(-int(e.delta / 120) * 3))
-        if only:
-            self.w.bind('<Escape>', lambda e: self.close()); self.w.bind('<FocusOut>', lambda e: self.w.after(150, self.check_focus))
-            self.w.after(60, self.w.focus_force)
-
-    def close(self):
-        if self.w.winfo_exists(): self.w.destroy()
-        self.app.pop_closed = (self.only, time.time())
-
-    def check_focus(self):
-        """小弹窗：焦点跑到别的窗口就关掉。"""
-        if self.w.winfo_exists() and not self.recording and not SHOWCASE and user32.GetForegroundWindow() != self.w.chrome.hwnd: self.close()
 
     # 每一块：先算高度（要先画卡片底再画内容），返回 (高度, 画法)
     def sec_mic(self, n, x, y, w, draw):
@@ -2233,7 +2214,7 @@ class Settings:
         n.text(x + 20, y + 56, dict((m, t) for m, _, t in self.MODES)[mode], 11, SUB, width=w - 40, lines=1)
         n.text(x + 20, y + 96, '说中文时', 12, TEXT)
         n.text(x + 20, y + 144, '出中文时改错字', 12, TEXT)
-        n.text(x + 20, y + 192, '说中文时松开后整段重认', 12, TEXT)
+        n.text(x + 20, y + 192, '中文整段重认', 12, TEXT)
         return h
 
     def sec_ol(self, n, x, y, w, draw):
@@ -2272,32 +2253,27 @@ class Settings:
         return min(cls.full_height(), int((wa.bottom - wa.top) / S) - 40)
 
     def scroll(self, k):
-        if self.only: return
         self.n.c.yview('scroll', k, 'units'); self.sbar.update()
 
     def label(self, n, x, y, w, h, name):
-        if not self.only: n.raised(x, y, w, h, 28, d=7)
+        n.raised(x, y, w, h, 28, d=7)
         n.text(x + 20, y + 24, name, 12, TEXT)
 
     def build(self):
         n, app = self.n, self.app
-        secs = [getattr(self, 'sec_' + s) for s in (self.POPS[self.only] if self.only else ('mic', 'key', 'mode', 'ol'))]
-        if self.only: x, w, y0, gap = 0, self.Wd, 6, 0
-        else: x, w, y0, gap = 20, 360, 92, 20
-        H = self.full_height() if not self.only else y0 + sum(s(n, x, 0, w, False) for s in secs) + 10
-        V, oy = (self.view_height() if not self.only else H), n.c.canvasy(0) / S  # 改了设置重画时停在原来滚到的位置
+        secs = [getattr(self, 'sec_' + s) for s in ('mic', 'key', 'mode', 'ol')]
+        x, w, y0, gap = 20, 360, 92, 20
+        H = self.full_height()
+        V, oy = self.view_height(), n.c.canvasy(0) / S  # 改了设置重画时停在原来滚到的位置
         n.reset(H); n.c.configure(height=px(V), scrollregion=(0, 0, px(self.Wd), px(H)), yscrollincrement=px(20))
-        if not self.only:
-            n.text(32, 26, 'SETTINGS', 18, INK, family=DISPLAY); n.text(33, 56, '设置', 11, SUB)
-            n.button(272, 28, 70, 34, r=17, icon=I_CHECK, text='自检', size=12, cmd=app.open_checks)
-            close_btn(n, self.Wd, self.w.withdraw)
+        n.text(32, 26, 'SETTINGS', 18, INK, family=DISPLAY); n.text(33, 56, '设置', 11, SUB)
+        n.button(272, 28, 70, 34, r=17, icon=I_CHECK, text='自检', size=12, cmd=app.open_checks)
+        close_btn(n, self.Wd, self.w.withdraw)
         y = y0
-        for i, s in enumerate(secs):
-            if i and self.only: n.img.paste('#D6D6D6', (px(20), px(y), px(w - 20), px(y) + max(1, px(1))))  # 小弹窗里两块之间的细线
-            y += s(n, x, y, w, True) + gap
-        if not self.only: self.sbar = ScrollBar(n, H, V)
+        for s in secs: y += s(n, x, y, w, True) + gap
+        self.sbar = ScrollBar(n, H, V)
         n.commit()
-        if not self.only: n.c.tag_raise(self.sbar.thumb); n.c.yview_moveto(oy / H); self.sbar.update()
+        n.c.tag_raise(self.sbar.thumb); n.c.yview_moveto(oy / H); self.sbar.update()
 
     def tick(self, level, mic):
         if not hasattr(self, 'bar'): return
