@@ -83,10 +83,10 @@ Then start **Quill** from the desktop, wait for **READY**, hold **Right Alt** an
 ## Usage tips
 
 - **EN / 中** (top right of the status card) chooses the language you speak. Output is English, unless you set *When speaking Chinese* → 出中文 in Settings.
-- Settings: microphone, hotkey (click *Record* and press any key), output mode, and a self-test that checks every part.
+- Below the status card are **HISTORY** and **WORDS** buttons and a settings gear. Settings: microphone, hotkey (click *Record* and press any key), output mode; the three round icons at the top right are Setup, Self-test (checks every part) and Close.
 - The shrink button (two arrows, top right) turns Quill to a floating ball at the edge of the screen; click it to come back.
-- History keeps the last 20 sentences: the original speech, the English, and the Chinese meaning. You can turn saving off, keep only the last 7 / 30 days, or clear it.
-- **Words** (bottom card on the home screen): click it to add, edit or delete entries, or open `words.txt` in a text editor. One entry per line: `Correct spelling: misheard, another misheard` (the part after the colon is optional).
+- **HISTORY** keeps the last 20 sentences (the icon in its title row opens the file): the original speech, the English, and the Chinese meaning. You can turn saving off, keep only the last 7 / 30 days, or clear it.
+- **WORDS**: add, edit or delete entries; the icon in its title row opens `words.txt` in a text editor. One entry per line: `Correct spelling: misheard, another misheard` (the part after the colon is optional).
 - Ollama is started with Quill and stopped when Quill quits; the model leaves GPU memory after it sits idle (2 / 10 / 30 minutes, or never — in Settings).
 
 ## Development
