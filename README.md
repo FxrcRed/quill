@@ -33,7 +33,7 @@ all of that verbatim, or send my voice to the cloud. Quill does the cleanup loca
 - **Cleans up speech, not just grammar** — removes fillers, stutters, false starts and self-corrections ("no, I mean…"), fixes tense, articles and plurals.
 - **Speak Chinese, get English** — one tap on **EN / 中** on the home screen. Mixed Chinese-English speech works too.
 - **Or speak Chinese, get clean Chinese** — Settings → *When speaking Chinese* → 出中文. Fillers (嗯, 呃), stutters and repeats are removed instantly by rules; only sentences with a self-correction (不对 / 我是说 …) go to the LLM, so most sentences appear in about half a second.
-- **Accurate** — when you let go, Whisper re-reads the whole recording and the cleanup runs once on the full text; English usually appears 2–3 s after you let go (NVIDIA GPU).
+- **Accurate** — when you let go, Whisper re-reads the whole recording (English and Chinese) and the cleanup runs once on the full text; English usually appears 2–3 s after you let go (NVIDIA GPU).
 - **Two output modes** — *Direct* (type it right away) or *Pick* (choose between a natural and a casual version).
 - **See what changed** — a small overlay at the bottom of the screen shows live transcription, the words that were fixed, and a Chinese translation.
 - **Learns your words** — a word list on the home screen (names, project names, tools). Write `Claude: cloud` and Quill decides from context whether "cloud" meant Claude. While idle, it reads your history once a day and suggests words it probably misheard; one tap to add or ignore.

@@ -127,7 +127,7 @@ def log(*a):
     if sys.stdout: print(line, flush=True)
     with open(HERE / 'run.log', 'a', encoding='utf-8') as f: f.write(line + '\n')
 
-cfg = {'hotkey': 0xA5, 'device': None, 'mode': 'fast', 'lang': 'en', 'zh_out': 'en', 'keep': '2m', 'hist': True, 'hist_days': 0, 'zh_smart': True}  # zh_smart：出中文时每句都送模型改错字（关掉只送带改口的）；hist：存不存记录；hist_days：只留最近几天（0 = 永久）；keep：不用多久释放显存（见 KEEPS）；mode：fast 直接输入 / pick 让我挑选；lang：en 说英文 / zh 说中文；zh_out：说中文时出英文 / 出中文
+cfg = {'hotkey': 0xA5, 'device': None, 'mode': 'fast', 'lang': 'en', 'zh_out': 'en', 'keep': '2m', 'hist': True, 'hist_days': 0, 'zh_smart': True, 'zh_whisper': True}  # zh_whisper：说中文时松开后也用 Whisper 整段重认（关掉就只用 SenseVoice）；zh_smart：出中文时每句都送模型改错字（关掉只送带改口的）；hist：存不存记录；hist_days：只留最近几天（0 = 永久）；keep：不用多久释放显存（见 KEEPS）；mode：fast 直接输入 / pick 让我挑选；lang：en 说英文 / zh 说中文；zh_out：说中文时出英文 / 出中文
 try: cfg.update(json.loads((HERE / 'settings.json').read_text(encoding='utf-8')))
 except Exception: pass
 if cfg.get('llm') in dict(LLM_MODELS): LLM_MODEL = cfg['llm']
@@ -519,6 +519,11 @@ def restarts(prev, text, n=4):
     if len(words(text)) < (6 if CJK.search(text) else 3): return True
     return len(b) == n and any(a[i:i + n] == b for i in range(len(a) - n + 1))
 
+def zh_punct(t):
+    """Whisper 出中文时标点是英文半角（逗号、问号），换成全角；中文字之间的空格去掉。数字里的小数点不动。"""
+    t = re.sub(r'(?<=[一-鿿])\s*([,?!:;])\s*', lambda m: {',': '，', '?': '？', '!': '！', ':': '：', ';': '；'}[m.group(1)], t)
+    return re.sub(r'(?<=[一-鿿，。？！：；])\s+(?=[一-鿿])', '', t).strip()
+
 def join_parts(parts):
     """拼各段改好的英文；后一段开头要是把前一段的结尾又写了一遍（≥3 个词），去掉重复的那截（兜底）。"""
     out = []
@@ -590,7 +595,7 @@ class Job:
         self.seg_lang = 'zhzh' if lang == 'zh' and out == 'zh' else lang  # 改错用哪套提示词
         if self.seg_lang == 'zhzh': self.mode = 'fast'  # 「让我挑选」是挑英文的说法，出中文时直接输入
         self.spec, self.last_part = None, ''  # 说话停下来时先改着的那段（松开时原话没变就直接用）
-        self.defer = self.seg_lang == 'en' and eng.wh is not None  # 说英文且 Whisper 能用：说话时只显示，松开后整段重认再改一次
+        self.defer = eng.wh is not None and (self.seg_lang == 'en' or lang == 'zh' and cfg.get('zh_whisper', True))  # 说中文要 zh_whisper 开着； 说英文且 Whisper 能用：说话时只显示，松开后整段重认再改一次
 
     def raw(self, segs): return ('' if self.lang == 'zh' else ' ').join(s.raw for s in segs)  # 中文段之间不加空格
 
@@ -628,7 +633,7 @@ class Job:
                 else: self.skip = cut  # 半句话：先不切，连着后面一起识别
             tail = a[self.pos:]
             part = eng.recognize(tail, self.lang) if has_speech(tail) else ''
-            if self.seg_lang == 'zhzh': self.speculate(part)
+            if self.seg_lang == 'zhzh' and not self.defer: self.speculate(part)  # 松开后要 Whisper 重认的话，先改着的白改了
             return self.raw(self.segs), part
 
     def finish(self, a):
@@ -645,7 +650,7 @@ class Job:
         """说英文：整段录音给 Whisper 重认，结果当一段去改。Parakeet 什么都没听到时不送（Whisper 对着没声音会编一句）；
         Whisper 出错 / 超时就用 Parakeet 拼起来的原话。"""
         raw = self.raw(self.segs)
-        text = (eng.whisper(a) if raw else '') or raw
+        text = (eng.whisper(a, self.lang == 'zh') if raw else '') or raw
         self.segs = [Seg(text, self.mode, '', self.seg_lang)] if text else []
 
     def whole(self):
@@ -715,12 +720,12 @@ class Engine:
         try: t = time.time(); self.wh = AsrProc('wh'); log(f'整段识别（Whisper）已加载 {time.time() - t:.1f}s')
         except Exception as e: log('Whisper 加载失败，只用 Parakeet：', e)
 
-    def whisper(self, a):
+    def whisper(self, a, zh=False):
         """整段识别，最多等 WHISPER_TIMEOUT 秒；出错 / 超时返回 ''（调用方用 Parakeet 的结果）。"""
         if not self.wh: return ''
         got = []
         def run():
-            try: got.append(self.wh.recognize(a))
+            try: got.append(zh_punct(self.wh.recognize(a, zh=True)) if zh else self.wh.recognize(a))
             except Exception as e: log('Whisper 出错：', repr(e))
         th = threading.Thread(target=run, daemon=True); t = time.time(); th.start(); th.join(WHISPER_TIMEOUT)
         if not got: log(f'Whisper 没出结果（{time.time() - t:.1f}s），用实时识别的'); return ''
@@ -867,11 +872,12 @@ def asr_worker(lang):
             from faster_whisper import WhisperModel
             m = WhisperModel(str(HERE / 'models' / 'whisper'), device='cuda', compute_type='int8_float16')
             m.transcribe(np.zeros(RATE, np.float32), language='en')  # 先跑一次：缺库在这里就报出来，第一句也不用等
-            def rec(a):
+            def rec(a, zh=False):
                 terms = [t for t in glossary()[0] if t.isascii()]
-                segs, _ = m.transcribe(a, language='en', beam_size=1, condition_on_previous_text=False,
-                                       initial_prompt=('Glossary: ' + ', '.join(terms) + '.') if terms else None)
-                return ' '.join(s.text.strip() for s in segs)
+                if zh: prompt, kw = '以下是普通话的句子，使用简体中文。' + ('常用词：' + '、'.join(terms) + '。' if terms else ''), dict(language='zh', beam_size=5)
+                else: prompt, kw = ('Glossary: ' + ', '.join(terms) + '.') if terms else None, dict(language='en', beam_size=1)
+                segs, _ = m.transcribe(a, condition_on_previous_text=False, initial_prompt=prompt, **kw)
+                return ('' if zh else ' ').join(s.text.strip() for s in segs)
         else:
             import onnx_asr
             m = onnx_asr.load_model('nemo-parakeet-tdt-0.6b-v3', HERE / 'models' / 'parakeet', quantization='int8')
@@ -881,8 +887,9 @@ def asr_worker(lang):
         return send('models\\%s 里的文件可能缺了' % {'zh': 'sensevoice', 'wh': 'whisper'}.get(lang, 'parakeet'))
     send('OK')
     while len(h := inp.read(4)) == 4:  # 主程序退出、管道关掉就结束
-        a = np.frombuffer(inp.read(int.from_bytes(h, 'little') * 4), np.float32)
-        try: send(rec(a).strip() if len(a) else '')
+        n = int.from_bytes(h, 'little'); zh = bool(n >> 31); n &= 0x7FFFFFFF  # 长度最高位 = 这段是中文（只有 Whisper 子进程用）
+        a = np.frombuffer(inp.read(n * 4), np.float32)
+        try: send((rec(a, zh) if lang == 'wh' else rec(a)).strip() if len(a) else '')
         except Exception: log('识别出错', traceback.format_exc()); send('')
 
 class AsrProc:
@@ -903,8 +910,8 @@ class AsrProc:
         if len(h) < 4: raise RuntimeError('识别子进程退出了')
         return self.p.stdout.read(int.from_bytes(h, 'little')).decode('utf-8')
 
-    def recognize(self, a, sample_rate=RATE):
-        a = np.ascontiguousarray(a, np.float32); msg = len(a).to_bytes(4, 'little') + a.tobytes()
+    def recognize(self, a, sample_rate=RATE, zh=False):
+        a = np.ascontiguousarray(a, np.float32); msg = (len(a) | zh << 31).to_bytes(4, 'little') + a.tobytes()  # 最高位 = 说中文（见 asr_worker）
         with self.lock:
             try:
                 self.p.stdin.write(msg); self.p.stdin.flush(); return self._recv()
@@ -1958,7 +1965,12 @@ class App:
         下面多一行「听到 → 正确写法」+ 加入 / 忽略（右对齐卡片内边）和灰字「可能听错 · 说过几次 · 例句」，最多 3 条，处理完补上下一条。
         卡片变高窗口跟着变高（Chrome.sync 会重画圆角和阴影）。"""
         wn = self.wn; sugs = word_sugs(); x, y, w = 20, 10, 360
-        show = sugs[:3]; h = 90 + 66 * len(show) if show else 92; H = y + h + 20  # 一直展开，最多 3 条，顺手就能点
+        show = sugs[:3]  # 一直展开，最多 3 条，顺手就能点
+        f12, f11 = fnt(12), fnt(11); lh12, lh11 = f12.metrics('linespace') / S, f11.metrics('linespace') / S
+        rows = [(wrap(f'{hd} → {c}', f12, px(w - 240)), wrap(f'可能听错 · 说过 {k} 次 · {src}', f11, px(w - 40))[:3]) for hd, c, k, src in show]
+        rows = [(a, b if len(b) < 3 else fit('\n'.join(b), f11, px(w - 40), 3).split('\n')) for a, b in rows]  # 听到 → 正确写法全显示；例句最多 3 行
+        rh = [66 + (len(a) - 1) * lh12 + (len(b) - 1) * lh11 for a, b in rows]
+        h = round(90 + sum(rh)) if show else 92; H = y + h + 20
         wn.reset(H); wn.c.configure(height=px(H))
         wn.raised(20, 438 - self.H, 276, 64, 32, d=5); wn.raised(316, 438 - self.H, 64, 64, 32, d=5)  # 上面记录 / 设置的阴影伸过来
         down = wn.img.copy(); inset(down, x, y, w, h, 28, 5)  # 按下时的底图：卡片凹下去，里面的按钮下面再画上
@@ -1966,12 +1978,14 @@ class App:
         wn.text(x + 20, y + 24, '常用词', 12, TEXT)
         ws = glossary()[0]
         wn.text(x + 20, y + 56, '、'.join(ws) if ws else '人名、项目名、中英混说的词，听错时按它改', 11, SUB, width=w - 40, lines=1)
-        for i, (hd, c, k, src) in enumerate(show):
-            ry = y + 92 + i * 66
-            wn.text(x + 20, ry, f'{hd} → {c}', 12, TEXT, width=w - 210, lines=1)
-            wn.button(x + w - 170, ry - 10, 70, 34, text='加入', size=12, cmd=lambda hd=hd, c=c: self.add_word(hd, c))
-            wn.button(x + w - 90, ry - 10, 70, 34, text='忽略', size=12, cmd=lambda hd=hd, c=c: self.ignore_word(hd, c))
-            wn.text(x + 20, ry + 26, f'可能听错 · 说过 {k} 次 · {src}', 11, SUB, width=w - 40, lines=1)
+        ry = y + 92
+        for (hd, c, k, src), (a, b), r in zip(show, rows, rh):
+            wn.text(x + 20, ry, '\n'.join(a), 12, TEXT)
+            wn.button(x + w - 200, ry - 10, 56, 34, text='加入', size=12, cmd=lambda hd=hd, c=c: self.add_word(hd, c))
+            wn.button(x + w - 138, ry - 10, 56, 34, text='修改', size=12, cmd=lambda hd=hd, c=c: self.fix_word(hd, c))
+            wn.button(x + w - 76, ry - 10, 56, 34, text='忽略', size=12, cmd=lambda hd=hd, c=c: self.ignore_word(hd, c))
+            wn.text(x + 20, ry + 26 + (len(a) - 1) * lh12, '\n'.join(b), 11, SUB)
+            ry += r
         for b in wn.btns: b.draw(down, *b.box[:2], False)
         wn.commit(); wn.btns.insert(0, CardBtn(wn, (x, y, w, h), down, self.edit_words))  # 点卡片任何地方 = 打开常用词窗口
 
@@ -1988,6 +2002,12 @@ class App:
         try: WORDS_FILE.write_text('\n'.join(lines) + '\n', encoding='utf-8'); log(f'常用词加入：{term}: {heard}')
         except Exception: log('写常用词失败', traceback.format_exc())
         self.words_changed()
+
+    def fix_word(self, heard, term):
+        """候选词「修改」：打开常用词窗口，输入框里预填「建议写法: 听到的」，用户把冒号前改成对的（如 Dongdaqiao / 东大桥），Enter 就按他写的加入。"""
+        self._open('words', Words); ws = self.words
+        ws.editing = None; ws.ent.delete(0, 'end'); ws.ent.insert(0, f'{term}: {heard}')
+        ws.build(keep=True); ws.focus(); ws.ent.selection_range(0, len(term)); ws.ent.icursor(len(term))
 
     def ignore_word(self, heard, term):
         with scan_lock: st = scan_load(); st['ignored'].append(f'{heard.lower()}\t{term}'); scan_save(st)
@@ -2201,11 +2221,11 @@ class Settings:
         return h
 
     def sec_mode(self, n, x, y, w, draw):
-        h = 182  # 说明一行，三排按钮间距 48
+        h = 230  # 说明一行，四排按钮间距 48
         if not draw: return h
         mode = cfg.get('mode', 'fast'); self.label(n, x, y, w, h, '输出方式')
         rows = ((y + 14, self.MODES, mode, self.set_mode), (y + 86, self.ZH_OUTS, cfg.get('zh_out', 'en'), self.set_zh_out),
-                (y + 134, self.ONOFF, cfg.get('zh_smart', True), self.set_zh_smart))
+                (y + 134, self.ONOFF, cfg.get('zh_smart', True), self.set_zh_smart), (y + 182, self.ONOFF, cfg.get('zh_whisper', True), self.set_zh_whisper))
         for by, opts, cur, cmd in rows:
             for i, (m, name, _) in enumerate(opts):
                 on = m == cur
@@ -2213,6 +2233,7 @@ class Settings:
         n.text(x + 20, y + 56, dict((m, t) for m, _, t in self.MODES)[mode], 11, SUB, width=w - 40, lines=1)
         n.text(x + 20, y + 96, '说中文时', 12, TEXT)
         n.text(x + 20, y + 144, '出中文时改错字', 12, TEXT)
+        n.text(x + 20, y + 192, '说中文时松开后整段重认', 12, TEXT)
         return h
 
     def sec_ol(self, n, x, y, w, draw):
@@ -2308,6 +2329,9 @@ class Settings:
 
     def set_zh_out(self, o):
         cfg['zh_out'] = o; save_cfg(); log('说中文时输出', o); self.app.refresh_settings()
+
+    def set_zh_whisper(self, on):
+        cfg['zh_whisper'] = on; save_cfg(); log('说中文时用 Whisper 整段重认：', on); self.app.refresh_settings()
 
     def set_zh_smart(self, on):
         cfg['zh_smart'] = on; save_cfg(); log('出中文时改错字：', on); self.app.refresh_settings()
