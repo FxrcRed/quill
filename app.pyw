@@ -518,12 +518,14 @@ REC_DIR, REC_KEEP = HERE / 'recordings', 1000
 def save_rec(audio):
     """settings.json 里 "save_audio": true 时把每句录音存成 wav（拿来对比识别模型；不进 git，只留最近 REC_KEEP 句）。"""
     try:
-        REC_DIR.mkdir(exist_ok=True)
-        with wave.open(str(REC_DIR / f'{datetime.now():%Y%m%d-%H%M%S}.wav'), 'wb') as w:
+        REC_DIR.mkdir(exist_ok=True); name = f'{datetime.now():%Y%m%d-%H%M%S}'
+        with wave.open(str(REC_DIR / f'{name}.wav'), 'wb') as w:
             w.setnchannels(1); w.setsampwidth(2); w.setframerate(RATE)
             w.writeframes((np.clip(audio.reshape(-1), -1, 1) * 32767).astype(np.int16).tobytes())
         for old in sorted(REC_DIR.glob('*.wav'))[:-REC_KEEP]: old.unlink()
+        return name
     except Exception: log('存录音失败', traceback.format_exc())
+REC_OF = {}  # 识别原文 → 录音名，写记录时带上（harvest.py 靠它配录音）
 
 class Job:
     """一次录音。说话时每隔约 1 秒用 Whisper 把目前为止的整段认一遍给浮窗看（heard）；松开后整段再认一次，结果当一句去改。"""
@@ -654,13 +656,14 @@ class Engine:
         log(f'录到 {len(audio) / RATE:.1f}s，音量峰值 {peak:.4f}')
         if len(audio) < RATE * 0.3: return notify('按得太短了：按住说完一整句再松开。', 'warn', True)
         if peak < 0.003: post('mic_bad'); return notify(MIC_HINT, 'err', True)
-        if cfg.get('save_audio'): save_rec(audio)
+        rec = save_rec(audio) if cfg.get('save_audio') else None
         post('state', 'busy', job.by_key)
         self.loaded.wait()
         if not self.wh: return notify(self.load_error, 'err', True)
         t = time.time(); seg = job.finish(audio)
         if not seg: return notify('没听清，再说一次（靠近麦克风、说慢一点）。', 'warn', True)
         raw = seg.raw; post('thinking', raw)
+        if rec: REC_OF[raw] = rec
         fixed = seg.get('fixed')
         log('识别：', *((raw, '| 改后：', fixed) if cfg.get('hist', True) else ('（记录已关，不记内容）',)), f'| 松开后 {time.time() - t:.1f}s')
         if job.by_key: paste(fixed)
@@ -777,7 +780,8 @@ HIST_DAYS = ((7, '7 天'), (30, '30 天'), (0, '永久'))
 def save_history(raw, fixed, zh):
     if not cfg.get('hist', True): return  # 用户关了记录：什么都不写
     with open(HIST, 'a', encoding='utf-8') as f:
-        f.write(f'{datetime.now():%Y-%m-%d %H:%M}\n说：{raw}\n改：{fixed}\n译：{zh}\n\n')
+        rec = REC_OF.pop(raw, '')
+        f.write(f'{datetime.now():%Y-%m-%d %H:%M}\n说：{raw}\n改：{fixed}\n译：{zh}\n' + (f'录：{rec}\n' if rec else '') + '\n')
 
 
 def set_clip(text):

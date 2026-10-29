@@ -19,19 +19,9 @@ def hist():
         ls = b.strip().splitlines()
         if not ls or not re.fullmatch(r'\d{4}-\d\d-\d\d \d\d:\d\d', ls[0]): continue
         f = {l[0]: l[2:].strip() for l in ls[1:] if len(l) > 1 and l[1] == '：'}
-        out.append((datetime.strptime(ls[0], '%Y-%m-%d %H:%M'), f.get('说', ''), f.get('译') or f.get('改') or f.get('说', '')))
+        w = HERE / 'recordings' / f'{f.get("录", "-")}.wav'  # 录：app 写记录时带的录音名（没有就不配录音）
+        out.append((datetime.strptime(ls[0], '%Y-%m-%d %H:%M'), f.get('译') or f.get('改') or f.get('说', ''), w if w.exists() else None))
     return out
-
-def wavs(h):
-    """每条记录配上它那一分钟里的录音（同一分钟里按先后一一对应，数目对不上就不配）。"""
-    by = {}
-    for p in sorted((HERE / 'recordings').glob('*.wav')):
-        try: by.setdefault(datetime.strptime(p.stem, '%Y%m%d-%H%M%S').replace(second=0), []).append(p)
-        except ValueError: pass
-    n = Counter(t for t, _, _ in h); seen = Counter(); res = []
-    for t, _, _ in h:
-        w = by.get(t, []); res.append(w[seen[t]] if len(w) == n[t] else None); seen[t] += 1
-    return res
 
 def msgs(since):
     out = {}
@@ -57,6 +47,7 @@ def align(p, m):
     while j < len(bl) - 1 and bl[j + 1].b - bl[j].b - bl[j].size <= bl[j + 1].a - bl[j].a - bl[j].size + 10: j += 1
     s = max(0, bl[i].b - bl[i].a); e = min(len(m), bl[j].b + bl[j].size + len(p) - bl[j].a - bl[j].size)
     span = m[s:e].strip()
+    if p[:1] and not PUNCT.match(p[0]): span = span.lstrip('，。、？！；：,.?!;: ')  # 开头认错的字被删了，会多带进前一句的标点
     return span, SequenceMatcher(None, p, span, autojunk=False).ratio()
 
 h = hist()
@@ -66,13 +57,13 @@ OUT.mkdir(parents=True, exist_ok=True)
 lab = OUT / 'labels.txt'
 if not lab.exists(): lab.write_text('# 每行：录音名<Tab>你发出去的定稿（harvest.py 自动配的）。不要的行前面加 #，别删。\n', encoding='utf-8')
 have = lab.read_text(encoding='utf-8')
-rep, subs, new = [], Counter(), []
-for (t, said, p), w in zip(h, wavs(h)):
+rep, subs, new, nch = [], Counter(), [], 0
+for t, p, w in h:
     if len(p) < 4: continue
     cand = [align(p, m) for mt, m in ms if t <= mt <= t + WINDOW]
     span, r = max(cand, key=lambda x: x[1], default=('', 0))
     if r < MIN_RATIO or abs(len(span) - len(p)) > MAX_LEN * len(p): continue
-    changed = span != p
+    changed = span != p; nch += changed
     if changed:
         for op, a1, a2, b1, b2 in SequenceMatcher(None, p, span, autojunk=False).get_opcodes():
             if op != 'equal' and PUNCT.sub('', p[a1:a2] + span[b1:b2]): subs[f'{p[a1:a2] or "∅"} → {span[b1:b2] or "∅"}'] += 1
@@ -82,6 +73,6 @@ for (t, said, p), w in zip(h, wavs(h)):
 if new:
     with lab.open('a', encoding='utf-8') as f: f.write(''.join(l + '\n' for l in new))
 top = [f'{n}×  {k}' for k, n in subs.most_common(40)]
-(OUT / 'harvest.txt').write_text(f'配上 {len(rep)} 条（改过 {sum("改过" in x for x in rep)}），新加录音 {len(new)} 段\n\n'
+(OUT / 'harvest.txt').write_text(f'配上 {len(rep)} 条（改过 {nch}），新加录音 {len(new)} 段\n\n'
                                  '== 错字 → 正字（出现次数）==\n' + '\n'.join(top) + '\n\n== 配对 ==\n' + '\n'.join(rep) + '\n', encoding='utf-8')
-print(f'配上 {len(rep)} 条（改过 {sum("改过" in x for x in rep)}），新加录音 {len(new)} 段 → {OUT / "harvest.txt"}')
+print(f'配上 {len(rep)} 条（改过 {nch}），新加录音 {len(new)} 段 → {OUT / "harvest.txt"}')
