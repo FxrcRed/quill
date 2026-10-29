@@ -39,7 +39,11 @@ if fix:
     if 'nosmart' in sys.argv: ft.m.cfg['zh_smart'] = False  # 只送带改口的句子
 from faster_whisper import WhisperModel
 wh = WhisperModel(str(HERE / 'models' / 'whisper'), device='cuda', compute_type='int8_float16')
-base = '以下是普通话的句子，使用简体中文。' + ('常用词：' + '、'.join(terms()) + '。' if terms() else '')  # 和 app.pyw 里中文 rec() 的提示一致
+_t = terms(); _zh = [t for t in _t if not t.isascii()]  # half1 / half2：中文词只放前一半 / 后一半，用来看词表的水分
+if 'half1' in sys.argv: _t = [t for t in _t if t.isascii() or t in _zh[:len(_zh) // 2]]
+if 'half2' in sys.argv: _t = [t for t in _t if t.isascii() or t in _zh[len(_zh) // 2:]]
+_hdr, _lst = '以下是普通话的句子，使用简体中文。', ('常用词：' + '、'.join(_t) + '。' if _t else '')
+base = (_lst + _hdr if 'front' in sys.argv else _lst if 'nohdr' in sys.argv else _hdr + _lst)  # 默认和 app.pyw 里中文 rec() 的提示一致
 errs = chars = 0; lines = []; prev = ''
 for name, ref in labels:
     prompt = base + (prev if ctx else '')

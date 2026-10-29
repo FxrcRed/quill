@@ -721,7 +721,7 @@ def asr_worker():
             try: list(m.transcribe(np.zeros(RATE * 20, np.float32), language=lg, beam_size=bm, condition_on_previous_text=False)[0])
             except Exception: pass
         def rec(a, zh=False):
-            terms = [t for t in glossary()[0] if t.isascii()]
+            terms = [t for t in glossary()[0] if zh or t.isascii()]  # 中文提示带中文词，英文提示只带英文词
             if zh: prompt, kw = '以下是普通话的句子，使用简体中文。' + ('常用词：' + '、'.join(terms) + '。' if terms else ''), dict(language='zh', beam_size=5)
             else: prompt, kw = ('Glossary: ' + ', '.join(terms) + '.') if terms else None, dict(language='en', beam_size=1)
             segs, _ = m.transcribe(a, condition_on_previous_text=False, initial_prompt=prompt, **kw)
