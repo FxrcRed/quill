@@ -514,7 +514,7 @@ def fix_worker():
                 if k not in s.out: s.put(k, err if k == 'zh' else s.text)
 
 
-REC_DIR, REC_KEEP = HERE / 'recordings', 50
+REC_DIR, REC_KEEP = HERE / 'recordings', 1000
 def save_rec(audio):
     """settings.json 里 "save_audio": true 时把每句录音存成 wav（拿来对比识别模型；不进 git，只留最近 REC_KEEP 句）。"""
     try:

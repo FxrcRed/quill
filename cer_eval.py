@@ -28,7 +28,8 @@ def dist(a, b):
     return d[-1]
 
 labels = []
-for line in (HERE / 'eval_zh' / 'labels.txt').read_text(encoding='utf-8').splitlines():
+D = HERE / 'eval_zh' / ('auto' if 'auto' in sys.argv else '')  # auto：harvest.py 自动收的样本
+for line in (D / 'labels.txt').read_text(encoding='utf-8').splitlines():
     if line.strip() and not line.startswith('#') and '\t' in line: labels.append(line.split('\t', 1))
 ctx, fix = 'ctx' in sys.argv, 'fix' in sys.argv  # fix：识别结果再走一遍「说中文 → 出中文」的改错（和 app 一样），算改错后的字错率
 if fix:
@@ -47,7 +48,7 @@ base = (_lst + _hdr if 'front' in sys.argv else _lst if 'nohdr' in sys.argv else
 errs = chars = 0; lines = []; prev = ''
 for name, ref in labels:
     prompt = base + (prev if ctx else '')
-    segs, _ = wh.transcribe(load(HERE / 'eval_zh' / f'{name}.wav'), language='zh', beam_size=5, condition_on_previous_text=False, initial_prompt=prompt)
+    segs, _ = wh.transcribe(load(D / f'{name}.wav'), language='zh', beam_size=5, condition_on_previous_text=False, initial_prompt=prompt)
     hyp = ''.join(s.text for s in segs).strip()
     if fix: hyp = ft.one([hyp], 'zh', 'zh') or hyp
     e, n = dist(norm(hyp), norm(ref)), len(norm(ref)); errs += e; chars += n; prev = ref
@@ -55,7 +56,8 @@ for name, ref in labels:
 cer = errs / max(chars, 1)
 head = f'CER {cer:.2%}（{errs}/{chars} 字，{len(labels)} 段{"，带上文" if ctx else ""}{"，改错后" if fix else ""}）'
 outd = HERE / 'eval_out'; outd.mkdir(exist_ok=True)
-old = sorted(outd.glob('cer_*.txt'))
-(outd / f'cer_{time.strftime("%m%d-%H%M%S")}.txt').write_text(head + '\n' + '\n'.join(lines) + '\n', encoding='utf-8')
+pre = 'cerauto_' if 'auto' in sys.argv else 'cer_'  # 两套评测集各自和上一次比
+old = sorted(outd.glob(pre + '*.txt'))
+(outd / f'{pre}{time.strftime("%m%d-%H%M%S")}.txt').write_text(head + '\n' + '\n'.join(lines) + '\n', encoding='utf-8')
 print('\n'.join(l for l in lines if '对：' in l))
 print(head + (f'；上一次 {old[-1].read_text(encoding="utf-8").splitlines()[0]}' if old else ''))
