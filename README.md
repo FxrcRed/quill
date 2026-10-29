@@ -92,6 +92,9 @@ Then start **Quill** from the desktop, wait for **READY**, hold **Right Alt** an
 - `e2e_test.py [zh]` — end-to-end test without a microphone (feeds a wav at real-time speed).
 - `fix_test.py [zh | zhzh]` — compare correction output on real-world phrases after changing prompts.
 - `term_test.py` — checks how well the model tells a misheard name (cloud → Claude) from the ordinary word.
+- `eval_run.py [en | zh | zhzh | all]` — runs the correction test set with a fixed seed and diffs it against the last run.
+- `cer_eval.py [auto]` — Chinese character error rate on your own recordings in `eval_zh\` (not in git).
+- `harvest.py` — collects test samples by itself: pairs each dictation with the edited message you actually sent in Claude Code and copies the recording to `eval_zh\auto\` (needs `"save_audio": true` in `settings.json`).
 - `make_words_demo.py` — regenerates the word-list image.
 - `make_demo.py` — regenerates the GIF and screenshot above.
 - The project was built together with Claude Code.

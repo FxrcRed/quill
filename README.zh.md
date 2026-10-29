@@ -86,6 +86,9 @@ powershell -ExecutionPolicy Bypass -File setup.ps1 -Mirror     # 国内网络加
 - `e2e_test.py [zh]`：不用麦克风的端到端测试（按实时速度喂一段 wav）。
 - `fix_test.py [zh | zhzh]`：改了提示词后，用真实说法对比改错效果。
 - `term_test.py`：测模型能不能分清听错的名字（cloud → Claude）和普通词。
+- `eval_run.py [en | zh | zhzh | all]`：用固定随机种子跑改错测试集，和上一次对比。
+- `cer_eval.py [auto]`：在你自己的录音（`eval_zh\`，不进 git）上算中文字错率。
+- `harvest.py`：自动收测试样本：把每句识别和你在 Claude Code 里改完真正发出去的消息配对，录音拷到 `eval_zh\auto\`（要在 `settings.json` 里开 `"save_audio": true`）。
 - `make_words_demo.py`：重新生成常用词演示图。
 - `make_demo.py`：重新生成上面的 GIF 和截图。
 - 这个项目是和 Claude Code 一起做的。
