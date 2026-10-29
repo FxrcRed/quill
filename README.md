@@ -6,7 +6,7 @@
 
 **Offline voice typing for Windows.**
 Hold a key, speak messy English *or Chinese*, let go — clean, natural English is typed at your cursor.
-Stutters, "um"s, restarts and self-corrections are removed, and the names you use every day are spelled right. Prefer to keep it in Chinese? It can output clean Chinese too. Nothing leaves your computer.
+Nothing leaves your computer.
 
 [中文说明](README.zh.md) · MIT · Windows 10/11
 
@@ -29,15 +29,12 @@ all of that verbatim, or send my voice to the cloud. Quill does the cleanup loca
 
 ## Features
 
-- **Push-to-talk anywhere** — hold Right Alt (configurable) in any app; the result is pasted at the cursor and your clipboard is restored.
-- **Cleans up speech, not just grammar** — removes fillers, stutters, false starts and self-corrections ("no, I mean…"), fixes tense, articles and plurals.
-- **Speak Chinese, get English** — one tap on **EN / 中** on the home screen. Mixed Chinese-English speech works too.
-- **Or speak Chinese, get clean Chinese** — Settings → *When speaking Chinese* → 出中文. Fillers (嗯, 呃), stutters and repeats are removed instantly by rules; only sentences with a self-correction (不对 / 我是说 …) go to the LLM, so most sentences appear in about half a second.
-- **Accurate** — Whisper reads the whole recording (English and Chinese) and the cleanup runs once on the full text; English usually appears about 1 s after you let go.
-- **See what changed** — a small overlay at the bottom of the screen shows live transcription, the words that were fixed, and a Chinese translation.
-- **Learns your words** — a word list on the home screen (names, project names, tools). Write `Claude: cloud` and Quill decides from context whether "cloud" meant Claude. While idle, it reads your history once a day and suggests words it probably misheard; one tap to add or ignore.
-- **100% local** — speech recognition and the language model run on your machine. History is a plain text file that never leaves it.
-- Soft-UI (neumorphism) interface, floating mini ball, history with one-click copy, built-in self-test.
+- **Push-to-talk anywhere** — hold Right Alt (configurable) in any app; the text is pasted at the cursor and your clipboard is restored.
+- **Cleans up speech, not just grammar** — removes fillers, stutters, false starts and self-corrections ("no, I mean…"); fixes tense, articles and plurals.
+- **Speak Chinese, get English** — tap **EN / 中** on the home screen; mixed Chinese-English works too. Or get clean Chinese instead (Settings → *When speaking Chinese*).
+- **Fast** — English appears about 1 s after you let go, clean Chinese in about half a second.
+- **See what changed** — an overlay at the bottom of the screen shows the live text, the words that were fixed and a Chinese translation.
+- **Learns your words** — names, projects, tools. Write `Claude: cloud` and Quill decides from context whether "cloud" meant Claude. Once a day it suggests words it probably misheard.
 
 <p align="center">
 <img src="docs/main.png" height="300" alt="Quill main window">
@@ -49,12 +46,11 @@ all of that verbatim, or send my voice to the cloud. Quill does the cleanup loca
 
 ```
 hold key → microphone (16 kHz)
-        → speech recognition    Whisper large-v3-turbo (faster-whisper, GPU), primed with your word list:
-                                re-reads everything said so far about once a second for the live overlay,
-                                then the whole recording once more when you let go
-        → word list by sound     Chinese words from your list that came out as same-sounding characters are swapped back
-        → cleanup / translation  Qwen3 4B via Ollama (GPU if available, falls back to CPU; 8B selectable in Settings)
-        → paste at cursor
+         → recognition   Whisper large-v3-turbo on the GPU, primed with your word list:
+                         about once a second for the live overlay, then the whole recording on release
+         → word list     Chinese words heard as same-sounding characters are swapped back by pinyin
+         → cleanup       Qwen3 4B via Ollama (8B in Settings; falls back to CPU if the GPU is busy)
+         → paste at cursor
 ```
 
 Reading the whole recording at once is far more accurate than recognizing short pieces between pauses.
@@ -70,11 +66,10 @@ cd quill
 powershell -ExecutionPolicy Bypass -File setup.ps1          # add -Mirror in mainland China
 ```
 
-`setup.ps1` installs [uv](https://github.com/astral-sh/uv) and Python 3.12 (no system Python needed), the Python packages,
-the Whisper speech model (~1.6 GB), [Ollama](https://ollama.com) and `qwen3:4b` (~2.6 GB), and creates a desktop shortcut.
-For higher-quality cleanup, also run `ollama pull qwen3:8b` (~5 GB) and pick it in Settings.
-It also installs cuBLAS (`nvidia-cublas-cu12`, ~0.5 GB) into the venv for Whisper.
-Re-running it is safe; it skips what you already have. If something is missing later, Quill's **Settings → Setup** window says what and has a button that runs `setup.ps1`.
+`setup.ps1` installs [uv](https://github.com/astral-sh/uv) and Python 3.12 (no system Python needed), the packages,
+the Whisper model (~1.6 GB), [Ollama](https://ollama.com) with `qwen3:4b` (~2.6 GB), and a desktop shortcut.
+It is safe to re-run. If something goes missing later, **Settings → Setup** in Quill says what and runs it for you.
+For better cleanup, `ollama pull qwen3:8b` (~5 GB) and pick it in Settings.
 
 Then start **Quill** from the desktop, wait for **READY**, hold **Right Alt** and speak.
 
@@ -95,7 +90,7 @@ Then start **Quill** from the desktop, wait for **READY**, hold **Right Alt** an
 - `term_test.py` — checks how well the model tells a misheard name (cloud → Claude) from the ordinary word.
 - `eval_run.py [en | zh | zhzh | all]` — runs the correction test set with a fixed seed and diffs it against the last run.
 - `cer_eval.py [auto]` — Chinese character error rate on your own recordings in `eval_zh\` (not in git).
-- `harvest.py` — collects test samples by itself: pairs each dictation with the edited message you actually sent in Claude Code and copies the recording to `eval_zh\auto\` (needs `"save_audio": true` in `settings.json`).
+- `harvest.py` — collects test samples by pairing each dictation with the edited message you sent in Claude Code (needs `"save_audio": true` in `settings.json`).
 - `make_words_demo.py` — regenerates the word-list image.
 - `make_demo.py` — regenerates the GIF and screenshot above.
 - The project was built together with Claude Code.

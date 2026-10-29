@@ -6,7 +6,7 @@
 
 **Windows 上的离线语音输入。**
 按住一个键，说不太顺的英文，**或者直接说中文**，松开后，地道的英文就打在光标处。
-结巴、「嗯」「那个」、重说、改口都会去掉，常说的人名、工具名也能写对。也可以说中文出干净的中文。全程不联网。
+全程不联网。
 
 [English](README.md) · MIT · Windows 10/11
 
@@ -30,13 +30,10 @@
 
 - **在哪都能按住说话**：任何程序里按住右 Alt（可改），松开后粘贴到光标处，原来的剪贴板会恢复。
 - **不只改语法**：去掉语气词、结巴、说一半放弃的话和改口（「不对，我是说……」），修正时态、冠词、单复数。
-- **说中文，出英文**：主页点一下 **EN / 中** 就能切换，中英混着说也行。
-- **也可以说中文、出干净的中文**：设置 →「说中文时」选「出中文」。嗯、呃、口吃、重复按规则直接删，只有带改口（不对 / 我是说……）的句子才交给大模型，大部分句子松开后约半秒出字。
-- **准**：Whisper 认整段话（中英文），再一次理顺；英文通常松开后约 1 秒出字。
+- **说中文，出英文**：主页点一下 **EN / 中** 切换，中英混着说也行。也可以出干净的中文（设置 →「说中文时」）。
+- **快**：英文松开后约 1 秒出字，中文约半秒。
 - **看得到改了什么**：屏幕下方的小浮窗显示实时识别、改过的词和中文意思。
-- **记得你的常用词**：主页下面的常用词表（人名、项目名、工具名）。写 `Claude: cloud`，识别出 cloud 时 Quill 看上下文判断是不是 Claude。闲着时每天扫一次记录，把可能听错的词列出来，点一下加入或忽略。
-- **完全本地**：语音识别和大模型都在本机跑；记录是一个文本文件，不会离开你的电脑。
-- 软 UI（新拟态）界面、悬浮小球、带一键复制的记录、内置自检。
+- **记得你的常用词**：人名、项目名、工具名。写 `Claude: cloud`，Quill 看上下文判断 cloud 是不是 Claude。每天还会把可能听错的词列出来。
 
 <p align="center">
 <img src="docs/main.png" height="300" alt="Quill 主窗口">
@@ -48,10 +45,10 @@
 
 ```
 按住快捷键 → 麦克风（16 kHz）
-          → 语音识别    Whisper large-v3-turbo（faster-whisper，显卡），带上你的常用词：
-                        说话时约每秒把目前说的整段认一遍给浮窗看，松开后整段再认一次
-          → 按拼音对词表  常用词表里的中文词被认成同音字的，换回词表写法
-          → 理顺 / 翻译  Qwen3 4B（Ollama，有显卡用显卡，慢了自动换 CPU；设置里可换成 8B）
+          → 语音识别  Whisper large-v3-turbo（显卡），带上你的常用词：
+                      说话时约每秒认一遍给浮窗看，松开后整段再认一次
+          → 对词表    常用词里的中文词被认成同音字的，按拼音换回来
+          → 理顺      Qwen3 4B（Ollama；设置里可换 8B；显卡忙时自动换 CPU）
           → 粘贴到光标处
 ```
 
@@ -67,8 +64,9 @@ cd quill
 powershell -ExecutionPolicy Bypass -File setup.ps1 -Mirror     # 国内网络加 -Mirror，从 hf-mirror.com 下模型
 ```
 
-`setup.ps1` 会装好 [uv](https://github.com/astral-sh/uv) 和 Python 3.12（不用自己装 Python）、依赖包、Whisper 语音模型（约 1.6 GB）、
-[Ollama](https://ollama.com) 和 `qwen3:4b`（约 2.6 GB；想要更准可以再 `ollama pull qwen3:8b`，在设置里换），并在桌面建快捷方式。还会往 venv 里装 Whisper 要的 cuBLAS（`nvidia-cublas-cu12`，约 0.5 GB）。可以重复运行，已有的会跳过。以后缺东西，Quill 的「设置 → 准备」会说缺什么，按钮直接运行 `setup.ps1`。
+`setup.ps1` 会装好 [uv](https://github.com/astral-sh/uv) 和 Python 3.12（不用自己装 Python）、依赖包、Whisper 模型（约 1.6 GB）、
+[Ollama](https://ollama.com) 和 `qwen3:4b`（约 2.6 GB），并在桌面建快捷方式。可以重复运行。以后缺东西，Quill 的「设置 → 准备」会说缺什么，点一下就补。
+想要理顺得更好，可以再 `ollama pull qwen3:8b`（约 5 GB），在设置里换。
 
 装好后双击桌面上的 **Quill**，等出现 **READY**，按住 **右 Alt** 说话。
 
@@ -89,7 +87,7 @@ powershell -ExecutionPolicy Bypass -File setup.ps1 -Mirror     # 国内网络加
 - `term_test.py`：测模型能不能分清听错的名字（cloud → Claude）和普通词。
 - `eval_run.py [en | zh | zhzh | all]`：用固定随机种子跑改错测试集，和上一次对比。
 - `cer_eval.py [auto]`：在你自己的录音（`eval_zh\`，不进 git）上算中文字错率。
-- `harvest.py`：自动收测试样本：把每句识别和你在 Claude Code 里改完真正发出去的消息配对，录音拷到 `eval_zh\auto\`（要在 `settings.json` 里开 `"save_audio": true`）。
+- `harvest.py`：把每句识别和你在 Claude Code 里改完发出去的消息配对，自动收测试样本（要在 `settings.json` 里开 `"save_audio": true`）。
 - `make_words_demo.py`：重新生成常用词演示图。
 - `make_demo.py`：重新生成上面的 GIF 和截图。
 - 这个项目是和 Claude Code 一起做的。
