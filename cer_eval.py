@@ -32,8 +32,9 @@ D = HERE / 'eval_zh' / ('auto' if 'auto' in sys.argv else '')  # auto：harvest.
 for line in (D / 'labels.txt').read_text(encoding='utf-8').splitlines():
     if line.strip() and not line.startswith('#') and '\t' in line: labels.append(line.split('\t', 1))
 ctx, fix = 'ctx' in sys.argv, 'fix' in sys.argv  # fix：识别结果再走一遍「说中文 → 出中文」的改错（和 app 一样），算改错后的字错率
+import fix_test as ft  # 借 app.pyw 的 pinyin_fix / 改错
 if fix:
-    import threading, fix_test as ft
+    import threading
     _opts = ft.m.llm_opts
     ft.m.llm_opts = lambda: (lambda o, g: ({**o, 'seed': 42}, g))(*_opts())  # 同 eval_run：固定随机种子
     threading.Thread(target=ft.m.fix_worker, daemon=True).start()
@@ -50,6 +51,7 @@ for name, ref in labels:
     prompt = base + (prev if ctx else '')
     segs, _ = wh.transcribe(load(D / f'{name}.wav'), language='zh', beam_size=5, condition_on_previous_text=False, initial_prompt=prompt)
     hyp = ''.join(s.text for s in segs).strip()
+    if 'nopy' not in sys.argv: hyp = ft.m.pinyin_fix(hyp, [t for t in _t if re.fullmatch(r'[一-鿿]{2,}', t)])  # 和 app 一样按拼音换回中文词（nopy：不换）
     if fix: hyp = ft.one([hyp], 'zh', 'zh') or hyp
     e, n = dist(norm(hyp), norm(ref)), len(norm(ref)); errs += e; chars += n; prev = ref
     lines.append(f'{name}\t{e}/{n}\t{hyp}' + ('' if e == 0 else f'\n\t\t对：{ref}'))

@@ -5,3 +5,4 @@ pillow>=11
 huggingface_hub>=0.24
 faster-whisper>=1.1
 ctranslate2>=4.5
+pypinyin>=0.50

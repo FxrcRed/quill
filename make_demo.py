@@ -1,7 +1,7 @@
 """生成 README 用的演示图：.venv\\Scripts\\python.exe make_demo.py
 用 Windows 语音合成说两句（英文结巴 + 中文改口），按实时速度喂给 Quill（不用麦克风、不真的粘贴、不写 history），
 每 0.1 秒记一帧真实的底部浮窗，拼上一个假的输入框和「按住右 Alt」提示 → docs/demo.gif；再截主窗口 → docs/main.png。
-要先关掉正在运行的 Quill（Stop-Process -Name pythonw）。"""
+要先关掉正在运行的 Quill（Stop-Process -Force -Id (Get-CimInstance Win32_Process -Filter "Name='pythonw.exe'" | ? CommandLine -match 'voice-input').ProcessId）。"""
 import ctypes, importlib.machinery, importlib.util, subprocess, sys, threading, time, wave
 import tkinter as tk
 from pathlib import Path

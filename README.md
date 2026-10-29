@@ -52,6 +52,7 @@ hold key → microphone (16 kHz)
         → speech recognition    Whisper large-v3-turbo (faster-whisper, GPU), primed with your word list:
                                 re-reads everything said so far about once a second for the live overlay,
                                 then the whole recording once more when you let go
+        → word list by sound     Chinese words from your list that came out as same-sounding characters are swapped back
         → cleanup / translation  Qwen3 4B via Ollama (GPU if available, falls back to CPU; 8B selectable in Settings)
         → paste at cursor
 ```
@@ -103,6 +104,7 @@ Then start **Quill** from the desktop, wait for **READY**, hold **Right Alt** an
 
 - [Whisper large-v3-turbo](https://huggingface.co/openai/whisper-large-v3-turbo) by OpenAI (MIT), run with [faster-whisper](https://github.com/SYSTRAN/faster-whisper)
 - [Qwen3](https://github.com/QwenLM/Qwen3) (Apache-2.0) served by [Ollama](https://ollama.com)
+- [pypinyin](https://github.com/mozillazg/python-pinyin) (MIT); matching words by sound is an idea from [CapsWriter-Offline](https://github.com/HaujetZhao/CapsWriter-Offline)
 - Fonts: [Noto Sans SC](https://github.com/notofonts/noto-cjk) and [Michroma](https://github.com/googlefonts/Michroma-font) (SIL OFL 1.1)
 
 Models are downloaded at install time and keep their own licenses. Quill itself is [MIT](LICENSE).

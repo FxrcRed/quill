@@ -50,6 +50,7 @@
 按住快捷键 → 麦克风（16 kHz）
           → 语音识别    Whisper large-v3-turbo（faster-whisper，显卡），带上你的常用词：
                         说话时约每秒把目前说的整段认一遍给浮窗看，松开后整段再认一次
+          → 按拼音对词表  常用词表里的中文词被认成同音字的，换回词表写法
           → 理顺 / 翻译  Qwen3 4B（Ollama，有显卡用显卡，慢了自动换 CPU；设置里可换成 8B）
           → 粘贴到光标处
 ```
@@ -97,6 +98,7 @@ powershell -ExecutionPolicy Bypass -File setup.ps1 -Mirror     # 国内网络加
 
 - OpenAI 的 [Whisper large-v3-turbo](https://huggingface.co/openai/whisper-large-v3-turbo)（MIT），用 [faster-whisper](https://github.com/SYSTRAN/faster-whisper) 运行
 - [Qwen3](https://github.com/QwenLM/Qwen3)（Apache-2.0），由 [Ollama](https://ollama.com) 提供服务
+- [pypinyin](https://github.com/mozillazg/python-pinyin)（MIT）；按拼音对词表的思路来自 [CapsWriter-Offline](https://github.com/HaujetZhao/CapsWriter-Offline)
 - 字体：[Noto Sans SC](https://github.com/notofonts/noto-cjk) 和 [Michroma](https://github.com/googlefonts/Michroma-font)（SIL OFL 1.1）
 
 模型在安装时下载，各自遵守自己的许可证。Quill 本身是 [MIT](LICENSE) 许可。

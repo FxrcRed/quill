@@ -1,6 +1,6 @@
 r"""生成 README 用的常用词演示图：.venv\Scripts\python.exe make_words_demo.py  → docs/words.png
 左边常用词窗口（演示词表，不用自己的 words.txt），右边语音合成说「I asked cloud to fix the bug」后真实的底部浮窗（cloud → Claude）。
-不用麦克风、不真的粘贴、不写 history、不扫记录。要先关掉正在运行的 Quill（Stop-Process -Name pythonw）。"""
+不用麦克风、不真的粘贴、不写 history、不扫记录。要先关掉正在运行的 Quill（Stop-Process -Force -Id (Get-CimInstance Win32_Process -Filter "Name='pythonw.exe'" | ? CommandLine -match 'voice-input').ProcessId）。"""
 import ctypes, importlib.machinery, importlib.util, subprocess, sys, threading, time, wave
 import tkinter as tk
 from pathlib import Path

@@ -217,6 +217,37 @@ def is_term(t, rx, term, heard):
 def apply_glossary(t):
     for rx, term, heard in glossary()[2]:
         if heard is None or (rx.search(t) and is_term(t, rx, term, heard)): t = rx.sub(lambda m: term, t)  # 用函数：写法里有 \ 时 sub 会当转义
+    return pinyin_fix(t, [w for w in glossary()[0] if re.fullmatch(r'[一-鿿]{2,}', w)])
+
+_PY_INI = ('zh', 'ch', 'sh', 'b', 'p', 'm', 'f', 'd', 't', 'n', 'l', 'g', 'k', 'h', 'j', 'q', 'x', 'r', 'z', 'c', 's', 'y', 'w')
+def _py_split(s):
+    """'zhong1' → ('z', 'on', '1')：平翘舌、前后鼻音（zh/z、ing/in、eng/en、ang/an）当一样。"""
+    tone, s = s[-1], s[:-1]
+    ini = next((i for i in _PY_INI if s.startswith(i)), '')
+    fin = s[len(ini):]
+    ini = {'zh': 'z', 'ch': 'c', 'sh': 's'}.get(ini, ini)
+    return ini, re.sub(r'(?<=[aei])ng$', 'n', fin), tone
+
+_py_cache = {}
+def pinyin_fix(t, words):
+    """中文词表的同音字：识别成「临终小屋」「老云山」时按拼音换回「林中小屋」「云杉」（Whisper 的提示只是倾向，同音时照样选错）。
+    两字词要拼音连声调一模一样；三字以上允许一个字声调不同。思路取自 CapsWriter-Offline 的音素热词。"""
+    if not words or not re.search(r'[一-鿿]', t): return t
+    from pypinyin import lazy_pinyin, Style  # 用到才载（约 0.2 秒）
+    py = lambda s: _py_cache.get(s) or _py_cache.setdefault(s, [_py_split(p) for p in lazy_pinyin(s, style=Style.TONE3, neutral_tone_with_five=True)])
+    for w in sorted(words, key=len, reverse=True):  # 长的先
+        wp, n = py(w), len(w)
+        def sub(m):
+            s, sp, out, i = m[0], py(m[0]), [], 0
+            while i < len(s):
+                if i + n <= len(s) and s[i:i + n] != w:
+                    cost = 0
+                    for a, b in zip(sp[i:i + n], wp):
+                        if a != b: cost += 1 if n > 2 and a[:2] == b[:2] else 9  # 只对上声母的不算（「在对话框」会换成「子对话框」）
+                    if cost <= (1 if n > 2 else 0): out.append(w); i += n; continue
+                out.append(s[i]); i += 1
+            return ''.join(out)
+        t = re.sub(r'[一-鿿]+', sub, t)
     return t
 
 def parse_word(ln):

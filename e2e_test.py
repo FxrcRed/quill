@@ -1,7 +1,7 @@
 """端到端测试（不用真麦克风、不会粘贴到别的程序）：.venv\\Scripts\\python.exe e2e_test.py
 把 test.wav（说两遍、中间停 0.9 秒）按实时速度喂进去跑一句，
 浮窗每个阶段的样子存到 e2e_out\\ov_*.png，耗时看输出和 run.log。不写 history.txt，结束后恢复剪贴板。
-要先关掉正在运行的 Quill（Stop-Process -Name pythonw），否则两个都在用麦克风和快捷键。"""
+要先关掉正在运行的 Quill（Stop-Process -Force -Id (Get-CimInstance Win32_Process -Filter "Name='pythonw.exe'" | ? CommandLine -match 'voice-input').ProcessId），否则两个都在用麦克风和快捷键。"""
 import ctypes, importlib.machinery, importlib.util, sys, threading, time, wave
 import tkinter as tk
 from pathlib import Path
