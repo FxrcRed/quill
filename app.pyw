@@ -120,7 +120,7 @@ def log(*a):
     if sys.stdout: print(line, flush=True)
     with open(HERE / 'run.log', 'a', encoding='utf-8') as f: f.write(line + '\n')
 
-cfg = {'hotkey': 0xA5, 'device': None, 'lang': 'en', 'zh_out': 'en', 'keep': '2m', 'hist': True, 'hist_days': 0, 'zh_smart': True}  # zh_smart：出中文时每句都送模型改错字（关掉只送带改口的）；hist：存不存记录；hist_days：只留最近几天（0 = 永久）；keep：不用多久释放显存（见 KEEPS）；lang：en 说英文 / zh 说中文；zh_out：说中文时出英文 / 出中文
+cfg = {'hotkey': 0xA5, 'device': None, 'lang': 'en', 'zh_out': 'en', 'keep': '2m', 'hist': True, 'hist_days': 0, 'zh_smart': False}  # zh_smart：出中文时每句都送模型改错字（关掉只送带改口的）；hist：存不存记录；hist_days：只留最近几天（0 = 永久）；keep：不用多久释放显存（见 KEEPS）；lang：en 说英文 / zh 说中文；zh_out：说中文时出英文 / 出中文
 try: cfg.update(json.loads((HERE / 'settings.json').read_text(encoding='utf-8')))
 except Exception: pass
 if cfg.get('llm') in dict(LLM_MODELS): LLM_MODEL = cfg['llm']
@@ -471,7 +471,7 @@ def zh_needs_llm(t):
     """出中文这段要不要送模型：有改口一定送；开着「改错字」（zh_smart）就每句都送，短得没什么可改的（「可以。」）除外。
     显卡被占着临时换成 CPU 时一句要 5~8 秒，这时只送带改口的。"""
     if ZH_FIX.search(t) or ZH_RESTART.search(t): return True
-    return cfg.get('zh_smart', True) and llm_opts()[1] and len(re.sub(r'[^一-鿿A-Za-z]', '', t)) > 4
+    return cfg.get('zh_smart', False) and llm_opts()[1] and len(re.sub(r'[^一-鿿A-Za-z]', '', t)) > 4
 
 def zh_punct(t):
     """Whisper 出中文时标点是英文半角（逗号、问号），换成全角；中文字之间的空格去掉。数字里的小数点不动。"""
@@ -2038,7 +2038,7 @@ class Settings:
         h = 110  # 两排按钮间距 48，上下各留 14
         if not draw: return h
         self.label(n, x, y, w, h, '说中文时')
-        rows = ((y + 14, self.ZH_OUTS, cfg.get('zh_out', 'en'), self.set_zh_out), (y + 62, self.ONOFF, cfg.get('zh_smart', True), self.set_zh_smart))
+        rows = ((y + 14, self.ZH_OUTS, cfg.get('zh_out', 'en'), self.set_zh_out), (y + 62, self.ONOFF, cfg.get('zh_smart', False), self.set_zh_smart))
         for by, opts, cur, cmd in rows:
             for i, (m, name, _) in enumerate(opts):
                 on = m == cur
