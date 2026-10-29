@@ -46,8 +46,9 @@ SYS = (f'One word in this sentence was replaced by ___. It is either "{TERM}" (a
        f'Answer only JSON {{"word": "{TERM}"}} or {{"word": "{HEARD}"}}.')
 
 def ask(s):
-    body = {'model': MODEL, 'stream': False, 'think': False, 'format': 'json', 'keep_alive': '2m',
-            'options': {'temperature': 0, 'num_ctx': 1024},
+    body = {'model': MODEL, 'stream': False, 'think': False, 'keep_alive': '2m',  # 和 app.pyw 的 is_term 一样
+            'format': {'type': 'object', 'properties': {'word': {'enum': [TERM, HEARD]}}, 'required': ['word']},
+            'options': {'temperature': 0, 'num_ctx': 2048, 'num_predict': 20},
             'messages': [{'role': 'system', 'content': SYS}, {'role': 'user', 'content': re.sub(r'(?<![A-Za-z])%s(?![A-Za-z])' % HEARD, '___', s, flags=re.I)}]}
     r = urllib.request.urlopen(urllib.request.Request(URL, json.dumps(body).encode(), {'Content-Type': 'application/json'}), timeout=60)
     return json.loads(json.loads(r.read())['message']['content']).get('word', '').lower() == TERM.lower()

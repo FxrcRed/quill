@@ -200,8 +200,10 @@ def is_term(t, rx, term, heard):
     """句子里的 heard 是不是 term（cloud 可能真是云）。约 0.2 秒；同一句只问一次；出错算是 term（和以前直接替换一样）。"""
     q = rx.sub('___', t)
     if (q, term) not in _term_memo:
-        body = {'model': LLM_MODEL, 'stream': False, 'think': False, 'format': 'json', 'keep_alive': cfg.get('keep', '2m'),
-                'options': {**llm_opts()[0], 'temperature': 0},  # num_ctx 要和改错一样：不一样 Ollama 每次都重新载入模型（踩过，一句慢到 10 秒）
+        # format 只给 'json' 时模型常自己编一大段 JSON（复述题目 + 分析，几百 token、4~13 秒，读不到 word 才碰巧按 term 算）；限死成两个选项
+        body = {'model': LLM_MODEL, 'stream': False, 'think': False, 'keep_alive': cfg.get('keep', '2m'),
+                'format': {'type': 'object', 'properties': {'word': {'enum': [term, heard]}}, 'required': ['word']},
+                'options': {**llm_opts()[0], 'temperature': 0, 'num_predict': 20},  # num_ctx 要和改错一样：不一样 Ollama 每次都重新载入模型（踩过，一句慢到 10 秒）
                 'messages': [{'role': 'system', 'content': TERM_PROMPT.format(term=term, heard=heard)}, {'role': 'user', 'content': q}]}
         try:
             with urllib.request.urlopen(urllib.request.Request(LLM_URL + '/api/chat', json.dumps(body).encode(), {'Content-Type': 'application/json'}), timeout=10) as r:
