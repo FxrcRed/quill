@@ -56,7 +56,7 @@ PROMPTS = {
     ('en', 'fast'): PROMPT,
     ('zh', 'fast'): ZH_CLEAN + """Also give the cleaned-up Chinese (the same message without the fillers, repeats and corrections).
 Reply JSON only: {"fixed": "<English>", "zh": "<cleaned-up Chinese>"}""",
-    # 说中文 → 出中文：理干净 + 改错字 + 修断句，不翻译、不改写（口头禅 / 重复已经被 zh_tidy() 删过；zh_smart 关掉时只有带改口的句子才送来）
+    # 说中文 → 出中文：理干净 + 改错字 + 修断句，不翻译、不改写（口头禅 / 重复已经被 zh_tidy() 删过；只有带改口的句子才送来）
     ('zhzh', 'fast'): """The input is a speaker's dictated Chinese from speech recognition (it may contain some English words). Write down the message they meant, in Chinese:
 """ + ZH_DROP + """- The recognizer often writes the wrong characters for a word that sounds the same or similar (合理 -> 合子里, 炉子 -> 卢子), and garbles English words (OK -> okK). Fix these when the sentence makes the intended word clear; if you are not sure, keep it as it is.
 - Fix the punctuation: the recognizer puts 。 wherever the speaker paused, even in the middle of a sentence. Join the broken pieces back into proper sentences.
@@ -120,7 +120,7 @@ def log(*a):
     if sys.stdout: print(line, flush=True)
     with open(HERE / 'run.log', 'a', encoding='utf-8') as f: f.write(line + '\n')
 
-cfg = {'hotkey': 0xA5, 'device': None, 'lang': 'en', 'zh_out': 'en', 'keep': '2m', 'hist': True, 'hist_days': 0, 'zh_smart': False}  # zh_smart：出中文时每句都送模型改错字（关掉只送带改口的）；hist：存不存记录；hist_days：只留最近几天（0 = 永久）；keep：不用多久释放显存（见 KEEPS）；lang：en 说英文 / zh 说中文；zh_out：说中文时出英文 / 出中文
+cfg = {'hotkey': 0xA5, 'device': None, 'lang': 'en', 'zh_out': 'en', 'keep': '2m', 'hist': True, 'hist_days': 0}  # hist：存不存记录；hist_days：只留最近几天（0 = 永久）；keep：不用多久释放显存（见 KEEPS）；lang：en 说英文 / zh 说中文；zh_out：说中文时出英文 / 出中文
 try: cfg.update(json.loads((HERE / 'settings.json').read_text(encoding='utf-8')))
 except Exception: pass
 if cfg.get('llm') in dict(LLM_MODELS): LLM_MODEL = cfg['llm']
@@ -468,10 +468,8 @@ def zh_tidy(t):
     return t.lstrip('，,、。 ') or t
 
 def zh_needs_llm(t):
-    """出中文这段要不要送模型：有改口一定送；开着「改错字」（zh_smart）就每句都送，短得没什么可改的（「可以。」）除外。
-    显卡被占着临时换成 CPU 时一句要 5~8 秒，这时只送带改口的。"""
-    if ZH_FIX.search(t) or ZH_RESTART.search(t): return True
-    return cfg.get('zh_smart', False) and llm_opts()[1] and len(re.sub(r'[^一-鿿A-Za-z]', '', t)) > 4
+    """出中文这段要不要送模型：只送带改口的。每句都送改错字反而更差（cer_eval：CER 2.37% → 6.19%，会删原话、改出错字）。"""
+    return bool(ZH_FIX.search(t) or ZH_RESTART.search(t))
 
 def zh_punct(t):
     """Whisper 出中文时标点是英文半角（逗号、问号），换成全角；中文字之间的空格去掉。数字里的小数点不动。"""
@@ -1987,7 +1985,6 @@ class Settings:
     """设置窗口：麦克风 / 快捷键 / 说中文时 / 改错服务 四块卡片。"""
     W = 400
     ZH_OUTS = (('en', '出英文', ''), ('zh', '出中文', ''))  # 出中文：删掉口头禅 / 重复 / 改口，不翻译
-    ONOFF = ((True, '开', ''), (False, '关', ''))  # 出中文时每句都送模型改错字 / 只送带改口的
 
     def __init__(self, app):
         self.app, self.recording = app, False
@@ -2035,15 +2032,11 @@ class Settings:
         return h
 
     def sec_mode(self, n, x, y, w, draw):
-        h = 110  # 两排按钮间距 48，上下各留 14
+        h = 62  # 一排按钮，上下各留 14
         if not draw: return h
         self.label(n, x, y, w, h, '说中文时')
-        rows = ((y + 14, self.ZH_OUTS, cfg.get('zh_out', 'en'), self.set_zh_out), (y + 62, self.ONOFF, cfg.get('zh_smart', False), self.set_zh_smart))
-        for by, opts, cur, cmd in rows:
-            for i, (m, name, _) in enumerate(opts):
-                on = m == cur
-                n.button(x + w - 210 + i * 100, by, 90, 34, text=name, size=12, on=on, cmd=lambda m=m, cmd=cmd: cmd(m))
-        n.text(x + 20, y + 72, '出中文时改错字', 12, TEXT)
+        for i, (m, name, _) in enumerate(self.ZH_OUTS):
+            n.button(x + w - 210 + i * 100, y + 14, 90, 34, text=name, size=12, on=m == cfg.get('zh_out', 'en'), cmd=lambda m=m: self.set_zh_out(m))
         return h
 
     def sec_ol(self, n, x, y, w, draw):
@@ -2131,8 +2124,6 @@ class Settings:
         cfg['zh_out'] = o; save_cfg(); log('说中文时输出', o); self.app.refresh_settings()
         if cfg['lang'] == 'zh': threading.Thread(target=llm_hello, daemon=True).start()  # 换了提示词，同上
 
-    def set_zh_smart(self, on):
-        cfg['zh_smart'] = on; save_cfg(); log('出中文时改错字：', on); self.app.refresh_settings()
 
     def record(self):
         if self.recording: return
@@ -2497,7 +2488,7 @@ class Checks:
 SETUP_PS1 = HERE / 'setup.ps1'
 
 def readiness(ol):
-    """准备情况三行：[(lv, 一句人话, 按钮字 或 None)]，lv = ok / warn / fail / info。ol：改错服务状态（App.ol_last）。按钮都是运行 setup.ps1。"""
+    """准备情况两行：[(lv, 一句人话, 按钮字 或 None)]，lv = ok / warn / fail / info。ol：改错服务状态（App.ol_last）。按钮都是运行 setup.ps1。"""
     rows = [{'ok': ('ok', 'Whisper 已载入。', None),
              'loading': ('info', '载入中…', None),
              'nogpu': ('fail', '没有 NVIDIA 显卡：Whisper 识别要用显卡，现在说不了话。', None),
@@ -2509,16 +2500,14 @@ def readiness(ol):
     elif ol == 'no_model': rows.append(('fail', f'还没下载改错模型 {LLM_MODEL}（约 2.6GB）。', '下载'))
     elif ol == 'down': rows.append(('warn', '改错服务没在运行，Quill 会自动启动它。', None))
     elif ol is None: rows.append(('info', '检查中…', None))
-    else: rows.append(('ok', f'Ollama 正常，改错模型 {LLM_MODEL} 在。', None))
-
-    lv, text = mode_summary(); rows.append(('ok' if lv == 'ok' else 'info', text, None))
+    else: rows.append(('ok', f'Ollama 正常，改错模型 {LLM_MODEL} 在。' + ('' if nvidia_gpu() and LLM_GPU_LAYERS else '现在用 CPU 改错，每句约 5~8 秒。'), None))
     return rows
 
 
 class Ready:
     """准备情况窗口：缺 Ollama / 模型 / 显卡库时说清楚缺什么，按钮在黑框 PowerShell 里运行 setup.ps1（装完自动重新检查）。"""
     ICON = {**Checks.ICON, 'info': ('–', SUB)}
-    NAMES = ['识别模型（Whisper）', '改错服务', '当前模式']
+    NAMES = ['识别模型（Whisper）', '改错服务']
     W, ROW = 400, 88
 
     def __init__(self, app):

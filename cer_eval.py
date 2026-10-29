@@ -36,7 +36,7 @@ if fix:
     _opts = ft.m.llm_opts
     ft.m.llm_opts = lambda: (lambda o, g: ({**o, 'seed': 42}, g))(*_opts())  # 同 eval_run：固定随机种子
     threading.Thread(target=ft.m.fix_worker, daemon=True).start()
-    if 'nosmart' in sys.argv: ft.m.cfg['zh_smart'] = False  # 只送带改口的句子
+    if 'nosmart' not in sys.argv: ft.m.zh_needs_llm = lambda t: True  # 每句都送模型（nosmart：和 app 一样只送带改口的）
 from faster_whisper import WhisperModel
 wh = WhisperModel(str(HERE / 'models' / 'whisper'), device='cuda', compute_type='int8_float16')
 _t = terms(); _zh = [t for t in _t if not t.isascii()]  # half1 / half2：中文词只放前一半 / 后一半，用来看词表的水分
