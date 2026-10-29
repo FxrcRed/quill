@@ -1,4 +1,4 @@
-"""本地英文语音输入（图形界面版）：按住快捷键或界面按钮说英文 → Parakeet 识别 → Qwen 改语病 + 中文翻译 → 粘贴到光标处。
+"""本地英文语音输入（图形界面版）：按住快捷键或界面按钮说英文 → Whisper 识别 → Qwen 改语病 + 中文翻译 → 粘贴到光标处。
 双击桌面「Quill」图标启动（pythonw，无黑框）。--selftest：无人值守自检，结果写 run.log 后退出。"""
 import math, ctypes, ctypes.wintypes, difflib, json, os, queue, re, shutil, socket, subprocess, sys, threading, time, traceback, urllib.error, urllib.request, wave
 from datetime import datetime, timedelta
@@ -15,7 +15,8 @@ TITLE = 'Quill'
 LLM_URL = 'http://127.0.0.1:11434'
 LLM_MODEL = 'qwen3:4b'  # 设置「改错模型」里选（cfg['llm']）：4B 约 2.9GB 显存、快约 35%；8B 约 4.5GB，很乱的话（重说、改口）改得更准
 LLM_MODELS = (('qwen3:4b', '标准 4B'), ('qwen3:8b', '高质量 8B'))
-WHISPER_TIMEOUT = 8   # 松开后 Whisper 整段识别最多等几秒，超时 / 出错就用实时识别（Parakeet）的结果
+WHISPER_TIMEOUT = 8   # 松开后 Whisper 整段识别最多等几秒，超时 / 出错就用说话时最后一次预览的结果
+PREVIEW_EVERY = 1.0   # 说话时每隔几秒用 Whisper 把目前为止的整段认一遍，给浮窗看
 LLM_GPU_LAYERS = -1   # （启动时按有没有 NVIDIA 显卡重新定，见 nvidia_gpu）-1 = 放显卡（Ollama 自动，一句约 1.5 秒）；0 = 全用 CPU（约 5~8 秒）。显卡被别的程序占着变慢时会自动临时改用 CPU
 KEEPS = (('2m', '2 分钟'), ('10m', '10 分钟'), ('30m', '30 分钟'), (-1, '不释放'))  # 不用多久后把模型从显存卸掉（约 5~6GB），设置里选；一直说话时每次都续上，不会卸
 SHOW_SECONDS = 3      # 底部浮窗的结果自动消失；点一下固定，再点关闭
@@ -39,12 +40,6 @@ Context: "I went to the store yesterday." Text: "And I buy some milk." -> "And I
 PROMPT = CLEAN + """Also translate the cleaned-up English into natural Simplified Chinese (translate a generic "they" as 他们).
 Reply JSON only: {"fixed": "...", "zh": "..."}"""
 
-PICK_PROMPT = CLEAN + """Write the cleaned-up message in two styles:
-natural: the most natural, fluent English a native speaker would write.
-casual: relaxed spoken / chat style (contractions, casual phrasing), still correct.
-Also translate the natural version into natural Simplified Chinese (translate a generic "they" as 他们).
-Reply JSON only: {"natural": "...", "casual": "...", "zh": "..."}"""
-
 # 说中文 → 出英文：先按同样的规则把口语中文理干净，再译成英文；zh 字段放理干净的中文（浮窗、记录里显示「你说的是」）
 ZH_DROP = """- Remove everything that is not part of the final message: filler words (嗯, 啊, 呃, and 那个 / 就是 / 然后 when used as fillers), stutters and repeated words ("我想我想"), false starts the speaker abandoned, and self-corrections: when the speaker says something again or corrects it ("不对", "不是", "我是说", or just restarting the sentence), keep only the final version.
 """
@@ -58,14 +53,9 @@ Examples:
 """
 
 PROMPTS = {
-    ('en', 'fast'): PROMPT, ('en', 'pick'): PICK_PROMPT,
+    ('en', 'fast'): PROMPT,
     ('zh', 'fast'): ZH_CLEAN + """Also give the cleaned-up Chinese (the same message without the fillers, repeats and corrections).
 Reply JSON only: {"fixed": "<English>", "zh": "<cleaned-up Chinese>"}""",
-    ('zh', 'pick'): ZH_CLEAN + """Write the English in two styles:
-natural: the most natural, fluent English a native speaker would write.
-casual: relaxed spoken / chat style (contractions, casual phrasing), still correct.
-Also give the cleaned-up Chinese (the same message without the fillers, repeats and corrections).
-Reply JSON only: {"natural": "...", "casual": "...", "zh": "<cleaned-up Chinese>"}""",
     # 说中文 → 出中文：理干净 + 改错字 + 修断句，不翻译、不改写（口头禅 / 重复已经被 zh_tidy() 删过；zh_smart 关掉时只有带改口的句子才送来）
     ('zhzh', 'fast'): """The input is a speaker's dictated Chinese from speech recognition (it may contain some English words). Write down the message they meant, in Chinese:
 """ + ZH_DROP + """- The recognizer often writes the wrong characters for a word that sounds the same or similar (合理 -> 合子里, 炉子 -> 卢子), and garbles English words (OK -> okK). Fix these when the sentence makes the intended word clear; if you are not sure, keep it as it is.
@@ -130,7 +120,7 @@ def log(*a):
     if sys.stdout: print(line, flush=True)
     with open(HERE / 'run.log', 'a', encoding='utf-8') as f: f.write(line + '\n')
 
-cfg = {'hotkey': 0xA5, 'device': None, 'mode': 'fast', 'lang': 'en', 'zh_out': 'en', 'keep': '2m', 'hist': True, 'hist_days': 0, 'zh_smart': True, 'zh_whisper': True}  # zh_whisper：说中文时松开后也用 Whisper 整段重认（关掉就只用 SenseVoice）；zh_smart：出中文时每句都送模型改错字（关掉只送带改口的）；hist：存不存记录；hist_days：只留最近几天（0 = 永久）；keep：不用多久释放显存（见 KEEPS）；mode：fast 直接输入 / pick 让我挑选；lang：en 说英文 / zh 说中文；zh_out：说中文时出英文 / 出中文
+cfg = {'hotkey': 0xA5, 'device': None, 'lang': 'en', 'zh_out': 'en', 'keep': '2m', 'hist': True, 'hist_days': 0, 'zh_smart': True}  # zh_smart：出中文时每句都送模型改错字（关掉只送带改口的）；hist：存不存记录；hist_days：只留最近几天（0 = 永久）；keep：不用多久释放显存（见 KEEPS）；lang：en 说英文 / zh 说中文；zh_out：说中文时出英文 / 出中文
 try: cfg.update(json.loads((HERE / 'settings.json').read_text(encoding='utf-8')))
 except Exception: pass
 if cfg.get('llm') in dict(LLM_MODELS): LLM_MODEL = cfg['llm']
@@ -308,7 +298,7 @@ def notify(text, level='warn', toast=False): post('notice', text, level, toast)
 
 
 # ---- 改错（Ollama）----
-FIELDS = {'fast': ('fixed', 'zh'), 'pick': ('natural', 'casual', 'zh')}
+FIELDS = ('fixed', 'zh')
 gpu = {'off_until': 0.0, 'slow': 0}  # 显卡变慢（被别的程序占着）时暂时改用 CPU
 last_llm = [0.0]
 llm_stat = {}  # 上一次改错：用了几秒、是不是显卡
@@ -325,21 +315,19 @@ def with_glossary(p):
     g = glossary()[1]; i = p.find('\nExamples:')
     return p if not g else p + g if i < 0 else p[:i] + g + p[i:]
 
-def llm(text, mode='fast', on_field=None, timeout=60, ctx='', watch=True, lang='en', stop=None):  # watch=False：预热那种很短的请求不算进显卡测速
-    """流式调 Ollama：JSON 里每个字段一写完就回调 on_field(名字, 内容)，英文不用等中文翻译生成完。返回所有字段。
-    stop()：返回 True 就断开（Ollama 跟着停），这段不用了（比如松开后要整句重改），别让它挡着后面的请求。"""
-    keys, (opts, on_gpu) = ('fixed',) if lang == 'zhzh' else FIELDS[mode], llm_opts()
+def llm(text, on_field=None, timeout=60, watch=True, lang='en'):  # watch=False：预热那种很短的请求不算进显卡测速
+    """流式调 Ollama：JSON 里每个字段一写完就回调 on_field(名字, 内容)，英文不用等中文翻译生成完。返回所有字段。"""
+    keys, (opts, on_gpu) = ('fixed',) if lang == 'zhzh' else FIELDS, llm_opts()
     body = {'model': LLM_MODEL, 'stream': True, 'think': False, 'keep_alive': cfg.get('keep', '2m'), 'format': 'json', 'options': opts,
-            'messages': [{'role': 'system', 'content': with_glossary(PROMPTS[lang, mode])}, {'role': 'user', 'content': f'Context: {ctx}\nText: {text}' if ctx else text}]}
+            'messages': [{'role': 'system', 'content': with_glossary(PROMPTS[lang, 'fast'])}, {'role': 'user', 'content': text}]}
     req = urllib.request.Request(LLM_URL + '/api/chat', json.dumps(body).encode(), {'Content-Type': 'application/json'})
     buf, got, stats, t0 = '', {}, {}, time.time()
     def give(k, v):
         got[k] = v
-        if k in ('fixed', 'natural', 'casual'): mark('llm_en')
+        if k == 'fixed': mark('llm_en')
         if on_field: on_field(k, v)
     with urllib.request.urlopen(req, timeout=timeout) as r:
         for line in r:
-            if stop and stop(): return got
             if not line.strip(): continue
             m = json.loads(line); buf += m.get('message', {}).get('content', '')
             if buf and 'llm_first' not in lat: mark('llm_first')
@@ -356,10 +344,10 @@ def llm(text, mode='fast', on_field=None, timeout=60, ctx='', watch=True, lang='
     return got
 
 def llm_hello():
-    """预热：用下一句真会用的那套提示词（语言 + 输出 + 模式，和 Job 一样算）跑一次；Ollama 只缓存一份提示词，用错了第一句照样慢。"""
+    """预热：用下一句真会用的那套提示词（语言 + 输出，和 Job 一样算）跑一次；Ollama 只缓存一份提示词，用错了第一句照样慢。"""
     if ollama_status() != 'ok': return
     sl = 'zhzh' if cfg['lang'] == 'zh' and cfg.get('zh_out', 'en') == 'zh' else cfg['lang']
-    try: llm('hello', 'fast' if sl == 'zhzh' else cfg.get('mode', 'fast'), watch=False, lang=sl); return True
+    try: llm('hello', watch=False, lang=sl); return True
     except Exception as e: log('预热改错失败：', e)
 
 def watch_gpu(st, on_gpu, secs):
@@ -457,36 +445,9 @@ def ensure_ollama(wait=20):
 
 
 # ---- 录音 / 识别 ----
-def find_pause(a, pos, min_speech=1.2, gap=0.45):
-    """在 pos 之后找「说完一句后的停顿」（≥0.45 秒安静），返回停顿中间的位置；没有就 None。"""
-    F = 480; n = (len(a) - pos) // F  # 30ms 一帧
-    if n * 0.03 < min_speech + gap: return None
-    rms = np.sqrt((a[pos:pos + n * F].reshape(n, F) ** 2).mean(1))
-    quiet = rms < max(0.006, float(np.percentile(rms, 10)) * 3)
-    need, run = int(gap / 0.03), 0
-    for i in range(n - 1, -1, -1):
-        if quiet[i]: run += 1; continue
-        if run >= need and i * 0.03 >= min_speech and (~quiet[:i + 1]).sum() >= 10: return pos + (i + 1 + run // 2) * F
-        run = 0
-    return None
-
 def has_speech(a): return len(a) > RATE * 0.3 and float(np.abs(a).max()) > 0.01
 
-# 分段规则：停顿处只有「一句说完了」才切（切在半句话中间，后一段单独改错时模型会把上一段再写一遍）；停顿后从头重说的和上一段合起来改
-OPEN_END = set('a an the to of and or but so because that which who whose with for in on at from by as if than then into about '
-               'my your his her our their its this these those is are was were be been am do does did have has had will would can could should '
-               'i we you he she they very really just'.split())
-OPEN_END_ZH = ('的', '和', '跟', '把', '被', '在', '是', '要', '就', '但是', '而且', '或者', '因为', '所以', '如果', '然后', '那个', '这个', '就是')
 CJK = re.compile(r'[一-鿿]')
-def words(t): return re.findall(r"[a-z0-9']+|[一-鿿]", t.lower())  # 英文按词，中文按字
-
-def sentence_end(text):
-    """识别出来的这段像不像一句说完的话：以 . ? ! 。？！ 结尾，而且最后一个词不是 to / the / and、的 / 因为 这种明显没说完的。"""
-    t = text.rstrip(); w = words(t)
-    if CJK.search(t): return t[-1:] in '。？！.?!' and not t[:-1].endswith(OPEN_END_ZH)
-    return t[-1:] in '.?!' and bool(w) and w[-1] not in OPEN_END
-
-FIX_START = re.compile(r"(不对|不是|我是说|我的意思是|应该是|no\b|sorry\b|i mean\b|wait\b|actually\b)", re.I)
 
 # 说中文 → 出中文的快速路线：口头禅、口吃、重复按规则直接删（不到 1 毫秒）；只有带改口的才交给改错模型
 ZH_FILLER = re.compile(r'(^|[，,。？！?!、])\s*(?:(?:[嗯呃额啊]|那个|就是)\s*[，,、]\s*)+')  # 句首 / 逗号后单独成一截的「嗯，」「那个，」
@@ -506,95 +467,32 @@ def zh_tidy(t):
     t = re.sub(r'[，,、]\s*(?=[，,、。？！?!])', '', t)  # 删完剩下的空逗号
     return t.lstrip('，,、。 ') or t
 
-# 中文标点收尾：SenseVoice 按声学停顿补「。」，卡壳一下就在句子中间冒一个。
-# 能证明「还没说完」的两种信号才把句号改成逗号，别的一律保留（宁可少改也不把真句号吃掉）。
-ZH_TAIL_OPEN = ('的', '和', '跟', '把', '被', '在', '是', '要', '很', '太', '更', '最', '比较', '一些', '有点', '这个', '那个',
-                '因为', '所以', '如果', '虽然', '但是', '而且', '然后', '或者', '还有', '就是', '其实', '关于', '对于', '已经',
-                '可以', '应该', '需要', '觉得', '认为', '希望', '想要的')
-ZH_TAIL_FRAG = re.compile(r'^(?:很|太|更|最|比较|有点|有些|一点|已经|正在|马上|可以|应该|需要|就是|因为|如果|虽然|所以|但是|而且)')  # 句子以这些开头、又不到逗号就断了 = 半句
-ZH_CLOSED = ('好的', '是的', '对的', '行吧', '好吧', '可以', '没问题', '收到', '明白', '了解', '谢谢')  # 说完的短句，别合
-ZH_HEAD_CONT = re.compile(r'^\s*(?:然后|接着|另外|并且|同时|还有|那么|也就是)')  # 单字「但/可/那」会误中「但是/可以/那个」
-ZH_CLAUSE = re.compile(r'[^。！？!?]+[。！？!?]?')
-
-ZH_TAIL_GLUE = ('很', '太', '更', '最', '比较', '有点', '有些', '一些', '这个', '那个', '这些', '那些', '把', '被', '跟', '和')  # 话卡在这些词上：后面直接接上，不加逗号（「很影响。体验。」→「很影响体验」）
-ZH_PUNCT_DUP = re.compile(r'[，,、]*([。？！?!])[。，,、]*')  # 「滑。。」「滑，。」→「滑。」
-
-def zh_cut_sep(prev, nxt):
-    """这个「。」是不是说话停顿造成的假句号，是的话换成什么：前一段明显没说完 / 后一段以「然后、所以」这种接续词开头 / 后一段很短
-    （「很影响。体验。」这种被拆成的半句）。卡在「很 / 一些 / 这个」上的直接接上（''），别的换「，」；三个都不沾就认定是真句号，返回 None。"""
-    last = prev.rstrip('。').split('，')[-1]
-    if last in ZH_CLOSED: return None  # 「好的。」「谢谢。」是说完的短句
-    if last.endswith(ZH_TAIL_GLUE): return ''
-    return '，' if last.endswith(ZH_TAIL_OPEN) or ZH_HEAD_CONT.match(nxt) or len(nxt) <= 4 else None
-
-def zh_fix_inside(t):
-    """段内的句号也按上面同一套判断改掉；顺手合并叠在一起的标点。"""
-    parts = ZH_CLAUSE.findall(ZH_PUNCT_DUP.sub(r'\1', t))
-    out = []
-    for i, p in enumerate(parts[:-1]):
-        sep = zh_cut_sep(p, parts[i + 1]) if p.endswith('。') and len(p) > 2 else None
-        out.append(p if sep is None else p[:-1] + sep)
-    if not parts: return t
-    return ''.join(out) + parts[-1]
-
-def zh_join(parts):
-    """拼各段中文：段尾的「。」只有看着是假句号才换掉（？！保留）；再收拾一次段内标点。"""
-    parts = [p.strip() for p in parts if p and p.strip()]
-    if not parts: return ''
-    t = parts[0]
-    for p in parts[1:]:
-        sep = zh_cut_sep(t, p) if t.endswith('。') else None
-        t = t + p if sep is None else t[:-1] + sep + p
-    return zh_fix_inside(t)
-
 def zh_needs_llm(t):
     """出中文这段要不要送模型：有改口一定送；开着「改错字」（zh_smart）就每句都送，短得没什么可改的（「可以。」）除外。
     显卡被占着临时换成 CPU 时一句要 5~8 秒，这时只送带改口的。"""
     if ZH_FIX.search(t) or ZH_RESTART.search(t): return True
     return cfg.get('zh_smart', True) and llm_opts()[1] and len(re.sub(r'[^一-鿿A-Za-z]', '', t)) > 4
 
-def restarts(prev, text, n=4):
-    """新的一段该不该和上一段合起来改（改错时模型才看得到改口 / 重说）：
-    text 开头 n 个词（中文 6 个字）在 prev 里原样出现过（停下来又从头重说）；或者 text 以「不对 / 我是说 / no / I mean」这种改口开头；
-    或者上一段太短（「嗯，我想。」这种没说完的）；或者这一段太短（单独剩一个「Okay.」，模型会把 Context 重写一遍进来）。"""
-    if CJK.search(text): n = 6
-    a, b = words(prev), words(text)[:n]
-    if len(a) < (6 if CJK.search(prev) else 3) or FIX_START.match(text.lstrip(' ，,')): return True
-    if len(words(text)) < (6 if CJK.search(text) else 3): return True
-    return len(b) == n and any(a[i:i + n] == b for i in range(len(a) - n + 1))
-
 def zh_punct(t):
     """Whisper 出中文时标点是英文半角（逗号、问号），换成全角；中文字之间的空格去掉。数字里的小数点不动。"""
     t = re.sub(r'(?<=[一-鿿])\s*([,?!:;])\s*', lambda m: {',': '，', '?': '？', '!': '！', ':': '：', ';': '；'}[m.group(1)], t)
     return re.sub(r'(?<=[一-鿿，。？！：；])\s+(?=[一-鿿])', '', t).strip()
 
-def join_parts(parts):
-    """拼各段改好的英文；后一段开头要是把前一段的结尾又写了一遍（≥3 个词），去掉重复的那截（兜底）。"""
-    out = []
-    for p in parts:
-        if out:
-            a, b = words(out[-1]), p.split()
-            for n in range(min(len(a), len(b)), 2, -1):
-                if a[-n:] == [x for w in b[:n] for x in words(w)]: p = ' '.join(b[n:]); break
-        if p: out.append(p)
-    return ' '.join(out)
-
 
 class Seg:
-    """一段话：识别好的原文 + 改错结果（后台按顺序改，每个字段一出来就能用）。"""
-    def __init__(self, raw, mode, ctx='', lang='en'):
-        self.raw, self.mode, self.ctx, self.lang, self.out, self.cv = raw, mode, ctx, lang, {}, threading.Condition()
-        self.dead = False  # 被合进后一段了：还没开始改就不用改了
+    """一句话：识别好的原文 + 改错结果（后台改，每个字段一出来就能用）。"""
+    def __init__(self, raw, lang='en'):
+        self.raw, self.lang, self.out, self.cv = raw, lang, {}, threading.Condition()
         self.text = raw  # 送去改的文字，prep() 在后台换词 / 理干净
         if lang == 'zhzh': self.out['zh'] = ''  # 说中文 → 出中文：没有翻译那行
         fixq.put(self)
 
     def prep(self):
         """后台（fix_worker）里做：先按常用词表换掉听错的词，出中文再用规则删口头禅 / 重复。返回还要不要送模型改。
-        不放在 __init__：易混词要问一次模型（is_term），Ollama 正忙 / 在载入时要排队，放录音线程里浮窗实时文字会停住等它。"""
+        不放在 __init__：易混词要问一次模型（is_term），Ollama 正忙 / 在载入时要排队。"""
         self.text = apply_glossary(self.raw)
         if self.lang == 'zhzh':
-            self.text = zh_fix_inside(zh_tidy(self.text))
+            self.text = zh_tidy(self.text)
             if not zh_needs_llm(self.text): self.put('fixed', self.text); return False  # 没有改口、不用改错字：不等模型
         return True
 
@@ -609,13 +507,12 @@ fixq = queue.Queue()
 def fix_worker():
     while True:
         s = fixq.get()
-        if s.dead: continue
         try:
-            if s.prep(): llm(s.text, s.mode, s.put, ctx=s.ctx, lang=s.lang, stop=lambda: s.dead)
+            if s.prep(): llm(s.text, s.put, lang=s.lang)
         except Exception as e:
             log('改错失败：', repr(e)); err = '（' + llm_error(e) + '）'
             if s.lang == 'zhzh': notify(llm_error(e), 'warn')  # 没有翻译那行可以放提示
-            for k in FIELDS[s.mode]:
+            for k in FIELDS:
                 if k not in s.out: s.put(k, err if k == 'zh' else s.text)
 
 
@@ -630,98 +527,28 @@ def save_rec(audio):
         for old in sorted(REC_DIR.glob('*.wav'))[:-REC_KEEP]: old.unlink()
     except Exception: log('存录音失败', traceback.format_exc())
 
-WHOLE_MAX = 80  # 松开后整句重改的上限（词）：更长的话等太久，照旧用分段改好的结果
 class Job:
-    """一次录音。说话时每 0.5 秒识别一次给浮窗实时显示；遇到停顿就把前面那句定下来、先送去改错，松开后只剩最后一段要处理。"""
-    def __init__(self, by_key, mode, lang='en', out='en'):
-        self.by_key, self.mode, self.lang, self.pos, self.segs, self.lock = by_key, mode, lang, 0, [], threading.Lock()
-        self.skip = 0  # 这个位置之前的停顿看过了，是半句话，不切
+    """一次录音。说话时每隔约 1 秒用 Whisper 把目前为止的整段认一遍给浮窗看（heard）；松开后整段再认一次，结果当一句去改。"""
+    def __init__(self, by_key, lang='en', out='en'):
+        self.by_key, self.lang, self.heard = by_key, lang, ''
         self.seg_lang = 'zhzh' if lang == 'zh' and out == 'zh' else lang  # 改错用哪套提示词
-        if self.seg_lang == 'zhzh': self.mode = 'fast'  # 「让我挑选」是挑英文的说法，出中文时直接输入
-        self.spec, self.last_part = None, ''  # 说话停下来时先改着的那段（松开时原话没变就直接用）
-        self.defer = eng.wh is not None and (self.seg_lang == 'en' or lang == 'zh' and cfg.get('zh_whisper', True))  # 说中文要 zh_whisper 开着； 说英文且 Whisper 能用：说话时只显示，松开后整段重认再改一次
-        # 松开后出结果的办法三选一：defer = Whisper 整段重认（rewhisper）/ 出中文 = 停顿时先改着（speculate）/ 其余 = 切过段就整句重改（whole）
-        self.spec_on, self.whole_on = self.seg_lang == 'zhzh' and not self.defer, self.seg_lang != 'zhzh' and not self.defer
-        self.heard = []  # 每次识别出来的原文：浮窗实时显示、Whisper 出错时的退路，各种模式一样（分段合并不改变拼起来的结果）
-
-    def raw(self, segs): return ('' if self.lang == 'zh' else ' ').join(s.raw for s in segs)  # 中文段之间不加空格
-    def heard_text(self): return ('' if self.lang == 'zh' else ' ').join(self.heard)
-
-    def plan(self, text):
-        """text 加进来会变成哪一段：(被合并掉的上一段, 合并后的原话, 参考的前一句)。"""
-        if self.segs and restarts(self.segs[-1].raw, text):  # 停顿后从头重说：和上一段合成一段改，模型只留重说的版本
-            prev = self.segs[-1]; ctx = self.segs[-2].raw if len(self.segs) > 1 else ''
-            return prev, prev.raw + ('' if self.lang == 'zh' else ' ') + text, ctx
-        return None, text, self.segs[-1].raw if self.segs else ''
-
-    def add(self, text):  # 前一句一起送去当参考，分开改也能保持时态一致
-        self.heard.append(text)
-        if self.defer: return  # 说话时只显示；松开后 rewhisper 把整段重认的结果当一段改，这里的分段 / 合并 / 先改都用不上
-        prev, text, ctx = self.plan(text)
-        if prev: self.segs.pop(); prev.dead = True
-        sp, self.spec = self.spec, None
-        if sp and (sp.raw, sp.ctx) == (text, ctx): return self.segs.append(sp)  # 停顿时已经先改上了
-        if sp: sp.dead = True
-        self.segs.append(Seg(text, self.mode, ctx, self.seg_lang))
-
-    def speculate(self, part):
-        """出中文：识别出来的尾巴 0.5 秒没变（停下来了）就先送去改，松开时多半不用再等模型。"""
-        stable, self.last_part = part == self.last_part, part
-        if not (stable and part): return
-        _, text, ctx = self.plan(part)
-        if self.spec and (self.spec.raw, self.spec.ctx) == (text, ctx): return
-        if self.spec: self.spec.dead = True
-        self.spec = Seg(text, self.mode, ctx, self.seg_lang)
-
-    def update(self, a):
-        with self.lock:
-            cut = find_pause(a, self.pos, gap=1.0 if self.lang == 'zh' else 0.45)  # 中文逗号处常停顿，SenseVoice 又每段都加「。」：停够 1 秒才切
-            if cut and cut > self.skip:
-                text = eng.recognize(a[self.pos:cut], self.lang)
-                if not text: self.pos = cut
-                elif sentence_end(text): self.pos = cut; self.add(text)
-                else: self.skip = cut  # 半句话：先不切，连着后面一起识别
-            tail = a[self.pos:]
-            part = eng.recognize(tail, self.lang) if has_speech(tail) else ''
-            if self.spec_on: self.speculate(part)  # 松开后要 Whisper 重认的话（defer），先改着的白改了
-            return self.heard_text(), part
 
     def finish(self, a):
-        wait = eng.whisper_start(a, self.lang == 'zh') if self.defer else None  # 整段先送去 Whisper（显卡），不等实时识别手上那一轮（update 占着 lock），下面 Parakeet 认尾巴（CPU）同时进行；Parakeet 什么都没听到时结果不要
-        with self.lock:
-            tail = a[self.pos:]
-            text = eng.recognize(tail, self.lang) if has_speech(tail) or not self.segs and len(tail) > RATE * 0.3 else ''  # 结尾只剩呼吸声时不识别，免得冒出 "Yeah."
-            if text: self.add(text)
-            self.pos = len(a); mark('tail')
-            if self.defer: self.rewhisper(wait)
-            elif self.whole_on: self.whole()
-            return list(self.segs)
+        """松开后整段给 Whisper（最多等 WHISPER_TIMEOUT 秒），出错 / 超时就用最后一次预览的字。没声音不送（Whisper 对着静音会编一句）。"""
+        text = (eng.whisper_start(a, self.lang)() if has_speech(a) else '') or self.heard
+        mark('wh')
+        return Seg(text, self.seg_lang) if text else None
 
-    def rewhisper(self, wait):
-        """说英文：整段录音给 Whisper 重认，结果当一段去改。Parakeet 什么都没听到时不送（Whisper 对着没声音会编一句）；
-        Whisper 出错 / 超时就用 Parakeet 拼起来的原话。"""
-        raw = self.heard_text()
-        text = (wait() if raw else '') or raw
-        mark('wh'); self.segs = [Seg(text, self.mode, '', self.seg_lang)] if text else []
 
-    def whole(self):
-        """松开后整句重改：识别在每个停顿都补句号（「Is the program.」），分段单独改时半句话改不动语法。
-        切过段、又不太长（WHOLE_MAX 个词以内）就把全部原话合成一段重改，前面分段的结果不要了（正在改的那段会断开）。
-        代价：松开后要等整句改完（20 秒的话约 1.5~2 秒）。出中文不用（规则 + 停顿时先改着已经够好）。"""
-        if not self.whole_on or len(self.segs) < 2 or len(words(self.heard_text())) > WHOLE_MAX: return
-        raw = self.heard_text()
-        for s in self.segs: s.dead = True
-        self.segs = [Seg(raw, self.mode, '', self.seg_lang)]
-
+WH_ERRORS = {'nogpu': '没有 NVIDIA 显卡：Quill 用 Whisper 识别，要 NVIDIA 显卡。', 'nolib': '缺显卡运行库（cuBLAS）：设置 → 准备情况里点「修复」。',
+             'nomodel': '没有识别模型（models\\whisper）：设置 → 准备情况里点「下载」。', 'error': '识别模型加载失败，详情见 run.log。'}
 
 class Engine:
     def __init__(self):
-        self.asr, self.load_error, self.loaded = None, '', threading.Event()
-        self.zh, self.zh_error, self.zh_loaded, self.zh_started = None, '', threading.Event(), False  # 中文识别（SenseVoice），第一次切到「中」才载
-        self.wh = None  # Whisper（说英文时松开后整段再认一遍），载不了就是 None
-        self.wh_state, self.wh_done = 'loading', threading.Event()  # loading / ok / nogpu 没有 NVIDIA 显卡 / nolib 缺 cuBLAS / nomodel 没下 Whisper 模型 / error
+        self.wh, self.load_error, self.loaded = None, '', threading.Event()  # Whisper 识别子进程，载不了就是 None
+        self.wh_state = 'loading'  # loading / ok / nogpu 没有 NVIDIA 显卡 / nolib 缺 cuBLAS / nomodel 没下 Whisper 模型 / error
         self.stream, self.rec, self.src, self.chunks, self.probe, self.peak = None, False, None, [], None, 0.0
-        self.key_paused, self.busy, self.picking, self.job, self.tried = False, False, False, None, False  # tried：已经试过打开麦克风
+        self.key_paused, self.busy, self.job, self.tried = False, False, None, False  # tried：已经试过打开麦克风
 
     def _cb(self, d, *_):
         self.peak = max(self.peak, float(np.abs(d).max()))
@@ -752,69 +579,40 @@ class Engine:
             notify('这个麦克风打不开：换一个试试，或检查 Windows 设置 → 隐私和安全性 → 麦克风。', 'err'); return False
 
     def load(self):
+        """Whisper large-v3-turbo（显卡）：说话时的预览和松开后的结果都是它认的。"""
+        t = time.time()
         try:
-            self.asr = AsrProc()
-            log('识别模型已加载')
-        except Exception as e:
-            log('识别模型加载失败', e)
-            self.load_error = '识别模型加载失败：models\\parakeet 里的文件可能缺了，请让 Claude 检查。'
+            if not nvidia_gpu(): self.wh_state = 'nogpu'
+            elif not (HERE / 'models' / 'whisper' / 'model.bin').exists(): self.wh_state = 'nomodel'
+            else:
+                try: self.wh = AsrProc(); self.wh_state = 'ok'; log(f'识别模型已加载 {time.time() - t:.1f}s')
+                except Exception as e: self.wh_state = {'NOGPU': 'nogpu', 'NOLIB': 'nolib'}.get(str(e), 'error')
+            if not self.wh: self.load_error = WH_ERRORS[self.wh_state]; log('识别模型没加载：', self.wh_state)
         finally:
             self.loaded.set()
-        post('state', self.idle_state())
-        if self.asr: threading.Thread(target=self.load_wh, daemon=True).start()
-        if self.asr and llm_hello(): log('改错模型已预热', '（显卡）' if llm_opts()[1] else '（CPU）')
+        post('state', self.idle_state()); post('mode')
+        if self.wh and llm_hello(): log('改错模型已预热', '（显卡）' if llm_opts()[1] else '（CPU）')
 
-    def load_wh(self):
-        """Whisper（松开后整段再认一遍）：没装 / 显卡用不了就算了，照旧只用 Parakeet，不提示用户。"""
-        try:
-            if not nvidia_gpu(): self.wh_state = 'nogpu'; return log('没有 NVIDIA 显卡，只用 Parakeet')
-            if not (HERE / 'models' / 'whisper' / 'model.bin').exists(): self.wh_state = 'nomodel'; return log('没有 models\\whisper，只用 Parakeet')
-            try: t = time.time(); self.wh = AsrProc('wh'); self.wh_state = 'ok'; log(f'整段识别（Whisper）已加载 {time.time() - t:.1f}s')
-            except Exception as e:
-                self.wh_state = {'NOGPU': 'nogpu', 'NOLIB': 'nolib'}.get(str(e), 'error'); log('Whisper 没加载，只用 Parakeet：', self.wh_state, e)
-        finally: self.wh_done.set(); post('mode')
+    def idle_state(self): return 'ready' if self.wh else 'error' if self.loaded.is_set() else 'loading'
 
-    def whisper_start(self, a, zh=False):
-        """整段识别在后台开跑，返回 wait()：最多等 WHISPER_TIMEOUT 秒；出错 / 超时返回 ''（调用方用 Parakeet 的结果）。
-        松开后和 Parakeet 认尾巴同时进行（一个在显卡、一个在 CPU）。"""
-        if not self.wh: return lambda: ''
+    def recognize(self, a, lang='en'):
+        """lang：en 说英文 / zh 说中文（Whisper language=zh，标点换全角）。"""
+        if not self.wh: return ''
+        t = self.wh.recognize(a, zh=lang == 'zh')
+        return zh_punct(t) if lang == 'zh' else t
+
+    def whisper_start(self, a, lang='en'):
+        """在后台开跑，返回 wait()：最多等 WHISPER_TIMEOUT 秒；出错 / 超时返回 ''。"""
         got = []; t = time.time()
         def run():
-            try: got.append(zh_punct(self.wh.recognize(a, zh=True)) if zh else self.wh.recognize(a))
+            try: got.append(self.recognize(a, lang))
             except Exception as e: log('Whisper 出错：', repr(e))
         th = threading.Thread(target=run, daemon=True); th.start()
         def wait():
             th.join(max(0.0, WHISPER_TIMEOUT - (time.time() - t)))
-            if not got: log(f'Whisper 没出结果（{time.time() - t:.1f}s），用实时识别的'); return ''
+            if not got: log(f'Whisper 没出结果（{time.time() - t:.1f}s），用预览的'); return ''
             log(f'Whisper {time.time() - t:.1f}s'); return got[0]
         return wait
-
-    def whisper(self, a, zh=False): return self.whisper_start(a, zh)()
-
-    def load_zh(self):
-        if self.zh_started: return
-        self.zh_started = True; self.zh_loaded.clear(); post('state', self.idle_state())
-        try:
-            self.zh = AsrProc('zh')
-            log('中文识别模型已加载')
-        except Exception as e:
-            log('中文识别模型加载失败', e); self.zh_started = False  # 下次切到「中」再试
-            self.zh_error = '中文识别模型加载失败：models\\sensevoice 里的文件可能缺了，请让 Claude 检查。'
-        finally:
-            self.zh_loaded.set()
-        post('state', self.idle_state())
-
-    # 按住说话用的语言：en 说英文（Parakeet）/ zh 说中文（SenseVoice），出来的都是英文
-    def model(self, lang): return self.zh if lang == 'zh' else self.asr
-    def ev(self, lang): return self.zh_loaded if lang == 'zh' else self.loaded
-    def error(self, lang=None): return self.zh_error if (lang or cfg['lang']) == 'zh' else self.load_error
-    def idle_state(self):
-        lang = cfg['lang']
-        return 'ready' if self.model(lang) else 'error' if self.ev(lang).is_set() else 'loading'
-
-    def recognize(self, a, lang='en'):
-        m = self.model(lang)
-        return m.recognize(a, sample_rate=RATE).strip() if m else ''
 
     def audio(self):
         ch = list(self.chunks)
@@ -822,21 +620,23 @@ class Engine:
 
     def start(self, src):
         if self.rec or self.busy: return
-        if self.picking: post('choose', None)  # 还有没选的版本：开始新的一句就当放弃
         self.chunks.clear(); self.src, self.rec = src, True
-        self.job = job = Job(src == 'key', cfg.get('mode', 'fast'), cfg['lang'], cfg.get('zh_out', 'en'))
+        self.job = job = Job(src == 'key', cfg['lang'], cfg.get('zh_out', 'en'))
         log('开始录音', src); post('state', 'rec', src == 'key')
         threading.Thread(target=self.live, args=(job,), daemon=True).start()
         if time.time() - last_llm[0] > min(1200, keep_secs() - 10): threading.Thread(target=llm_warm, daemon=True).start()  # 闲到快被卸掉（或已卸掉）：边说边把模型载回来；释放显存设 2 分钟时原来要闲 20 分钟才预热，2~20 分钟之间松开后要现载模型（多 2~5 秒）
 
     def live(self, job):
+        """说话时的预览：每隔 PREVIEW_EVERY 秒把目前为止的整段给 Whisper 认一遍（显卡上一次零点几秒）。"""
+        t = time.time()
         while True:
-            time.sleep(0.5)
+            time.sleep(max(0.05, t + PREVIEW_EVERY - time.time()))
             if not self.rec or self.job is not job: return
-            if not self.model(job.lang): continue
-            try: done, part = job.update(self.audio())
-            except Exception: log('实时识别出错', traceback.format_exc()); return
-            if self.rec and self.job is job: post('live', done, part)
+            t = time.time(); a = self.audio()
+            if not self.wh or not has_speech(a): continue
+            try: text = self.recognize(a, job.lang)
+            except Exception: log('预览识别出错', traceback.format_exc()); return
+            if self.rec and self.job is job: job.heard = text; post('live', text, '')
 
     def stop(self):
         if not self.rec: return
@@ -858,26 +658,21 @@ class Engine:
         if peak < 0.003: post('mic_bad'); return notify(MIC_HINT, 'err', True)
         if cfg.get('save_audio'): save_rec(audio)
         post('state', 'busy', job.by_key)
-        self.ev(job.lang).wait()
-        if not self.model(job.lang): return notify(self.error(job.lang), 'err', True)
-        t = time.time(); segs = job.finish(audio); raw = job.raw(segs)
-        if not raw: return notify('没听清，再说一次（靠近麦克风、说慢一点）。', 'warn', True)
-        post('thinking', raw)
-        if job.mode == 'pick':
-            opts = [join_parts([s.get(k) for s in segs]) for k in ('natural', 'casual')]
-            log(f'识别（{len(segs)} 段）：', *((raw, '| 自然：', opts[0], '| 口语：', opts[1]) if cfg.get('hist', True) else ('（记录已关，不记内容）',)), f'| 松开后 {time.time() - t:.1f}s')
-            post('pick', raw, opts, job.by_key)
-        else:
-            fixed = zh_join([s.get('fixed') for s in segs]) if job.seg_lang == 'zhzh' else join_parts([s.get('fixed') for s in segs])
-            log(f'识别（{len(segs)} 段）：', *((raw, '| 改后：', fixed) if cfg.get('hist', True) else ('（记录已关，不记内容）',)), f'| 松开后 {time.time() - t:.1f}s')
-            if job.by_key: paste(fixed)
-            else: root.after(0, lambda: set_clip(fixed))
-            if not job.by_key: mark('paste')
-            r0 = lat.get('rel', t)  # 分段计时（松开后第几秒）：尾巴识别 / Whisper / 改错首字 / 英文写完 / 粘贴
-            log('计时 ' + ' '.join(f'{n}={lat[k] - r0:.2f}' for n, k in (('尾巴', 'tail'), ('Whisper', 'wh'), ('首字', 'llm_first'), ('英文', 'llm_en'), ('粘贴', 'paste')) if k in lat))
-            post('fixed', raw, fixed, job.by_key)
+        self.loaded.wait()
+        if not self.wh: return notify(self.load_error, 'err', True)
+        t = time.time(); seg = job.finish(audio)
+        if not seg: return notify('没听清，再说一次（靠近麦克风、说慢一点）。', 'warn', True)
+        raw = seg.raw; post('thinking', raw)
+        fixed = seg.get('fixed')
+        log('识别：', *((raw, '| 改后：', fixed) if cfg.get('hist', True) else ('（记录已关，不记内容）',)), f'| 松开后 {time.time() - t:.1f}s')
+        if job.by_key: paste(fixed)
+        else: root.after(0, lambda: set_clip(fixed))
+        if not job.by_key: mark('paste')
+        r0 = lat.get('rel', t)  # 分段计时（松开后第几秒）：Whisper / 改错首字 / 英文写完 / 粘贴
+        log('计时 ' + ' '.join(f'{n}={lat[k] - r0:.2f}' for n, k in (('Whisper', 'wh'), ('首字', 'llm_first'), ('英文', 'llm_en'), ('粘贴', 'paste')) if k in lat))
+        post('fixed', raw, fixed, job.by_key)
         self.busy = False; post('state', 'ready')  # 中文翻译还在后台出，不耽误说下一句
-        post('zh', raw, ''.join(s.get('zh') for s in segs))
+        post('zh', raw, seg.get('zh'))
 
     def probe_record(self, secs):
         self.probe = []; time.sleep(secs); p, self.probe = self.probe, None
@@ -895,81 +690,62 @@ class Engine:
         return None
 
     def hotkey_loop(self):
-        """每 20ms 查一次快捷键是否按住（GetAsyncKeyState），不用低级键盘钩子，钩子被系统摘掉也不受影响。
-        挑版本时：点一下快捷键 = 选第 1 个，Esc = 放弃。"""
-        down = esc = False
+        """每 20ms 查一次快捷键是否按住（GetAsyncKeyState），不用低级键盘钩子，钩子被系统摘掉也不受影响。"""
+        down = False
         while True:
             time.sleep(0.02)
             if self.key_paused: down = False; continue
             vk = cfg['hotkey']; d = key_down(vk)
             if d and not down and vk in (0xA4, 0xA5, 0x5B, 0x5C): tap(0xE8)  # 垫一个空键：单按 Alt 松开会激活菜单栏、单按 Win 会弹开始菜单
-            if self.picking:
-                e = key_down(0x1B)
-                if e and not esc: post('choose', None)
-                esc = e
-                if not d and down: post('choose', 0)
-            elif d and not down:
+            if d and not down:
                 self.start('key')
             elif not d and down and self.src == 'key':
                 self.stop()
             down = d
 
 # ---- 识别子进程 ----
-# import onnxruntime 时它的 C 扩展初始化要占着 GIL 七八秒，放在界面进程里，刚打开的窗口就点不动 → 识别放在单独的子进程里
+# CUDA / ctranslate2 初始化慢、占 GIL，放在界面进程里刚打开的窗口就点不动 → 识别放在单独的子进程里
 # （app.pyw --asr-worker），这边只用管道送音频、收文字。父 → 子：4 字节样本数 + float32；子 → 父：4 字节长度 + UTF-8（启动时先回 OK 或出错信息）。
-def asr_worker(lang):
-    """lang：en = Parakeet（onnx_asr）/ zh = SenseVoice（sherpa_onnx，普通话，夹着的英文词也认）。两种各开一个子进程，中文的第一次切到「中」才开。"""
+def asr_worker():
+    """Whisper large-v3-turbo（faster-whisper，显卡，约 1GB 显存），带上常用词当提示。"""
     inp, out = sys.stdin.buffer, sys.stdout.buffer; sys.stdout = None  # log() 别往管道里打印
     def send(s): b = s.encode('utf-8'); out.write(len(b).to_bytes(4, 'little') + b); out.flush()
     try:
-        if lang == 'zh':
-            import sherpa_onnx
-            d = HERE / 'models' / 'sensevoice'
-            r = sherpa_onnx.OfflineRecognizer.from_sense_voice(model=str(d / 'model.int8.onnx'), tokens=str(d / 'tokens.txt'),
-                                                                language='zh', use_itn=True, num_threads=4)
-            def rec(a):
-                st = r.create_stream(); st.accept_waveform(RATE, a); r.decode_stream(st); return st.result.text
-        elif lang == 'wh':  # 松开后整段再认一遍（Whisper large-v3-turbo，显卡，约 1GB 显存）：比 Parakeet 按段认准得多，还能带上常用词
-            if not nvidia_gpu(): return send('NOGPU')
-            ds = cublas_dirs()  # 要放进 PATH（只 add_dll_directory 不够）
-            if ds: os.environ['PATH'] = str(ds[0]) + os.pathsep + os.environ['PATH']
-            from faster_whisper import WhisperModel
-            m = WhisperModel(str(HERE / 'models' / 'whisper'), device='cuda', compute_type='int8_float16')
-            list(m.transcribe(np.random.default_rng(0).normal(0, 0.05, RATE * 2).astype(np.float32), language='en')[0])  # 先真跑一次（transcribe 返回生成器，不取结果就什么都没算）：缺 cuBLAS 在这里就报出来，第一句也不用等编译
-            for lg, bm in (('en', 1), ('zh', 5)):  # 再各用 20 秒的静音跑一次英文 / 中文的解码设置：第一句真话不用再等 CUDA 初始化（结果不要）
-                try: list(m.transcribe(np.zeros(RATE * 20, np.float32), language=lg, beam_size=bm, condition_on_previous_text=False)[0])
-                except Exception: pass
-            def rec(a, zh=False):
-                terms = [t for t in glossary()[0] if t.isascii()]
-                if zh: prompt, kw = '以下是普通话的句子，使用简体中文。' + ('常用词：' + '、'.join(terms) + '。' if terms else ''), dict(language='zh', beam_size=5)
-                else: prompt, kw = ('Glossary: ' + ', '.join(terms) + '.') if terms else None, dict(language='en', beam_size=1)
-                segs, _ = m.transcribe(a, condition_on_previous_text=False, initial_prompt=prompt, **kw)
-                return ('' if zh else ' ').join(s.text.strip() for s in segs)
-        else:
-            import onnx_asr
-            m = onnx_asr.load_model('nemo-parakeet-tdt-0.6b-v3', HERE / 'models' / 'parakeet', quantization='int8')
-            rec = lambda a: m.recognize(a, sample_rate=RATE)
+        if not nvidia_gpu(): return send('NOGPU')
+        ds = cublas_dirs()  # 要放进 PATH（只 add_dll_directory 不够）
+        if ds: os.environ['PATH'] = str(ds[0]) + os.pathsep + os.environ['PATH']
+        from faster_whisper import WhisperModel
+        m = WhisperModel(str(HERE / 'models' / 'whisper'), device='cuda', compute_type='int8_float16')
+        list(m.transcribe(np.random.default_rng(0).normal(0, 0.05, RATE * 2).astype(np.float32), language='en')[0])  # 先真跑一次（transcribe 返回生成器，不取结果就什么都没算）：缺 cuBLAS 在这里就报出来，第一句也不用等编译
+        for lg, bm in (('en', 1), ('zh', 5)):  # 再各用 20 秒的静音跑一次英文 / 中文的解码设置：第一句真话不用再等 CUDA 初始化（结果不要）
+            try: list(m.transcribe(np.zeros(RATE * 20, np.float32), language=lg, beam_size=bm, condition_on_previous_text=False)[0])
+            except Exception: pass
+        def rec(a, zh=False):
+            terms = [t for t in glossary()[0] if t.isascii()]
+            if zh: prompt, kw = '以下是普通话的句子，使用简体中文。' + ('常用词：' + '、'.join(terms) + '。' if terms else ''), dict(language='zh', beam_size=5)
+            else: prompt, kw = ('Glossary: ' + ', '.join(terms) + '.') if terms else None, dict(language='en', beam_size=1)
+            segs, _ = m.transcribe(a, condition_on_previous_text=False, initial_prompt=prompt, **kw)
+            return ('' if zh else ' ').join(s.text.strip() for s in segs)
     except Exception as e:
-        log('识别子进程加载失败', lang, traceback.format_exc())
-        if lang == 'wh' and 'cublas' in str(e).lower(): return send('NOLIB')
-        return send('models\\%s 里的文件可能缺了' % {'zh': 'sensevoice', 'wh': 'whisper'}.get(lang, 'parakeet'))
+        log('识别子进程加载失败', traceback.format_exc())
+        return send('NOLIB' if 'cublas' in str(e).lower() else 'models\\whisper 里的文件可能缺了')
     send('OK')
     while len(h := inp.read(4)) == 4:  # 主程序退出、管道关掉就结束
-        n = int.from_bytes(h, 'little'); zh = bool(n >> 31); n &= 0x7FFFFFFF  # 长度最高位 = 这段是中文（只有 Whisper 子进程用）
+        n = int.from_bytes(h, 'little'); zh = bool(n >> 31); n &= 0x7FFFFFFF  # 长度最高位 = 这段是中文
         a = np.frombuffer(inp.read(n * 4), np.float32)
-        try: send((rec(a, zh) if lang == 'wh' else rec(a)).strip() if len(a) else '')
+        try: send(rec(a, zh).strip() if len(a) else '')
         except Exception: log('识别出错', traceback.format_exc()); send('')
 
 class AsrProc:
-    """识别子进程的代理，recognize() 和 onnx_asr 的模型一样用（几个线程都会调，排队）。"""
-    def __init__(self, lang='en'):
-        self.lang, self.lock = lang, threading.Lock()
+    """识别子进程的代理（几个线程都会调，排队）。"""
+    def __init__(self):
+        self.lock = threading.Lock()
         self.spawn()
 
     def spawn(self):
         exe = Path(sys.executable).with_name('pythonw.exe')
         with open(HERE / 'run.log', 'a', encoding='utf-8') as err:  # 子进程没接住的报错也记进 run.log
-            self.p = subprocess.Popen([str(exe), str(HERE / 'app.pyw'), '--asr-worker=' + self.lang], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            self.p = subprocess.Popen([str(exe), str(HERE / 'app.pyw'), '--asr-worker'], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                       stderr=err, cwd=HERE, creationflags=0x08000000)  # CREATE_NO_WINDOW
         if (msg := self._recv()) != 'OK': raise RuntimeError(msg)
 
@@ -978,27 +754,24 @@ class AsrProc:
         if len(h) < 4: raise RuntimeError('识别子进程退出了')
         return self.p.stdout.read(int.from_bytes(h, 'little')).decode('utf-8')
 
-    def recognize(self, a, sample_rate=RATE, zh=False):
+    def recognize(self, a, zh=False):
         a = np.ascontiguousarray(a, np.float32); msg = (len(a) | zh << 31).to_bytes(4, 'little') + a.tobytes()  # 最高位 = 说中文（见 asr_worker）
         with self.lock:
             try:
                 self.p.stdin.write(msg); self.p.stdin.flush(); return self._recv()
             except (OSError, RuntimeError):  # 子进程没了（被杀 / 崩了）：重开一个再试一次，不然之后每句都识别不了
-                log('识别子进程断了，重开', self.lang); self.p.kill(); self.spawn()
+                log('识别子进程断了，重开'); self.p.kill(); self.spawn()
                 self.p.stdin.write(msg); self.p.stdin.flush(); return self._recv()
 
 eng = Engine()
 
 def mode_summary():
-    """当前是哪种模式，对速度 / 质量有什么影响（自检和主页状态用）：返回 (ok|warn, 一句人话)。"""
+    """当前是哪种模式，对速度 / 质量有什么影响（自检和准备情况用）：返回 (ok|warn, 一句人话)。"""
     g, st = nvidia_gpu(), eng.wh_state
     ai = 'AI 改错用显卡' if g and LLM_GPU_LAYERS else 'AI 改错用 CPU，每句约 5~8 秒' if not g else 'AI 改错暂时用 CPU'
-    if st == 'ok': return 'ok', f'完整模式（{g}）：松开后 Whisper 整段重认，{ai}'
-    if st == 'loading': return 'ok', '整段识别（Whisper）载入中…'
-    if st == 'nogpu': return 'warn', f'没有 NVIDIA 显卡：只用 Parakeet 实时识别（英文准确率略低，没有松开后整段重认），{ai}'
-    if st == 'nolib': return 'warn', '缺显卡运行库（cuBLAS）：Whisper 没启用，先只用 Parakeet。运行 setup.ps1 可补上'
-    if st == 'nomodel': return 'warn', '没下载 Whisper 模型：先只用 Parakeet（更准的整段重认要运行 setup.ps1 下载）'
-    return 'warn', 'Whisper 没载入成功，先只用 Parakeet，详情见 run.log'
+    if st == 'ok': return 'ok', f'Whisper 识别（{g}），{ai}'
+    if st == 'loading': return 'ok', '识别模型（Whisper）载入中…'
+    return 'warn', eng.load_error
 
 HIST = HERE / 'history.txt'
 HIST_DAYS = ((7, '7 天'), (30, '30 天'), (0, '永久'))
@@ -1044,8 +817,7 @@ def run_checks(report, interactive):
     """report(序号, 'run'|'ok'|'fail'|'warn', 说明, 附加按钮)；返回是否全部通过。"""
     ok = True
     report(0, 'run', '加载中…'); eng.loaded.wait(180)
-    if eng.asr:
-        if eng.wh_state == 'loading': report(0, 'run', '加载整段识别（Whisper）…'); eng.wh_done.wait(120)
+    if eng.wh:
         lv, msg = mode_summary(); report(0, lv, '已加载 · ' + msg)
     else: report(0, 'fail', eng.load_error or '还没加载完'); ok = False
 
@@ -1070,7 +842,7 @@ def run_checks(report, interactive):
     try:
         with wave.open(str(HERE / 'test.wav')) as w:
             a = np.frombuffer(w.readframes(w.getnframes()), np.int16).astype(np.float32) / 32768
-        t = time.time(); raw = eng.asr.recognize(a, sample_rate=RATE).strip() if eng.asr else ''
+        t = time.time(); raw = eng.recognize(a)
         if raw: report(3, 'ok', f'{time.time() - t:.1f} 秒：{raw}')
         else: report(3, 'fail', '没识别出文字'); ok = False
     except Exception:
@@ -1597,7 +1369,7 @@ def draw_lines(d, lines, f, x, y, lh):
 OV_SUB = '#3A3A3C'  # 浮窗里第二层的字（还没定下来的实时识别、原话、中文意思、提示）和细线图标：在玻璃上也要看得清，用深灰不用浅灰
 
 class Overlay:
-    """屏幕底部中间的浮窗：说话时实时显示识别的字，之后显示改好的结果（标出改动），或者给两个版本让你点。
+    """屏幕底部中间的浮窗：说话时实时显示识别的字，之后显示改好的结果（标出改动）。
     不抢焦点：点它光标还留在你原来的输入框里，所以点了就能直接粘贴进去。"""
     W, M, ALPHA, ROW_H = 600, 28, 215, 74  # ROW_H：一行样式的最小高度（英文一行 24 + 中文一行 18 + 间隔 2 + 上下各 15）； 卡片宽、四周给阴影留的边（逻辑像素）、卡片底色不透明度（215/255，半透明，后面再乱也看得清字）
 
@@ -1610,9 +1382,9 @@ class Overlay:
         ex = user32.GetWindowLongW(self.hwnd, -20) | 0x08000000 | 0x80 | 0x8  # 不抢焦点 / 不进任务栏 / 置顶
         user32.ShowWindow(self.hwnd, 0)
         user32.SetWindowLongW(self.hwnd, -20, ex & ~0x80000); user32.SetWindowLongW(self.hwnd, -20, ex | 0x80000)  # 分层：要先清掉再设，否则 UpdateLayeredWindow 报参数错误（87）
-        self.mode, self.d, self.visible, self.pinned, self.inside, self.hover, self.timer = None, {}, False, False, False, None, None
+        self.mode, self.d, self.visible, self.pinned, self.inside, self.timer = None, {}, False, False, False, None
         self.mouse_down = False  # 上一帧鼠标键是不是按着（点浮窗外面就关）
-        self.cards, self.base, self.hits, self.wgeo, self.bar_c, self.h, self.ck = {}, None, [], None, (0, 0), self.ROW_H, None
+        self.cards, self.base, self.wgeo, self.bar_c, self.h, self.ck = {}, None, None, (0, 0), self.ROW_H, None
         self.backdrop = (None, None)  # 浮窗后面那块屏幕的模糊图：(屏幕上的范围, 图)，一次截得比浮窗高，浮窗变高时直接从里面裁
         self.sm, self.lv, self.t0 = [0.0] * 6, 0.0, time.time()
 
@@ -1626,17 +1398,14 @@ class Overlay:
         self.set('busy', raw=raw)
     def result(self, raw, fixed, zh, by_key):
         self.set('result', raw=raw, fixed=fixed, zh=zh, by_key=by_key); self.arm()
-    def pick(self, raw, opts, zh=None):
-        self.set('pick', raw=raw, opts=opts, zh=zh)
     def set_zh(self, zh):
-        if self.mode in ('result', 'pick'):
-            self.d['zh'] = zh; self.render()
-            if self.mode == 'result': self.arm()
+        if self.mode == 'result':
+            self.d['zh'] = zh; self.render(); self.arm()
     def notice(self, text, level):
         self.set('notice', text=text, level=level); self.arm()
 
     def set(self, mode, **d):
-        self.mode, self.d, self.pinned, self.hover = mode, d, False, None
+        self.mode, self.d, self.pinned = mode, d, False
         if self.timer: self.w.after_cancel(self.timer); self.timer = None
         self.render()
 
@@ -1646,7 +1415,7 @@ class Overlay:
 
     def timeout(self):
         self.timer = None
-        if self.pinned or self.mode == 'pick': return
+        if self.pinned: return
         if self.inside: return self.arm(2)  # 鼠标还在上面：再等等
         self.hide()
 
@@ -1660,10 +1429,10 @@ class Overlay:
         """液态玻璃卡片的固定部分（按高度缓存）：under = 卡片外圈的柔和投影；face = 圆角面的形状（玻璃底每帧贴在这里）；
         over = 玻璃上的光：顶部一层往下淡出的高光、贴着边缘的一圈亮光（上面亮、往下几乎没有，是光不是框）、底部一点点暗。
         没有描边。投影只在卡片外面（卡片是透的，垫在下面会透出来）。"""
-        pill = self.mode != 'pick'; key = self.ck = (h, pill)  # 一行样式两头是半圆（胶囊）；挑版本那张高，还是普通圆角
+        key = self.ck = h
         if key not in self.cards:
             M, W = self.M, self.W; size = (px(W + 2 * M), px(h + 2 * M)); box = (px(M), px(M), px(M + W), px(M + h))
-            R = px(h / 2) if pill else px(26)
+            R = px(h / 2)  # 胶囊：两头是半圆
             face = _shape(size, box, R, 2)
             sh = Image.new('L', size, 0); ImageDraw.Draw(sh).rounded_rectangle((px(M + 8), px(M + 10), px(M + W - 8), px(M + h + 6)), min(R, px((h - 4) / 2)), fill=80)
             under = Image.new('RGBA', size, (30, 30, 40, 0)); under.putalpha(ImageChops.multiply(_blur(sh, px(14)), ImageChops.invert(face)))
@@ -1742,7 +1511,7 @@ class Overlay:
             tcol = {'err': RED, 'ok': GREEN}.get(d.get('level'), ORANGE)
             f = pfont(14); blocks.append((flow([(d['text'], INK, False)], f, TW, 3), f))
         th = sum(len(ls) * f.size * 1.5 for ls, f in blocks) / S + 2 * (len(blocks) - 1)  # 文字块总高（逻辑像素）
-        h = max(self.ROW_H, round(th + 30)); self.hits = []  # 最矮也按「英文一行 + 中文一行」：一句话从正在听到出结果一样高，不会突然变大
+        h = max(self.ROW_H, round(th + 30))  # 最矮也按「英文一行 + 中文一行」：一句话从正在听到出结果一样高，不会突然变大
         img = self.layer(h); dr = ImageDraw.Draw(img); cy = px(M + h / 2)
         y = px(M) + (px(h) - px(th)) / 2
         for ls, f in blocks:
@@ -1776,46 +1545,10 @@ class Overlay:
     def render(self):
         """按当前内容重画卡片和文字（左边的声波条每帧另外画）。"""
         if not self.mode: return
-        (self.render_pick if self.mode == 'pick' else self.render_row)()
-
-    def render_pick(self):
-        """挑版本：上面标题 + 提示，下面两张小卡（自然 / 口语）和中文意思。"""
-        M, W, d = self.M, self.W, self.d
-        key = key_name(cfg['hotkey']); L, TW = px(M + 24), px(W - 48)  # 文字左边、宽度（像素）
-        title, hint, icon, tcol = '选一个版本', f'点一下输入 · 按「{key}」选 1 · Esc 放弃', '\uE8FD', TEXT
-        blocks, y = [], 62  # (画法, 参数)；y 是逻辑像素
-        if True:
-            f = pfont(14); self.hits = []
-            for i, (name, text) in enumerate(zip(('自然', '口语'), d['opts'])):
-                lines = flow(changed_words(d['raw'], text), f, TW - px(76), 3); h = len(lines) * 16 * 1.55 + 22
-                blocks.append(('option', i, name, lines, f, y, h)); y += h + 10
-            f2 = pfont(12); lines = flow([('意思：' + (d['zh'] if d.get('zh') is not None else '翻译中…'), OV_SUB, False)], f2, TW, 2)
-            blocks.append(('lines', lines, f2, y + 2)); y += 2 + len(lines) * 12 * 1.55
-        h = int(y + 20)
-
-        img = self.layer(h); dr = ImageDraw.Draw(img)
-        cx, cy = px(M + 39), px(M + 33)
-        dr.ellipse((cx - px(15), cy - px(15), cx + px(15), cy + px(15)), fill=INK)  # 左上角小圆章
-        dr.text((cx, cy), icon, font=pfont(13, 'i'), fill='white', anchor='mm')
-        dr.text((px(M + 64), cy), title, font=pfont(14), fill=tcol, anchor='lm')
-        if hint: dr.text((px(M + W - 24), cy), hint, font=pfont(12), fill=OV_SUB, anchor='rm')
-        for b in blocks:
-            if b[0] == 'lines':
-                _, lines, f, by = b; draw_lines(dr, lines, f, L, px(M + by), f.size * 1.55)
-            else:
-                _, i, name, lines, f, by, bh = b
-                x0, y0, x1, y1 = px(M + 16), px(M + by), px(M + W - 16), px(M + by + bh)
-                hov = self.hover == i
-                dr.rounded_rectangle((x0, y0, x1, y1), px(18), fill=(255, 255, 255, 175) if hov else (255, 255, 255, 80))  # 玻璃上再叠一层半透明白
-                cy2 = y0 + px(11) + f.size * 1.55 / 2
-                dr.rounded_rectangle((x0 + px(12), cy2 - px(12), x0 + px(60), cy2 + px(12)), px(12), fill=INK if hov or i == 0 else OV_SUB)
-                dr.text((x0 + px(36), cy2), name, font=pfont(12), fill='white', anchor='mm')
-                draw_lines(dr, lines, f, x0 + px(72), y0 + px(11), f.size * 1.55)
-                self.hits.append((x0, y0, x1, y1, i))
-        self.base = img; self.blit()
+        self.render_row()
 
     def frame(self, level):
-        """每帧调：说话 / 思考时让左上角小光球动起来；结果 / 提示显示着时，点屏幕上浮窗以外的地方就关（固定了的、挑版本的不关）。"""
+        """每帧调：说话 / 思考时让左上角小光球动起来；结果 / 提示显示着时，点屏幕上浮窗以外的地方就关（固定了的不关）。"""
         down = key_down(0x01) or key_down(0x02)
         if down and not self.mouse_down and self.visible and self.wgeo and self.mode in ('result', 'notice') and not self.pinned:
             pt = ctypes.wintypes.POINT(); user32.GetCursorPos(ctypes.byref(pt))
@@ -1845,20 +1578,11 @@ class Overlay:
         ulw(self.hwnd, img, x, y)
 
     # 鼠标
-    def hit(self, x, y): return next((i for x0, y0, x1, y1, i in self.hits if x0 <= x <= x1 and y0 <= y <= y1), None)
-
     def motion(self, e):
         self.inside = e is not None
-        if self.mode == 'pick':
-            h = self.hit(e.x, e.y) if e else None
-            if h != self.hover: self.hover = h; self.render()
-            self.w.configure(cursor='hand2' if h is not None else '')
 
     def click(self, e):
-        if self.mode == 'pick':
-            i = self.hit(e.x, e.y)
-            if i is not None: self.app.choose(i)
-        elif self.pinned: self.hide()
+        if self.pinned: self.hide()
         else:
             self.pinned = True; self.render()
             if self.timer: self.w.after_cancel(self.timer); self.timer = None
@@ -1982,7 +1706,7 @@ class App:
         self.notice_until, self.ol_last, self.ol_starting = 0.0, None, 0.0
         self.first_shown = False
         self.settings = self.check_win = self.ready_win = self.history = self.words = self.pop = None
-        self.cur, self.pick_job = None, None  # 当前这句 [原话, 输入的英文, 中文]；等着挑的版本
+        self.cur = None  # 当前这句 [原话, 输入的英文, 中文]
         self.waiting = {}  # 英文出了、中文还没出就开始说下一句的那些：原话 → [原话, 英文, None]，中文到了再记
 
         n = self.n = Neu(root, self.W, self.H); n.c.pack()
@@ -2123,21 +1847,16 @@ class App:
         cfg['hotkey'] = vk; save_cfg(); log('快捷键改为', key_name(vk)); self.refresh_sub()
 
     def set_lang(self, lang):
-        """主页 EN / 中：切换说哪种语言（第一次切到中文时在后台载中文识别模型，十秒左右）。"""
+        """主页 EN / 中：切换说哪种语言（Whisper 按 language=en / zh 认）。"""
         if cfg['lang'] == lang: return
         cfg['lang'] = lang; save_cfg(); log('说话语言：', lang)
         self.lang_sw.select(lang)
-        if lang == 'zh' and not eng.zh_started: threading.Thread(target=eng.load_zh, daemon=True).start()
         threading.Thread(target=llm_hello, daemon=True).start()  # 两种语言的提示词不一样：先用新提示词跑一次，切完说的第一句不慢
         if self.state in ('loading', 'ready', 'error'): self.set_state(eng.idle_state())
 
     def sub_text(self):
-        short = {'nogpu': '没有 N 卡，只用 Parakeet', 'nolib': '缺显卡运行库，设置 → 准备', 'nomodel': '缺 Whisper 模型，设置 → 准备', 'error': 'Whisper 没载入，设置 → 准备'}.get(eng.wh_state)
-        return self.sub_base() + f'（{short}）' if short and self.state == 'ready' else self.sub_base()
-
-    def sub_base(self):
         return {'loading': 'Initializing...', 'ready': f'按住「{key_name(cfg["hotkey"])}」或按住中间这一圈',
-                'rec': '说完松开', 'busy': '改语病 + 翻译，几秒钟', 'error': eng.error()}[self.state]
+                'rec': '说完松开', 'busy': '改语病 + 翻译，几秒钟', 'error': eng.load_error}[self.state]
 
     def refresh_sub(self):
         if time.time() < self.notice_until: return
@@ -2164,18 +1883,7 @@ class App:
         self.refresh_sub(); self.update_dot()
         if s == 'rec': self.overlay.listen(toast)
         if s == 'busy': self.overlay.think('')
-        if s == 'error': self.show_notice(eng.error(), 'err')
-
-    def choose(self, i):
-        """挑选模式：i = 0 自然 / 1 口语，None = 放弃。"""
-        p, self.pick_job, eng.picking = self.pick_job, None, False
-        if not p: return
-        raw, opts, by_key = p
-        if i is None: log('放弃了这句'); self.cur = None; return self.overlay.hide()
-        text = opts[i]; log('选了', ('自然', '口语')[i], *(('：', text) if cfg.get('hist', True) else ()))
-        if by_key: threading.Thread(target=paste, args=(text,), daemon=True).start()
-        else: set_clip(text); self.show_notice('已复制到剪贴板，去要输入的地方按 Ctrl+V。', 'ok')
-        self.cur[1] = text; self.overlay.result(raw, text, self.cur[2], by_key); self.finish()
+        if s == 'error': self.show_notice(eng.load_error, 'err')
 
     def finish(self):
         """英文和中文都有了：记下来。"""
@@ -2255,14 +1963,10 @@ class App:
         elif kind == 'fixed':
             raw, fixed, by_key = a; self.park(); self.cur = [raw, fixed, None]; self.overlay.result(raw, fixed, None, by_key)
             if not by_key: self.show_notice('已复制到剪贴板，去要输入的地方按 Ctrl+V。', 'ok')
-        elif kind == 'pick':
-            raw, opts, by_key = a; self.park(); self.cur, self.pick_job, eng.picking = [raw, None, None], a, True
-            self.overlay.pick(raw, opts)
         elif kind == 'zh':
             raw, zh = a
             if self.cur and self.cur[0] == raw: self.cur[2] = zh; self.overlay.set_zh(zh); self.finish()
             elif raw in self.waiting: w = self.waiting.pop(raw); self.record(w[0], w[1], zh)
-        elif kind == 'choose': self.choose(a[0])
         elif kind == 'ollama':
             st = a[0]
             if st != self.ol_last:
@@ -2272,7 +1976,7 @@ class App:
             if changed: self.refresh_settings()
         elif kind == 'key_recorded':
             if self.alive('settings'): self.settings.key_recorded(a[0])
-        elif kind == 'mode':  # Whisper 载完 / 不用了：主页灰字换一句，第一次启动有缺的东西就自己弹出准备情况窗口
+        elif kind == 'mode':  # Whisper 载完 / 载不了：第一次启动有缺的东西就自己弹出准备情况窗口
             self.refresh_sub()
             if not self.first_shown: self.first_shown = True; self.root.after(5000, self.first_run)
         elif kind == 'check' and self.alive('check_win'): self.check_win.update(*a)
@@ -2280,9 +1984,8 @@ class App:
 
 
 class Settings:
-    """设置窗口：麦克风 / 快捷键 / 输出方式 / 改错服务 四块卡片。"""
+    """设置窗口：麦克风 / 快捷键 / 说中文时 / 改错服务 四块卡片。"""
     W = 400
-    MODES = (('fast', '直接输入', ''), ('pick', '让我挑选', ''))
     ZH_OUTS = (('en', '出英文', ''), ('zh', '出中文', ''))  # 出中文：删掉口头禅 / 重复 / 改口，不翻译
     ONOFF = ((True, '开', ''), (False, '关', ''))  # 出中文时每句都送模型改错字 / 只送带改口的
 
@@ -2332,18 +2035,15 @@ class Settings:
         return h
 
     def sec_mode(self, n, x, y, w, draw):
-        h = 206  # 四排按钮间距 48，上下各留 14
+        h = 110  # 两排按钮间距 48，上下各留 14
         if not draw: return h
-        mode = cfg.get('mode', 'fast'); self.label(n, x, y, w, h, '输出方式')
-        rows = ((y + 14, self.MODES, mode, self.set_mode), (y + 62, self.ZH_OUTS, cfg.get('zh_out', 'en'), self.set_zh_out),
-                (y + 110, self.ONOFF, cfg.get('zh_smart', True), self.set_zh_smart), (y + 158, self.ONOFF, cfg.get('zh_whisper', True), self.set_zh_whisper))
+        self.label(n, x, y, w, h, '说中文时')
+        rows = ((y + 14, self.ZH_OUTS, cfg.get('zh_out', 'en'), self.set_zh_out), (y + 62, self.ONOFF, cfg.get('zh_smart', True), self.set_zh_smart))
         for by, opts, cur, cmd in rows:
             for i, (m, name, _) in enumerate(opts):
                 on = m == cur
                 n.button(x + w - 210 + i * 100, by, 90, 34, text=name, size=12, on=on, cmd=lambda m=m, cmd=cmd: cmd(m))
-        n.text(x + 20, y + 72, '说中文时', 12, TEXT)
-        n.text(x + 20, y + 120, '出中文时改错字', 12, TEXT)
-        n.text(x + 20, y + 168, '中文整段重认', 12, TEXT)
+        n.text(x + 20, y + 72, '出中文时改错字', 12, TEXT)
         return h
 
     def sec_ol(self, n, x, y, w, draw):
@@ -2419,9 +2119,6 @@ class Settings:
     def set_hot(self, vk):
         self.app.set_key(vk); self.key_tip = ('', SUB); self.build()
 
-    def set_mode(self, m):
-        cfg['mode'] = m; save_cfg(); log('输出方式改为', m); self.app.refresh_settings()
-
     def set_keep(self, k):
         cfg['keep'] = k; save_cfg(); log('释放显存：', k); self.app.refresh_settings()
         threading.Thread(target=apply_keep, daemon=True).start()
@@ -2433,9 +2130,6 @@ class Settings:
     def set_zh_out(self, o):
         cfg['zh_out'] = o; save_cfg(); log('说中文时输出', o); self.app.refresh_settings()
         if cfg['lang'] == 'zh': threading.Thread(target=llm_hello, daemon=True).start()  # 换了提示词，同上
-
-    def set_zh_whisper(self, on):
-        cfg['zh_whisper'] = on; save_cfg(); log('说中文时用 Whisper 整段重认：', on); self.app.refresh_settings()
 
     def set_zh_smart(self, on):
         cfg['zh_smart'] = on; save_cfg(); log('出中文时改错字：', on); self.app.refresh_settings()
@@ -2801,17 +2495,14 @@ class Checks:
 
 
 SETUP_PS1 = HERE / 'setup.ps1'
-PARAKEET_FILES = ('encoder-model.int8.onnx', 'decoder_joint-model.int8.onnx', 'vocab.txt', 'config.json')
-
-def have_models(sub, *files): return all((HERE / 'models' / sub / f).exists() for f in files)
 
 def readiness(ol):
-    """准备情况四行：[(lv, 一句人话, 按钮字 或 None)]，lv = ok / warn / fail / info。ol：改错服务状态（App.ol_last）。按钮都是运行 setup.ps1。"""
-    rows = []
-    if not have_models('parakeet', *PARAKEET_FILES): rows.append(('fail', '没有英文识别模型（Parakeet，约 650MB），现在说不了话。', '下载'))
-    elif not have_models('sensevoice', 'model.int8.onnx', 'tokens.txt'): rows.append(('warn', '说英文够用；说中文要的模型（约 240MB）还没下载。', '下载'))
-    elif eng.load_error: rows.append(('fail', '识别模型载入失败，文件可能损坏，重新下载试试。', '下载'))
-    else: rows.append(('ok', '英文、中文识别模型都在。', None))
+    """准备情况三行：[(lv, 一句人话, 按钮字 或 None)]，lv = ok / warn / fail / info。ol：改错服务状态（App.ol_last）。按钮都是运行 setup.ps1。"""
+    rows = [{'ok': ('ok', 'Whisper 已载入。', None),
+             'loading': ('info', '载入中…', None),
+             'nogpu': ('fail', '没有 NVIDIA 显卡：Whisper 识别要用显卡，现在说不了话。', None),
+             'nolib': ('fail', '缺显卡运行库（cuBLAS，约 0.5GB）。', '修复'),
+             'nomodel': ('fail', 'Whisper 模型（约 1.6GB）还没下载。', '下载')}.get(eng.wh_state, ('fail', '没载入成功，详情见 run.log。', '修复'))]
 
     if not shutil.which('ollama') and not os.path.exists(os.path.expandvars(r'%LOCALAPPDATA%\Programs\Ollama\ollama.exe')):
         rows.append(('fail', '没装 Ollama：它负责改语病和翻译，没有它只能原样输出。', '安装'))
@@ -2820,12 +2511,6 @@ def readiness(ol):
     elif ol is None: rows.append(('info', '检查中…', None))
     else: rows.append(('ok', f'Ollama 正常，改错模型 {LLM_MODEL} 在。', None))
 
-    st = eng.wh_state
-    rows.append({'ok': ('ok', f'已启用（{nvidia_gpu()}）：松开后整段重认，更准。', None),
-                 'loading': ('info', '载入中…', None),
-                 'nogpu': ('info', '没有 NVIDIA 显卡，不使用。不影响用，英文准确率略低。', None),
-                 'nolib': ('warn', '缺显卡运行库（cuBLAS，约 0.5GB），先不使用。', '修复'),
-                 'nomodel': ('warn', 'Whisper 模型（约 1.6GB）还没下载，先不使用。', '下载')}.get(st, ('warn', '没载入成功，先不使用，详情见 run.log。', '修复')))
     lv, text = mode_summary(); rows.append(('ok' if lv == 'ok' else 'info', text, None))
     return rows
 
@@ -2833,7 +2518,7 @@ def readiness(ol):
 class Ready:
     """准备情况窗口：缺 Ollama / 模型 / 显卡库时说清楚缺什么，按钮在黑框 PowerShell 里运行 setup.ps1（装完自动重新检查）。"""
     ICON = {**Checks.ICON, 'info': ('–', SUB)}
-    NAMES = ['识别模型', '改错服务', '整段重认（Whisper）', '当前模式']
+    NAMES = ['识别模型（Whisper）', '改错服务', '当前模式']
     W, ROW = 400, 88
 
     def __init__(self, app):
@@ -2879,10 +2564,10 @@ class Ready:
         log('运行 setup.ps1'); self.refresh(True)
 
     def after_setup(self):
-        """setup.ps1 跑完：能补救的当场补上（识别模型 / Whisper 重新载入，Ollama 重新试），不用重启 Quill。"""
+        """setup.ps1 跑完：能补救的当场补上（Whisper 重新载入，Ollama 重新试），不用重启 Quill。"""
         log('setup.ps1 结束，重新检查'); ollama_retry[0] = 0.0
-        if not eng.asr: eng.load_error = ''; eng.loaded.clear(); threading.Thread(target=eng.load, daemon=True).start()
-        elif eng.wh_state not in ('ok', 'loading', 'nogpu'): eng.wh_state = 'loading'; eng.wh_done.clear(); threading.Thread(target=eng.load_wh, daemon=True).start()
+        if eng.wh_state not in ('ok', 'loading', 'nogpu'):
+            eng.wh_state, eng.load_error = 'loading', ''; eng.loaded.clear(); threading.Thread(target=eng.load, daemon=True).start()
         post('mode')
 
 
@@ -2934,8 +2619,7 @@ def quit_app():
 
 
 if __name__ == '__main__':
-    w = next((a for a in sys.argv if a.startswith('--asr-worker=')), None)
-    if w: asr_worker(w.split('=')[1]); sys.exit(0)
+    if '--asr-worker' in sys.argv: asr_worker(); sys.exit(0)
     kernel32.CreateMutexW(None, False, 'QuillVoiceInput')
     if kernel32.GetLastError() == 183:  # 已经开着：把原来的窗口叫到前面
         h = user32.FindWindowW(None, TITLE)
@@ -2960,7 +2644,6 @@ if __name__ == '__main__':
     root.geometry(f'+{wa.right - px(App.W) - px(20)}+{wa.top + px(12)}')  # 离右边 20：四个窗口全开时排得下，不用挪
     root.deiconify(); root.update()  # 先把窗口画出来：冷启动时开麦克风要等声卡驱动一两秒，放在前面窗口会白一阵
     threading.Thread(target=lambda: (eng.open(cfg['device']), eng.load()), daemon=True).start()  # 开麦克风、载识别模型都在后台
-    if cfg['lang'] == 'zh': threading.Thread(target=eng.load_zh, daemon=True).start()
     threading.Thread(target=fix_worker, daemon=True).start()
     threading.Thread(target=eng.hotkey_loop, daemon=True).start()
     if SELFTEST: root.after(500, app.open_checks)

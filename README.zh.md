@@ -32,8 +32,7 @@
 - **不只改语法**：去掉语气词、结巴、说一半放弃的话和改口（「不对，我是说……」），修正时态、冠词、单复数。
 - **说中文，出英文**：主页点一下 **EN / 中** 就能切换，中英混着说也行。
 - **也可以说中文、出干净的中文**：设置 →「说中文时」选「出中文」。嗯、呃、口吃、重复按规则直接删，只有带改口（不对 / 我是说……）的句子才交给大模型，大部分句子松开后约半秒出字。
-- **准**：松开后用 Whisper 把整段话（中英文）再认一遍，再一次理顺；英文通常松开后 2~3 秒出字（N 卡）。
-- **两种输出方式**：「直接输入」，或者「让我挑选」（给自然版、口语版两种）。
+- **准**：Whisper 认整段话（中英文），再一次理顺；英文通常松开后约 1 秒出字。
 - **看得到改了什么**：屏幕下方的小浮窗显示实时识别、改过的词和中文意思。
 - **记得你的常用词**：主页下面的常用词表（人名、项目名、工具名）。写 `Claude: cloud`，识别出 cloud 时 Quill 看上下文判断是不是 Claude。闲着时每天扫一次记录，把可能听错的词列出来，点一下加入或忽略。
 - **完全本地**：语音识别和大模型都在本机跑；记录是一个文本文件，不会离开你的电脑。
@@ -49,18 +48,17 @@
 
 ```
 按住快捷键 → 麦克风（16 kHz）
-          → 语音识别    英文：说话时 NVIDIA Parakeet TDT 0.6B v3（ONNX，CPU）出实时文字，
-                              松开后 Whisper large-v3-turbo（faster-whisper，显卡）整段再认一遍，带上你的常用词
-                        中文：SenseVoice Small（sherpa-onnx，CPU）
+          → 语音识别    Whisper large-v3-turbo（faster-whisper，显卡），带上你的常用词：
+                        说话时约每秒把目前说的整段认一遍给浮窗看，松开后整段再认一次
           → 理顺 / 翻译  Qwen3 4B（Ollama，有显卡用显卡，慢了自动换 CPU；设置里可换成 8B）
           → 粘贴到光标处
 ```
 
-Whisper 整段认，比按停顿一段段认准得多（不会把半句话认成别的词）；没有 N 卡时只用 Parakeet。识别跑在单独的进程里，界面不会卡。
+Whisper 整段认，比按停顿一段段认准得多（不会把半句话认成别的词）。识别跑在单独的进程里，界面不会卡。
 
 ## 安装
 
-**需要：** 仅 Windows 10/11（不支持 macOS / Linux）· 16 GB 内存 · 约 8 GB 硬盘。推荐 6 GB 以上显存的 N 卡（没有 N 卡也能跑：不用 Whisper、只用 Parakeet，英文略不准，改错每句 5~8 秒）。
+**需要：** 仅 Windows 10/11（不支持 macOS / Linux）· 16 GB 内存 · 约 8 GB 硬盘。需要 6 GB 以上显存的 N 卡（Whisper 在显卡上跑）。
 
 ```powershell
 git clone https://github.com/FxrcRed/quill.git
@@ -68,8 +66,8 @@ cd quill
 powershell -ExecutionPolicy Bypass -File setup.ps1 -Mirror     # 国内网络加 -Mirror，从 hf-mirror.com 下模型
 ```
 
-`setup.ps1` 会装好 [uv](https://github.com/astral-sh/uv) 和 Python 3.12（不用自己装 Python）、依赖包、三个语音模型（约 2.5 GB）、
-[Ollama](https://ollama.com) 和 `qwen3:4b`（约 2.6 GB；想要更准可以再 `ollama pull qwen3:8b`，在设置里换），并在桌面建快捷方式。有 N 卡时还会往 venv 里装 Whisper 要的 cuBLAS（`nvidia-cublas-cu12`，约 0.5 GB），没有就跳过它和 Whisper 模型。可以重复运行，已有的会跳过。以后缺东西，Quill 的「设置 → 准备」会说缺什么，按钮直接运行 `setup.ps1`。
+`setup.ps1` 会装好 [uv](https://github.com/astral-sh/uv) 和 Python 3.12（不用自己装 Python）、依赖包、Whisper 语音模型（约 1.6 GB）、
+[Ollama](https://ollama.com) 和 `qwen3:4b`（约 2.6 GB；想要更准可以再 `ollama pull qwen3:8b`，在设置里换），并在桌面建快捷方式。还会往 venv 里装 Whisper 要的 cuBLAS（`nvidia-cublas-cu12`，约 0.5 GB）。可以重复运行，已有的会跳过。以后缺东西，Quill 的「设置 → 准备」会说缺什么，按钮直接运行 `setup.ps1`。
 
 装好后双击桌面上的 **Quill**，等出现 **READY**，按住 **右 Alt** 说话。
 
@@ -86,7 +84,7 @@ powershell -ExecutionPolicy Bypass -File setup.ps1 -Mirror     # 国内网络加
 
 - 整个程序就一个文件：[`app.pyw`](app.pyw)（界面用 tkinter + Pillow 画）。
 - `e2e_test.py [zh]`：不用麦克风的端到端测试（按实时速度喂一段 wav）。
-- `fix_test.py [pick] [zh]`：改了提示词后，用真实说法对比改错效果。
+- `fix_test.py [zh | zhzh]`：改了提示词后，用真实说法对比改错效果。
 - `term_test.py`：测模型能不能分清听错的名字（cloud → Claude）和普通词。
 - `make_words_demo.py`：重新生成常用词演示图。
 - `make_demo.py`：重新生成上面的 GIF 和截图。
@@ -94,8 +92,6 @@ powershell -ExecutionPolicy Bypass -File setup.ps1 -Mirror     # 国内网络加
 
 ## 致谢
 
-- NVIDIA 的 [Parakeet TDT 0.6B v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3)（CC-BY-4.0），[istupakov](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx) 导出的 ONNX 版，用 [onnx-asr](https://github.com/istupakov/onnx-asr) 运行
-- FunAudioLLM 的 [SenseVoice](https://github.com/FunAudioLLM/SenseVoice)，用 [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) 运行
 - OpenAI 的 [Whisper large-v3-turbo](https://huggingface.co/openai/whisper-large-v3-turbo)（MIT），用 [faster-whisper](https://github.com/SYSTRAN/faster-whisper) 运行
 - [Qwen3](https://github.com/QwenLM/Qwen3)（Apache-2.0），由 [Ollama](https://ollama.com) 提供服务
 - 字体：[Noto Sans SC](https://github.com/notofonts/noto-cjk) 和 [Michroma](https://github.com/googlefonts/Michroma-font)（SIL OFL 1.1）

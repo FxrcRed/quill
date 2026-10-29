@@ -38,9 +38,9 @@ def ulw(h, img, x, y): orig(h, img, x, y); latest[0] = img.copy()
 m.ulw = ulw
 m.Overlay.grab_backdrop = lambda self, box: Image.new('RGBA', (box[2] - box[0], box[3] - box[1]), (238, 238, 240, 255))  # 玻璃后面用固定底色，不截真实屏幕
 audio = {lang: tts(lang, text, HERE / f'_demo_{lang}.wav') for lang, text in LINES}
-m.cfg.update(lang='en', mode='fast', hotkey=0xA5, zh_out='en', zh_whisper=False)  # 演示用默认快捷键右 Alt
+m.cfg.update(lang='en', hotkey=0xA5, zh_out='en')  # 演示用默认快捷键右 Alt
 app = m.App(root); root.deiconify()
-for t in (m.fix_worker, m.eng.load, m.eng.load_zh): threading.Thread(target=t, daemon=True).start()
+for t in (m.fix_worker, m.eng.load): threading.Thread(target=t, daemon=True).start()
 
 def sample():  # 每 0.1 秒一帧：浮窗（看得见时）、输入框里的字、快捷键是不是按着、当前语言
     frames.append((latest[0] if app.overlay.visible else None, typed[0], m.eng.rec, m.cfg['lang']))
@@ -59,7 +59,7 @@ def say(lang):
 
 def scenario():
     try:
-        m.eng.loaded.wait(); m.eng.zh_loaded.wait(); time.sleep(3)
+        m.eng.loaded.wait(); time.sleep(3)
         root.after(0, sample); time.sleep(1.0)
         for lang, _ in LINES: say(lang)
         root.after(0, lambda: app.set_lang('en'))

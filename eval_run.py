@@ -42,14 +42,7 @@ def cases(which):
     return {'en': ft.CASES, 'zh': ft.ZH_CASES, 'zhzh': ft.ZHZH_CASES}[which]
 
 
-def one(segs, lang, out):
-    job, buf = m.Job(False, 'fast', lang, out), ''
-    for s in segs[:-1]:  # 和 fix_test.run / Job.update 一样的喂法
-        buf = (buf + ' ' + s).strip()
-        if m.sentence_end(buf): job.add(buf); buf = ''
-    job.add((buf + ' ' + segs[-1]).strip()); job.whole()
-    join = m.zh_join if job.seg_lang == 'zhzh' else m.join_parts
-    return join([s.get('fixed') for s in job.segs])
+one = ft.one  # 和 fix_test 一样：整句当一段去改
 
 
 def grade(res, chk):

@@ -25,20 +25,18 @@ if (-not (Test-Path '.venv\Scripts\python.exe')) { uv venv .venv --python 3.12 }
 uv pip install --python .venv\Scripts\python.exe -r requirements.txt
 if ($LASTEXITCODE -ne 0) { throw 'Package install failed' }
 
-# NVIDIA GPU? Then Whisper (final English text) runs on it and needs cuBLAS 12 (nvidia-cublas-cu12, ~0.5 GB download) in the venv.
-# No NVIDIA GPU: skip both, Quill falls back to Parakeet only (see README).
+# Speech recognition is Whisper on an NVIDIA GPU; it needs cuBLAS 12 (nvidia-cublas-cu12, ~0.5 GB download) in the venv.
 $hasGpu = $false
 try { $null = & nvidia-smi --query-gpu=name --format=csv,noheader 2>$null; $hasGpu = ($LASTEXITCODE -eq 0) } catch { }
 if ($hasGpu) {
     Step 'NVIDIA GPU found: installing cuBLAS for Whisper'
     uv pip install --python .venv\Scripts\python.exe 'nvidia-cublas-cu12<13'
-    if ($LASTEXITCODE -ne 0) { Write-Host 'cuBLAS install failed; Quill will use Parakeet only until you run this script again.' -ForegroundColor Yellow }
-} else { Write-Host 'No NVIDIA GPU found: skipping Whisper (Quill will use Parakeet only).' -ForegroundColor Yellow }
+    if ($LASTEXITCODE -ne 0) { Write-Host 'cuBLAS install failed; run this script again before using Quill.' -ForegroundColor Yellow }
+} else { Write-Host 'No NVIDIA GPU found: Quill needs one for speech recognition (Whisper). Skipping the Whisper model.' -ForegroundColor Yellow }
 
 
-# 3. Speech models (Parakeet for live English text ~650 MB, Whisper large-v3-turbo for the final English text ~1.6 GB,
-#    SenseVoice for Chinese ~240 MB). Whisper needs an NVIDIA GPU; without one it is skipped and Quill just uses Parakeet.
-Step 'Downloading speech models (skips files you already have)'
+# 3. Speech model: Whisper large-v3-turbo (~1.6 GB, English and Chinese). Needs an NVIDIA GPU; without one it is skipped.
+Step 'Downloading the speech model (skips files you already have)'
 $env:HF_HUB_DISABLE_XET = '1'
 $env:QUILL_SKIP_WHISPER = $(if ($hasGpu) { '' } else { '1' })
 if ($Mirror) { $env:HF_ENDPOINT = 'https://hf-mirror.com' }
@@ -47,9 +45,6 @@ import os
 from pathlib import Path
 from huggingface_hub import hf_hub_download
 jobs = {
-    'models/parakeet': ('istupakov/parakeet-tdt-0.6b-v3-onnx',
-                        ['config.json', 'vocab.txt', 'encoder-model.int8.onnx', 'decoder_joint-model.int8.onnx']),
-    'models/sensevoice': ('csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17', ['tokens.txt', 'model.int8.onnx']),
     'models/whisper': ('deepdml/faster-whisper-large-v3-turbo-ct2',
                        ['config.json', 'preprocessor_config.json', 'tokenizer.json', 'vocabulary.json', 'model.bin']),
 }

@@ -33,8 +33,7 @@ all of that verbatim, or send my voice to the cloud. Quill does the cleanup loca
 - **Cleans up speech, not just grammar** — removes fillers, stutters, false starts and self-corrections ("no, I mean…"), fixes tense, articles and plurals.
 - **Speak Chinese, get English** — one tap on **EN / 中** on the home screen. Mixed Chinese-English speech works too.
 - **Or speak Chinese, get clean Chinese** — Settings → *When speaking Chinese* → 出中文. Fillers (嗯, 呃), stutters and repeats are removed instantly by rules; only sentences with a self-correction (不对 / 我是说 …) go to the LLM, so most sentences appear in about half a second.
-- **Accurate** — when you let go, Whisper re-reads the whole recording (English and Chinese) and the cleanup runs once on the full text; English usually appears 2–3 s after you let go (NVIDIA GPU).
-- **Two output modes** — *Direct* (type it right away) or *Pick* (choose between a natural and a casual version).
+- **Accurate** — Whisper reads the whole recording (English and Chinese) and the cleanup runs once on the full text; English usually appears about 1 s after you let go.
 - **See what changed** — a small overlay at the bottom of the screen shows live transcription, the words that were fixed, and a Chinese translation.
 - **Learns your words** — a word list on the home screen (names, project names, tools). Write `Claude: cloud` and Quill decides from context whether "cloud" meant Claude. While idle, it reads your history once a day and suggests words it probably misheard; one tap to add or ignore.
 - **100% local** — speech recognition and the language model run on your machine. History is a plain text file that never leaves it.
@@ -50,21 +49,19 @@ all of that verbatim, or send my voice to the cloud. Quill does the cleanup loca
 
 ```
 hold key → microphone (16 kHz)
-        → speech recognition    English: NVIDIA Parakeet TDT 0.6B v3 (ONNX, CPU) for live text while you talk,
-                                         then Whisper large-v3-turbo (faster-whisper, GPU) re-reads the whole
-                                         recording when you let go, primed with your word list
-                                Chinese: SenseVoice Small (sherpa-onnx, CPU)
+        → speech recognition    Whisper large-v3-turbo (faster-whisper, GPU), primed with your word list:
+                                re-reads everything said so far about once a second for the live overlay,
+                                then the whole recording once more when you let go
         → cleanup / translation  Qwen3 4B via Ollama (GPU if available, falls back to CPU; 8B selectable in Settings)
         → paste at cursor
 ```
 
 Reading the whole recording at once is far more accurate than recognizing short pieces between pauses.
-Without an NVIDIA GPU, Quill uses Parakeet only. Recognition runs in separate processes so the UI stays responsive.
+Recognition runs in a separate process so the UI stays responsive.
 
 ## Install
 
-**Requirements:** Windows 10/11 only (no macOS / Linux) · 16 GB RAM · ~8 GB disk. An NVIDIA GPU with 6 GB+ VRAM is recommended
-(CPU-only works: without an NVIDIA GPU Quill skips Whisper and uses Parakeet only, a bit less accurate, and each sentence takes about 5–8 s to fix).
+**Requirements:** Windows 10/11 only (no macOS / Linux) · 16 GB RAM · ~8 GB disk. An NVIDIA GPU with 6 GB+ VRAM is required (Whisper runs on it).
 
 ```powershell
 git clone https://github.com/FxrcRed/quill.git
@@ -73,9 +70,9 @@ powershell -ExecutionPolicy Bypass -File setup.ps1          # add -Mirror in mai
 ```
 
 `setup.ps1` installs [uv](https://github.com/astral-sh/uv) and Python 3.12 (no system Python needed), the Python packages,
-the three speech models (~2.5 GB), [Ollama](https://ollama.com) and `qwen3:4b` (~2.6 GB), and creates a desktop shortcut.
+the Whisper speech model (~1.6 GB), [Ollama](https://ollama.com) and `qwen3:4b` (~2.6 GB), and creates a desktop shortcut.
 For higher-quality cleanup, also run `ollama pull qwen3:8b` (~5 GB) and pick it in Settings.
-With an NVIDIA GPU it also installs cuBLAS (`nvidia-cublas-cu12`, ~0.5 GB) into the venv for Whisper; without one it skips that and the Whisper model.
+It also installs cuBLAS (`nvidia-cublas-cu12`, ~0.5 GB) into the venv for Whisper.
 Re-running it is safe; it skips what you already have. If something is missing later, Quill's **Settings → Setup** window says what and has a button that runs `setup.ps1`.
 
 Then start **Quill** from the desktop, wait for **READY**, hold **Right Alt** and speak.
@@ -93,7 +90,7 @@ Then start **Quill** from the desktop, wait for **READY**, hold **Right Alt** an
 
 - All of the app is one file: [`app.pyw`](app.pyw) (tkinter + Pillow for the UI).
 - `e2e_test.py [zh]` — end-to-end test without a microphone (feeds a wav at real-time speed).
-- `fix_test.py [pick] [zh]` — compare correction output on real-world phrases after changing prompts.
+- `fix_test.py [zh | zhzh]` — compare correction output on real-world phrases after changing prompts.
 - `term_test.py` — checks how well the model tells a misheard name (cloud → Claude) from the ordinary word.
 - `make_words_demo.py` — regenerates the word-list image.
 - `make_demo.py` — regenerates the GIF and screenshot above.
@@ -101,9 +98,6 @@ Then start **Quill** from the desktop, wait for **READY**, hold **Right Alt** an
 
 ## Credits
 
-- [Parakeet TDT 0.6B v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) by NVIDIA (CC-BY-4.0), ONNX export by
-  [istupakov](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx), run with [onnx-asr](https://github.com/istupakov/onnx-asr)
-- [SenseVoice](https://github.com/FunAudioLLM/SenseVoice) by FunAudioLLM, run with [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx)
 - [Whisper large-v3-turbo](https://huggingface.co/openai/whisper-large-v3-turbo) by OpenAI (MIT), run with [faster-whisper](https://github.com/SYSTRAN/faster-whisper)
 - [Qwen3](https://github.com/QwenLM/Qwen3) (Apache-2.0) served by [Ollama](https://ollama.com)
 - Fonts: [Noto Sans SC](https://github.com/notofonts/noto-cjk) and [Michroma](https://github.com/googlefonts/Michroma-font) (SIL OFL 1.1)

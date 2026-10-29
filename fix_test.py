@@ -1,5 +1,5 @@
 """改错效果测试（只测文字，不用麦克风，可以和 Quill 同时开着）：.venv\\Scripts\\python.exe fix_test.py
-每个用例是按停顿切好的几段原话（和实际一样一段段送去改错），打印拼起来的结果。"""
+每个用例是几段原话（原来按停顿切的），拼成一整句送去改错（和实际一样：松开后 Whisper 整段认出来的一句），打印结果。"""
 import importlib.machinery, importlib.util, sys, time
 from pathlib import Path
 HERE = Path(__file__).parent
@@ -48,22 +48,21 @@ TIDY_CASES = [  # 说中文 → 出中文的规则清理：本来就该这么说
     "我想想，嗯，明天再说吧。", "我我我想去北京。", "这个金额太大了。", "我去北京，去上海，然后回家。", "慢慢来，看看再说。",
 ]
 
-def run(mode='fast', lang='en', out='en'):
+def one(segs, lang='en', out='en'):
+    """和 Job.finish 一样：整句当一段去改。"""
+    return m.Seg(('' if lang == 'zh' else ' ').join(segs), m.Job(False, lang, out).seg_lang).get('fixed')
+
+def run(lang='en', out='en'):
     t0 = time.time()
     if out == 'zh':
         for t in TIDY_CASES: print('规则：', t, '->', m.zh_tidy(t), '（送模型）' if m.zh_needs_llm(m.zh_tidy(t)) else '')
         print()
     for segs in (ZHZH_CASES if out == 'zh' else ZH_CASES if lang == 'zh' else CASES):
-        job, buf, t1 = m.Job(False, mode, lang, out), '', time.time()
-        for s in segs[:-1]:  # 和 Job.update 一样：停顿前是半句话就不切，连着下一段
-            buf = (buf + ' ' + s).strip()
-            if m.sentence_end(buf): job.add(buf); buf = ''
-        job.add((buf + ' ' + segs[-1]).strip()); job.whole()  # 和 Job.finish 一样：松开后整句重改
-        res = (m.zh_join if job.seg_lang == 'zhzh' else m.join_parts)([s.get('fixed' if job.mode == 'fast' else 'natural') for s in job.segs])
+        t1 = time.time(); res = one(segs, lang, out)
         print('说：', ' | '.join(segs)); print('改：', res, f'（{time.time() - t1:.1f}s）'); print()
     print(f'共 {time.time() - t0:.1f}s')
 
 if __name__ == '__main__':
     import threading; threading.Thread(target=m.fix_worker, daemon=True).start()
-    a = sys.argv[1:]  # fix_test.py [fast|pick] [zh | zhzh]（zhzh：说中文 → 出中文）
-    run(next((x for x in a if x in ('fast', 'pick')), 'fast'), 'zh' if {'zh', 'zhzh'} & set(a) else 'en', 'zh' if 'zhzh' in a else 'en')
+    a = sys.argv[1:]  # fix_test.py [zh | zhzh]（zhzh：说中文 → 出中文）
+    run('zh' if {'zh', 'zhzh'} & set(a) else 'en', 'zh' if 'zhzh' in a else 'en')

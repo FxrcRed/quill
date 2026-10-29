@@ -37,7 +37,7 @@ for name in models:
     m.llm('hello', watch=False)  # 先载入，不算时间
     res[name] = []
     for t in texts:
-        t0 = time.time(); out = m.llm(t, 'fast', watch=False); res[name].append((out.get('fixed', ''), out.get('zh', ''), time.time() - t0))
+        t0 = time.time(); out = m.llm(t, watch=False); res[name].append((out.get('fixed', ''), out.get('zh', ''), time.time() - t0))
 for i, t in enumerate(texts):
     print(f'\n[{i + 1}] 说：{t}')
     for name in models:
