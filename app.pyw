@@ -16,7 +16,9 @@ LLM_URL = 'http://127.0.0.1:11434'
 LLM_MODEL = 'qwen3:4b'  # 设置「改错模型」里选（cfg['llm']）：4B 约 2.9GB 显存、快约 35%；8B 约 4.5GB，很乱的话（重说、改口）改得更准
 LLM_MODELS = (('qwen3:4b', '标准 4B'), ('qwen3:8b', '高质量 8B'))
 WHISPER_TIMEOUT = 8   # 松开后 Whisper 整段识别最多等几秒，超时 / 出错就用说话时最后一次预览的结果
-PREVIEW_EVERY = 1.0   # 说话时每隔几秒用 Whisper 把目前为止的整段认一遍，给浮窗看
+PREVIEW_MIN = 1.5     # 说话不到这么久不出预览：Whisper 对刚开口的半个字常编出「请订阅点赞」「优优独播剧场」这类训练数据里的片尾字幕
+PHANTOM = re.compile(r'订阅|点赞|打赏|明镜|独播剧场|字幕志愿|字幕由|Amara|谢谢观看|感谢观看|请不吝|Subtitles by|Thanks for watching', re.I)
+PREVIEW_EVERY = 1.0  # 说话时每隔几秒用 Whisper 把目前为止的整段认一遍，给浮窗看
 LLM_GPU_LAYERS = -1   # （启动时按有没有 NVIDIA 显卡重新定，见 nvidia_gpu）-1 = 放显卡（Ollama 自动，一句约 1.5 秒）；0 = 全用 CPU（约 5~8 秒）。显卡被别的程序占着变慢时会自动临时改用 CPU
 KEEPS = (('2m', '2 分钟'), ('10m', '10 分钟'), ('30m', '30 分钟'), (-1, '不释放'))  # 不用多久后把模型从显存卸掉（约 5~6GB），设置里选；一直说话时每次都续上，不会卸
 SHOW_SECONDS = 3      # 底部浮窗的结果自动消失；点一下固定，再点关闭
@@ -478,6 +480,14 @@ def ensure_ollama(wait=20):
 
 
 # ---- 录音 / 识别 ----
+def gpu_note():
+    """识别慢的时候记一笔：显存、显卡占用率、占 CPU 最多的程序（查是谁把显卡 / 整机占住了）。"""
+    try:
+        g = subprocess.run(['nvidia-smi', '--query-gpu=memory.used,memory.total,utilization.gpu', '--format=csv,noheader'], capture_output=True, text=True, timeout=3, creationflags=0x08000000).stdout.strip()
+        p = subprocess.run(['powershell', '-NoProfile', '-Command', "(Get-Process | Sort-Object CPU -Descending | Select-Object -First 4 | ForEach-Object { $_.ProcessName }) -join ','"], capture_output=True, text=True, timeout=5, creationflags=0x08000000).stdout.strip()
+        return f'| 显卡 {g} | CPU 累计最多 {p}'
+    except Exception as e: return f'| 查显卡失败 {e!r}'
+
 def has_speech(a): return len(a) > RATE * 0.3 and float(np.abs(a).max()) > 0.01
 
 CJK = re.compile(r'[一-鿿]')
@@ -643,8 +653,8 @@ class Engine:
         th = threading.Thread(target=run, daemon=True); th.start()
         def wait():
             th.join(max(0.0, WHISPER_TIMEOUT - (time.time() - t)))
-            if not got: log(f'Whisper 没出结果（{time.time() - t:.1f}s），用预览的'); return ''
-            log(f'Whisper {time.time() - t:.1f}s'); return got[0]
+            if not got: log(f'Whisper 没出结果（{time.time() - t:.1f}s），用预览的', gpu_note()); return ''
+            dt = time.time() - t; log(f'Whisper {dt:.1f}s', gpu_note() if dt > 3 else ''); return got[0]
         return wait
 
     def audio(self):
@@ -666,9 +676,10 @@ class Engine:
             time.sleep(max(0.05, t + PREVIEW_EVERY - time.time()))
             if not self.rec or self.job is not job: return
             t = time.time(); a = self.audio()
-            if not self.wh or not has_speech(a): continue
+            if not self.wh or not has_speech(a) or len(a) < RATE * PREVIEW_MIN: continue
             try: text = self.recognize(a, job.lang)
             except Exception: log('预览识别出错', traceback.format_exc()); return
+            if PHANTOM.search(text) or not re.search(r'\w', text): continue
             if self.rec and self.job is job: job.heard = text; post('live', text, '')
 
     def stop(self):
