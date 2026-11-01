@@ -694,13 +694,13 @@ class Engine:
             t = time.time(); a = self.audio()
             if not self.wh or not has_speech(a) or len(a) < RATE * PREVIEW_MIN: continue
             try: text = self.recognize(a, job.lang)
-            except Exception: log('预览识别出错', traceback.format_exc()); return
+            except Exception: log('预览识别出错', traceback.format_exc()); continue
             if PHANTOM.search(text) or not re.search(r'\w', text): continue
             if self.rec and self.job is job: job.heard = text; post('live', text, '')
 
     def stop(self):
         if not self.rec: return
-        self.rec = False; self.busy = True; lat.clear(); mark('rel')
+        self.rec = False; self.busy = self.job; lat.clear(); mark('rel')  # busy 记是哪一句：上一句的中文翻译出完时别把这一句的 busy 清掉
         threading.Thread(target=self.work, args=(self.audio(), self.job), daemon=True).start()
 
     def work(self, audio, job):
@@ -709,7 +709,7 @@ class Engine:
             log('出错：', traceback.format_exc())
             notify('出了点问题，已记到 run.log。再试一次；还不行就把 run.log 发给 Claude 看。', 'err', True)
         finally:
-            if self.busy: self.busy = False; post('state', self.idle_state())
+            if self.busy is job: self.busy = False; post('state', self.idle_state())
 
     def _work(self, audio, job):
         peak = float(np.abs(audio).max()) if len(audio) else 0.0
@@ -732,7 +732,7 @@ class Engine:
         r0 = lat.get('rel', t)  # 分段计时（松开后第几秒）：Whisper / 改错首字 / 英文写完 / 粘贴
         log('计时 ' + ' '.join(f'{n}={lat[k] - r0:.2f}' for n, k in (('Whisper', 'wh'), ('首字', 'llm_first'), ('英文', 'llm_en'), ('粘贴', 'paste')) if k in lat))
         post('fixed', raw, fixed, job.by_key)
-        self.busy = False; post('state', 'ready')  # 中文翻译还在后台出，不耽误说下一句
+        if self.busy is job: self.busy = False; post('state', 'ready')  # 中文翻译还在后台出，不耽误说下一句
         post('zh', raw, seg.get('zh'))
 
     def probe_record(self, secs):
@@ -757,11 +757,15 @@ class Engine:
             time.sleep(0.02)
             if self.key_paused: down = False; continue
             vk = cfg['hotkey']; d = key_down(vk)
-            if d and not down and vk in (0xA4, 0xA5, 0x5B, 0x5C): tap(0xE8)  # 垫一个空键：单按 Alt 松开会激活菜单栏、单按 Win 会弹开始菜单
-            if d and not down:
-                self.start('key')
-            elif not d and down and self.src == 'key':
-                self.stop()
+            try:  # 出一次错（比如 run.log 被别的程序锁住）线程就退了、快捷键永久失灵 → 记下来接着查
+                if d and not down and vk in (0xA4, 0xA5, 0x5B, 0x5C): tap(0xE8)  # 垫一个空键：单按 Alt 松开会激活菜单栏、单按 Win 会弹开始菜单
+                if d and not down:
+                    self.start('key')
+                elif not d and down and self.src == 'key':
+                    self.stop()
+            except Exception:
+                try: log('快捷键出错', traceback.format_exc())
+                except Exception: pass
             down = d
 
 # ---- 识别子进程 ----
@@ -847,6 +851,51 @@ def save_history(raw, fixed, zh):
 def set_clip(text):
     root.clipboard_clear(); root.clipboard_append(text); root.update()
 
+# 粘贴前整份备份原剪贴板（tk 的 clipboard_get 只认文字，图片、文件会被这句覆盖找不回来）。只在界面线程调。
+# 只备份 HGLOBAL 格式；GDI 句柄类（位图、调色板、图元文件、私有/GDI 对象段）跳过——复制图片的程序一般同时给 CF_DIB，系统会从它合成位图
+_W = ctypes.wintypes
+for _f, _a, _r in ((user32.OpenClipboard, [_W.HWND], _W.BOOL), (user32.CloseClipboard, [], _W.BOOL), (user32.EmptyClipboard, [], _W.BOOL),
+                   (user32.EnumClipboardFormats, [_W.UINT], _W.UINT), (user32.GetClipboardData, [_W.UINT], _W.HANDLE),
+                   (user32.SetClipboardData, [_W.UINT, _W.HANDLE], _W.HANDLE), (kernel32.GlobalSize, [_W.HGLOBAL], ctypes.c_size_t),
+                   (kernel32.GlobalLock, [_W.HGLOBAL], ctypes.c_void_p), (kernel32.GlobalUnlock, [_W.HGLOBAL], _W.BOOL),
+                   (kernel32.GlobalAlloc, [_W.UINT, ctypes.c_size_t], _W.HGLOBAL), (kernel32.GlobalFree, [_W.HGLOBAL], _W.HGLOBAL)):
+    _f.argtypes, _f.restype = _a, _r
+
+def _clip_open():
+    for _ in range(10):  # 别的程序正占着剪贴板时稍等
+        if user32.OpenClipboard(root.winfo_id()): return True
+        time.sleep(0.02)
+    return False
+
+def clip_save():
+    """返回 [(格式, 数据)]；打不开返回 None。"""
+    if not _clip_open(): return None
+    out, f = [], 0
+    try:
+        while True:
+            f = user32.EnumClipboardFormats(f)
+            if not f: break
+            if f in (2, 3, 9, 14, 0x82, 0x83, 0x8E) or 0x200 <= f <= 0x3FF: continue
+            h = user32.GetClipboardData(f)
+            p = kernel32.GlobalLock(h) if h else None
+            if not p: continue
+            try: out.append((f, ctypes.string_at(p, kernel32.GlobalSize(h))))
+            finally: kernel32.GlobalUnlock(h)
+    finally: user32.CloseClipboard()
+    return out
+
+def clip_restore(saved):
+    if not _clip_open(): return
+    try:
+        user32.EmptyClipboard()
+        for f, b in saved:
+            h = kernel32.GlobalAlloc(0x0002, max(1, len(b)))  # GMEM_MOVEABLE
+            p = kernel32.GlobalLock(h) if h else None
+            if not p: continue
+            ctypes.memmove(p, b, len(b)); kernel32.GlobalUnlock(h)
+            if not user32.SetClipboardData(f, h): kernel32.GlobalFree(h)
+    finally: user32.CloseClipboard()
+
 _last_paste = {'hwnd': None, 'text': '', 't': 0.0}
 
 def paste(text):
@@ -860,15 +909,17 @@ def paste(text):
     last.update(hwnd=hwnd, text=text, t=time.time())
     ev, box = threading.Event(), {}
     def put():
-        try: box['old'] = root.clipboard_get()
-        except tk.TclError: box['old'] = None
+        box['old'] = clip_save()
         set_clip(text); ev.set()
-    root.after(0, put); ev.wait(2); time.sleep(0.05)
+    root.after(0, put)
+    if not ev.wait(2):  # 界面线程卡住：这时按 Ctrl+V 粘出去的是原剪贴板 → 不粘，这句等界面缓过来放进剪贴板
+        log('粘贴：界面 2 秒没响应，没按 Ctrl+V'); return notify('这句已复制，按 Ctrl+V 粘贴。', 'warn', True)
+    time.sleep(0.05)
     for vk, fl in ((0x11, 0), (0x56, 0), (0x56, 2), (0x11, 2)): user32.keybd_event(vk, 0, fl, 0)
     mark('paste')
     def restore():  # 等目标程序读完剪贴板再还原；放后台，不拖着浮窗出结果 / 回到 ready
         time.sleep(0.5)
-        if box.get('old') is not None: root.after(0, lambda: set_clip(box['old']))
+        if box.get('old'): root.after(0, lambda: clip_restore(box['old']))
     threading.Thread(target=restore, daemon=True).start()
 
 
