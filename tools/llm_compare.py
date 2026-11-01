@@ -1,10 +1,10 @@
 """改错模型对比：同一批原话分别给几个 Ollama 模型改（直接输入模式），打印结果和耗时。
-.venv\\Scripts\\python.exe llm_compare.py [模型 ...]   （默认 qwen3:8b qwen3:4b）
+.venv\\Scripts\\python.exe tools\\llm_compare.py [模型 ...]   （默认 qwen3:8b qwen3:4b）
 原话 = recordings\\*.wav 的 Whisper 识别结果（缓存在 recordings\\whisper.json）+ fix_test.py 的英文用例。"""
 import importlib.machinery, importlib.util, json, os, sys, time, wave
 from pathlib import Path
 import numpy as np
-HERE = Path(__file__).parent
+HERE = Path(__file__).resolve().parent.parent
 def load_py(name, path):
     loader = importlib.machinery.SourceFileLoader(name, str(path)); spec = importlib.util.spec_from_loader(name, loader)
     mod = importlib.util.module_from_spec(spec); loader.exec_module(mod); return mod

@@ -14,7 +14,7 @@ def pump(t):
     end = time.time() + t
     while time.time() < end: root.update(); m.sync_chromes(); time.sleep(0.02)
 def shot(name):
-    pr = subprocess.Popen([sys.executable, str(HERE / 'shot.py'), m.TITLE, str(HERE / 'e2e_out' / name)])
+    pr = subprocess.Popen([sys.executable, str(HERE / 'tools' / 'shot.py'), m.TITLE, str(HERE / 'e2e_out' / name)])
     while pr.poll() is None: root.update(); time.sleep(0.02)
 root.geometry(f'+{int(sys.argv[2])}+40'); pump(0.5)
 def rects():

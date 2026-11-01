@@ -28,7 +28,7 @@
 
 ## 功能
 
-- **在哪都能按住说话**：任何程序里按住右 Alt（可改），松开后粘贴到光标处，原来的剪贴板会恢复。
+- **在哪都能按住说话**：任何程序里按住右 Ctrl（可改），松开后粘贴到光标处，原来的剪贴板会恢复。
 - **不只改语法**：去掉语气词、结巴、说一半放弃的话和改口（「不对，我是说……」），修正时态、冠词、单复数。
 - **说中文，出英文**：主页点一下 **EN / 中** 切换，中英混着说也行。也可以出干净的中文（设置 →「说中文时」）。
 - **快**：英文松开后约 1 秒出字，中文约半秒。
@@ -56,7 +56,12 @@ Whisper 整段认，比按停顿一段段认准得多（不会把半句话认成
 
 ## 安装
 
-**需要：** 仅 Windows 10/11（不支持 macOS / Linux）· 16 GB 内存 · 约 8 GB 硬盘。需要 6 GB 以上显存的 N 卡（Whisper 在显卡上跑）。
+**需要**
+
+- 仅 Windows 10/11（不支持 macOS / Linux），16 GB 内存。
+- 6 GB 以上显存的 N 卡，驱动 **527.41 或更新**（CUDA 12 的要求）。Whisper 在显卡上跑，没有 CPU 模式；没有 N 卡时 `setup.ps1` 会直接报错退出。在 PowerShell 里运行 `nvidia-smi` 自查：能打出带驱动版本的表格就行。
+- 安装时要联网；装 Ollama 要用 `winget`（随微软商店的「应用安装程序」App Installer 提供）。已经有 Ollama 就不需要 winget。
+- 约 8 GB 硬盘：Whisper 模型 1.6 GB、`qwen3:4b` 2.6 GB、Ollama 本体约 1.5 GB、cuBLAS 0.5 GB、Python 3.12 和其他依赖包约 1 GB。可选的 `qwen3:8b` 再加 5 GB。
 
 ```powershell
 git clone https://github.com/FxrcRed/quill.git
@@ -64,11 +69,12 @@ cd quill
 powershell -ExecutionPolicy Bypass -File setup.ps1 -Mirror     # 国内网络加 -Mirror，从 hf-mirror.com 下模型
 ```
 
-`setup.ps1` 会装好 [uv](https://github.com/astral-sh/uv) 和 Python 3.12（不用自己装 Python）、依赖包、Whisper 模型（约 1.6 GB）、
-[Ollama](https://ollama.com) 和 `qwen3:4b`（约 2.6 GB），并在桌面建快捷方式。可以重复运行。以后缺东西，Quill 的「设置 → 准备」会说缺什么，点一下就补。
+`setup.ps1` 会装好 [uv](https://github.com/astral-sh/uv) 和 Python 3.12（不用自己装 Python）、依赖包、Whisper 模型、
+[Ollama](https://ollama.com) 和 `qwen3:4b`，并在桌面建快捷方式。可以重复运行。哪一步失败会用红字停下，并写明下一步怎么办（一般是：排除原因，开一个新的 PowerShell 窗口再跑一遍）。
+以后缺东西，设置里的扳手图标（**准备情况**）会说缺什么，点一下就补。
 想要理顺得更好，可以再 `ollama pull qwen3:8b`（约 5 GB），在设置里换。
 
-装好后双击桌面上的 **Quill**，等出现 **READY**，按住 **右 Alt** 说话。
+装好后双击桌面上的 **Quill**。第一次启动要把 Whisper 模型载进显卡、并启动 Ollama，需要几秒到一分钟左右，刚开机或硬盘慢时更久。状态卡片显示 **WAKING**，直到变成 **READY**；**READY 之前按快捷键没有反应**。然后按住 **右 Ctrl** 说话。
 
 ## 使用小贴士
 
@@ -78,6 +84,10 @@ powershell -ExecutionPolicy Bypass -File setup.ps1 -Mirror     # 国内网络加
 - 记录（**HISTORY**）：最近 20 句的原话、英文和中文意思；标题行右边的图标可以直接打开记录文件。可以关掉不存、只留最近 7 / 30 天，或一键清空。
 - **常用词**（**WORDS**）：可以加、改、删；标题行右边的图标用记事本打开 `words.txt`。一行一条：`正确写法: 听错的写法, 另一种听错的写法`（冒号后面可以不写）。
 - Ollama 随 Quill 自动开、退出时一起关；不用时模型自动从显存卸掉（设置里选 2 / 10 / 30 分钟或不释放）。
+
+## 已知问题
+
+- 快捷键别用 Alt：在 Claude 桌面版等程序里单按 Alt 会弹出菜单、抢走焦点，导致粘贴失败。
 
 ## 开发
 
@@ -90,6 +100,7 @@ powershell -ExecutionPolicy Bypass -File setup.ps1 -Mirror     # 国内网络加
 - `harvest.py`：把每句识别和你在 Claude Code 里改完发出去的消息配对，自动收测试样本（要在 `settings.json` 里开 `"save_audio": true`）。
 - `make_words_demo.py`：重新生成常用词演示图。
 - `make_demo.py`：重新生成上面的 GIF 和截图。
+- `tools/`：开发用的一次性小工具（窗口截图、界面布局测试、常用词和模型对比脚本、图标和分享预览图生成）。用 Quill 不需要管它们。`selftest.bat` 和 `start.bat` 是调试用启动器（自检；带黑框启动看报错），平时用桌面快捷方式或 `start.vbs`。
 - 这个项目是和 Claude Code 一起做的。
 
 ## 致谢

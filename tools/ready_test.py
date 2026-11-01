@@ -1,4 +1,4 @@
-r"""用法：.venv\Scripts\python.exe ready_test.py <项目目录> <截图前缀>。「准备情况」窗口 + 状态判断的测试：不启动 Quill 本体（用户的 Quill 开着也行），
+r"""用法：.venv\Scripts\python.exe tools\ready_test.py <项目目录> <截图前缀>。「准备情况」窗口 + 状态判断的测试：不启动 Quill 本体（用户的 Quill 开着也行），
 假装各种缺东西的情形（eng.wh_state、Ollama 状态、模型文件）检查 readiness() 的结果，再把窗口截成 <前缀>_<情形>.png。"""
 import importlib.machinery, importlib.util, ctypes, subprocess, sys, time
 import tkinter as tk
@@ -41,7 +41,7 @@ def shot(tag):
     w.refresh(True)
     m.place_side(app, w.w, w.W); w.w.deiconify(); w.w.chrome.sync(); w.w.lift()
     for _ in range(15): root.update(); m.sync_chromes(); time.sleep(0.03)
-    pr = subprocess.Popen([sys.executable, str(HERE / 'shot.py'), '准备情况', f'{OUT}_{tag}.png'])
+    pr = subprocess.Popen([sys.executable, str(HERE / 'tools' / 'shot.py'), '准备情况', f'{OUT}_{tag}.png'])
     while pr.poll() is None: root.update(); time.sleep(0.02)
 m.eng.wh_state = 'nolib'; app.ol_last = 'no_model'; shot('lack')
 m.eng.wh_state = 'nogpu'; m.nvidia_gpu = lambda: ''; app.ol_last = 'ok'; shot('nogpu')

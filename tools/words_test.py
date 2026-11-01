@@ -1,4 +1,4 @@
-r"""用法：.venv\Scripts\python.exe words_test.py <项目目录> <截图.png>。常用词窗口测试：WORDS_FILE 指到临时文件，不动真的 words.txt。增 / 并 / 改 / 删后检查文件，再截一张窗口图。"""
+r"""用法：.venv\Scripts\python.exe tools\words_test.py <项目目录> <截图.png>。常用词窗口测试：WORDS_FILE 指到临时文件，不动真的 words.txt。增 / 并 / 改 / 删后检查文件，再截一张窗口图。"""
 import ctypes, importlib.machinery, importlib.util, sys, tempfile, time
 import tkinter as tk
 from pathlib import Path
@@ -41,6 +41,6 @@ for _ in range(20): root.update(); m.sync_chromes(); time.sleep(0.03)
 u = ctypes.windll.user32; r = ctypes.wintypes.RECT() if hasattr(ctypes, 'wintypes') else None
 import ctypes.wintypes as W
 r = W.RECT(); u.GetWindowRect(ctypes.c_void_p(w.w.chrome.hwnd), ctypes.byref(r))
-import subprocess; pr = subprocess.Popen([sys.executable, str(HERE / 'shot.py'), '常用词', str(OUT)])
+import subprocess; pr = subprocess.Popen([sys.executable, str(HERE / 'tools' / 'shot.py'), '常用词', str(OUT)])
 while pr.poll() is None: root.update(); time.sleep(0.02)
 print('图', OUT, r.right - r.left, r.bottom - r.top, '改了', app.changed, '次')

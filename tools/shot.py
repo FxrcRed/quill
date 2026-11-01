@@ -1,4 +1,4 @@
-r"""用 PrintWindow 截某个 Tk 窗口（被挡住也能截）。用法：.venv\Scripts\python.exe shot.py 记录 out.png"""
+r"""用 PrintWindow 截某个 Tk 窗口（被挡住也能截）。用法：.venv\Scripts\python.exe tools\shot.py 记录 out.png"""
 import ctypes, ctypes.wintypes as W, sys
 from PIL import Image
 ctypes.windll.shcore.SetProcessDpiAwareness(1)

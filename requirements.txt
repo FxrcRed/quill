@@ -1,8 +1,8 @@
 onnxruntime==1.20.1  # pulled in by faster-whisper; 1.22+ spends ~7.7s in Env creation (device discovery) on Windows
-sounddevice>=0.5
-numpy>=2.0
-pillow>=11
-huggingface_hub>=0.24
-faster-whisper>=1.1
-ctranslate2>=4.5
-pypinyin>=0.50
+sounddevice>=0.5,<0.6
+numpy>=2.0,<3
+pillow>=11,<14
+huggingface_hub>=0.24,<3
+faster-whisper>=1.1,<2
+ctranslate2>=4.5,<5  # 5.x needs CUDA 13
+pypinyin>=0.50,<1

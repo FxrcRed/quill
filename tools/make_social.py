@@ -1,8 +1,8 @@
 """GitHub 分享预览图 docs/social.png（1280×640）：左边图标 + 名字 + 一句话，右边主窗口截图（先跑 make_demo.py 生成 docs/main.png）。
-.venv\\Scripts\\python.exe make_social.py，然后在仓库 Settings → Social preview 上传。"""
+.venv\\Scripts\\python.exe tools\\make_social.py，然后在仓库 Settings → Social preview 上传。"""
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
-HERE = Path(__file__).parent
+HERE = Path(__file__).resolve().parent.parent
 W, H = 1280, 640
 im = Image.new('RGBA', (W, H), (230, 230, 230, 255)); d = ImageDraw.Draw(im)
 icon = Image.open(HERE / 'icon_dial.png').convert('RGBA').resize((120, 120), Image.LANCZOS); im.alpha_composite(icon, (90, 120))

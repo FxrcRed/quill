@@ -69,7 +69,7 @@ def scenario():
 
 def finish():
     app.notice_until = 0; app.set_state('ready')  # 截主窗口前清掉「显卡被占着」这类提示
-    q = subprocess.Popen([sys.executable, str(HERE / 'shot.py'), 'Quill', str(OUT / 'main.png')])
+    q = subprocess.Popen([sys.executable, str(HERE / 'tools' / 'shot.py'), 'Quill', str(OUT / 'main.png')])
     while q.poll() is None: root.update(); time.sleep(0.02)
     shot = Image.open(OUT / 'main.png').convert('RGBA'); mask = Image.new('L', shot.size, 0)  # 圆角外面透明（GitHub 深色主题下不露白角）
     ImageDraw.Draw(mask).rounded_rectangle((3, 3, shot.width - 4, shot.height - 4), round(48 * S) - 3, fill=255)  # 往里收 3 像素：裁掉窗口边缘的深色残边

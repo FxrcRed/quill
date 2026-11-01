@@ -29,9 +29,9 @@ all of that verbatim, or send my voice to the cloud. Quill does the cleanup loca
 
 ## Features
 
-- **Push-to-talk anywhere** — hold Right Alt (configurable) in any app; the text is pasted at the cursor and your clipboard is restored.
+- **Push-to-talk anywhere** — hold Right Ctrl (configurable) in any app; the text is pasted at the cursor and your clipboard is restored.
 - **Cleans up speech, not just grammar** — removes fillers, stutters, false starts and self-corrections ("no, I mean…"); fixes tense, articles and plurals.
-- **Speak Chinese, get English** — tap **EN / 中** on the home screen; mixed Chinese-English works too. Or get clean Chinese instead (Settings → *When speaking Chinese*).
+- **Speak Chinese, get English** — tap **EN / 中** on the home screen; mixed Chinese-English works too. Or get clean Chinese instead (Settings → *When speaking Chinese* / 说中文时 → 出中文).
 - **Fast** — English appears about 1 s after you let go, clean Chinese in about half a second.
 - **See what changed** — an overlay at the bottom of the screen shows the live text, the words that were fixed and a Chinese translation. With several monitors it appears on the one you're working on.
 - **Learns your words** — names, projects, tools. Write `Claude: cloud` and Quill decides from context whether "cloud" meant Claude. Once a day it suggests words it probably misheard.
@@ -58,7 +58,12 @@ Recognition runs in a separate process so the UI stays responsive.
 
 ## Install
 
-**Requirements:** Windows 10/11 only (no macOS / Linux) · 16 GB RAM · ~8 GB disk. An NVIDIA GPU with 6 GB+ VRAM is required (Whisper runs on it).
+**Requirements**
+
+- Windows 10/11 only (no macOS / Linux), 16 GB RAM.
+- An NVIDIA GPU with 6 GB+ VRAM and an NVIDIA driver **527.41 or newer** (needed by CUDA 12). Whisper runs on the GPU; there is no CPU mode, and `setup.ps1` stops if it finds no NVIDIA GPU. Check with `nvidia-smi` in PowerShell: it should print a table with a driver version.
+- Internet during setup, and `winget` (it comes with "App Installer" from the Microsoft Store) to install Ollama. If you already have Ollama, winget is not needed.
+- About 8 GB of disk: Whisper model 1.6 GB, `qwen3:4b` 2.6 GB, Ollama itself about 1.5 GB, cuBLAS 0.5 GB, Python 3.12 and the other packages about 1 GB. The optional `qwen3:8b` adds 5 GB.
 
 ```powershell
 git clone https://github.com/FxrcRed/quill.git
@@ -67,20 +72,25 @@ powershell -ExecutionPolicy Bypass -File setup.ps1          # add -Mirror in mai
 ```
 
 `setup.ps1` installs [uv](https://github.com/astral-sh/uv) and Python 3.12 (no system Python needed), the packages,
-the Whisper model (~1.6 GB), [Ollama](https://ollama.com) with `qwen3:4b` (~2.6 GB), and a desktop shortcut.
-It is safe to re-run. If something goes missing later, **Settings → Setup** in Quill says what and runs it for you.
-For better cleanup, `ollama pull qwen3:8b` (~5 GB) and pick it in Settings.
+the Whisper model, [Ollama](https://ollama.com) with `qwen3:4b`, and a desktop shortcut.
+It is safe to re-run. If a step fails it stops with a red message and what to do next (usually: fix the cause, open a new PowerShell window, run it again).
+If something goes missing later, the wrench icon in Quill's settings (**准备情况**, "Setup") says what and fixes it for you.
+For better cleanup, `ollama pull qwen3:8b` (~5 GB) and pick it in the settings.
 
-Then start **Quill** from the desktop, wait for **READY**, hold **Right Alt** and speak.
+Then start **Quill** from the desktop. The first start loads the Whisper model onto the GPU and starts Ollama: it takes a few seconds to about a minute, longer right after a reboot or on a slow disk. The status card says **WAKING** until it shows **READY**, and **the hotkey does nothing before READY**. Then hold **Right Ctrl** and speak.
 
 ## Usage tips
 
 - **EN / 中** (top right of the status card) chooses the language you speak. Output is English, unless you set *When speaking Chinese* → 出中文 in Settings.
-- Below the status card are **HISTORY** and **WORDS** buttons and a settings gear. Settings: microphone, hotkey (click *Record* and press any key), output mode; the three round icons at the top right are Setup, Self-test (checks every part) and Close.
+- Below the status card are **HISTORY** and **WORDS** buttons and a settings gear. Settings: microphone, hotkey (click *Record* (录制) and press any key), output mode; the three round icons at the top right are Setup (准备情况), Self-test (自检, checks every part) and Close. The app's interface is in Chinese.
 - The shrink button (two arrows, top right) turns Quill to a floating ball at the edge of the screen; click it to come back.
 - **HISTORY** keeps the last 20 sentences (the icon in its title row opens the file): the original speech, the English, and the Chinese meaning. You can turn saving off, keep only the last 7 / 30 days, or clear it.
 - **WORDS**: add, edit or delete entries; the icon in its title row opens `words.txt` in a text editor. One entry per line: `Correct spelling: misheard, another misheard` (the part after the colon is optional).
 - Ollama is started with Quill and stopped when Quill quits; the model leaves GPU memory after it sits idle (2 / 10 / 30 minutes, or never — in Settings).
+
+## Known issues
+
+- Don't use Alt as the hotkey. In some apps, such as the Claude desktop app, tapping Alt opens the menu and steals focus, so the paste fails.
 
 ## Development
 
@@ -93,6 +103,7 @@ Then start **Quill** from the desktop, wait for **READY**, hold **Right Alt** an
 - `harvest.py` — collects test samples by pairing each dictation with the edited message you sent in Claude Code (needs `"save_audio": true` in `settings.json`).
 - `make_words_demo.py` — regenerates the word-list image.
 - `make_demo.py` — regenerates the GIF and screenshot above.
+- `tools/` — one-off development helpers (window screenshots, UI layout tests, word-list and model comparison scripts, icon and social-preview generators). You don't need them to use Quill. `selftest.bat` and `start.bat` are debug launchers (self-test, and start with a console to see errors); the desktop shortcut and `start.vbs` start Quill normally.
 - The project was built together with Claude Code.
 
 ## Credits

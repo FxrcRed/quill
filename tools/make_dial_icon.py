@@ -1,12 +1,12 @@
 """生成 Quill 图标 icon_dial.ico：和主页圆盘一样（浅灰圆盘 + 刻度圈 + 6 根黑色声波条），不带文字。
-.venv\\Scripts\\python.exe make_dial_icon.py
+.venv\\Scripts\\python.exe tools\\make_dial_icon.py
 大尺寸带 60 根刻度；32 像素及以下只画圆盘和声波条（刻度太细会糊）。换桌面图标要换文件名（Explorer 按路径缓存）。"""
 import math
 from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter
 
-HERE = Path(__file__).parent
+HERE = Path(__file__).resolve().parent.parent
 BASE = (0.34, 0.68, 1.0, 0.55, 0.84, 0.40)  # 和 app.pyw 的 BAR_BASE 一样（READY 时的高矮）
 SIZES = (256, 128, 64, 48, 40, 32, 24, 20, 16)
 

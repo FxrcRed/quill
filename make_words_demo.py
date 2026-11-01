@@ -57,7 +57,7 @@ def scenario():
         root.after(0, finish)
 
 def grab(title):
-    p = HERE / '_shot.png'; q = subprocess.Popen([sys.executable, str(HERE / 'shot.py'), title, str(p)])
+    p = HERE / '_shot.png'; q = subprocess.Popen([sys.executable, str(HERE / 'tools' / 'shot.py'), title, str(p)])
     while q.poll() is None: root.update(); time.sleep(0.02)  # PrintWindow 要等本进程处理消息，不能干等
     im = Image.open(p).convert('RGBA'); p.unlink(); return im
 

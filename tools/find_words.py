@@ -1,11 +1,11 @@
 # 手动扫一遍全部 history.txt，找可能听错的词（工具名、人名、中英混说的词），列出来。只读不改。
 # Quill 自己每天闲着时也会扫新记录，说过 ≥2 次的放在记录窗口的「常用词」卡片里（app.pyw 的 find_candidates / word_sugs）。
-# 用法：.venv\Scripts\python.exe find_words.py        约 1~2 分钟（本机 qwen3:8b）
+# 用法：.venv\Scripts\python.exe tools\find_words.py        约 1~2 分钟（本机 qwen3:8b）
 import importlib.machinery, importlib.util, re, sys
 from collections import Counter
 from pathlib import Path
 
-HERE = Path(__file__).parent
+HERE = Path(__file__).resolve().parent.parent
 sys.argv = [sys.argv[0]]
 spec = importlib.util.spec_from_loader('app', importlib.machinery.SourceFileLoader('app', str(HERE / 'app.pyw')))
 m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
