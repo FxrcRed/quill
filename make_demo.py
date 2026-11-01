@@ -1,6 +1,6 @@
 """生成 README 用的演示图：.venv\\Scripts\\python.exe make_demo.py
 用 Windows 语音合成说两句（英文结巴 + 中文改口），按实时速度喂给 Quill（不用麦克风、不真的粘贴、不写 history），
-每 0.1 秒记一帧真实的底部浮窗，拼上一个假的输入框和「按住右 Alt」提示 → docs/demo.gif；再截主窗口 → docs/main.png。
+每 0.1 秒记一帧真实的底部浮窗，拼上一个假的输入框和「按住右 Ctrl」提示 → docs/demo.gif；再截主窗口 → docs/main.png。
 要先关掉正在运行的 Quill（Stop-Process -Force -Id (Get-CimInstance Win32_Process -Filter "Name='pythonw.exe'" | ? CommandLine -match 'voice-input').ProcessId）。"""
 import ctypes, importlib.machinery, importlib.util, subprocess, sys, threading, time, wave
 import tkinter as tk
@@ -38,7 +38,7 @@ def ulw(h, img, x, y): orig(h, img, x, y); latest[0] = img.copy()
 m.ulw = ulw
 m.Overlay.grab_backdrop = lambda self, box: Image.new('RGBA', (box[2] - box[0], box[3] - box[1]), (238, 238, 240, 255))  # 玻璃后面用固定底色，不截真实屏幕
 audio = {lang: tts(lang, text, HERE / f'_demo_{lang}.wav') for lang, text in LINES}
-m.cfg.update(lang='en', hotkey=0xA5, zh_out='en')  # 演示用默认快捷键右 Alt
+m.cfg.update(lang='en', hotkey=0xA3, zh_out='en', theme='light')  # 演示用默认快捷键右 Ctrl；固定浅色，不跟系统
 app = m.App(root); root.deiconify()
 for t in (m.fix_worker, m.eng.load): threading.Thread(target=t, daemon=True).start()
 
@@ -89,7 +89,7 @@ def save_gif(out, path, r=28):
     gif[0].save(path, save_all=True, append_images=gif[1:], duration=100, loop=0, optimize=True, transparency=127)
 
 def build():
-    """拼 GIF：上面一个输入框（凸起卡片），中间「按住右 Alt」，下面是真实的底部浮窗。坐标按 100% 写，乘 S。"""
+    """拼 GIF：上面一个输入框（凸起卡片），中间「按住右 Ctrl」，下面是真实的底部浮窗。坐标按 100% 写，乘 S。"""
     ov = [f for f, *_ in frames if f is not None]
     oh = max(f.height for f in ov)
     W, top = 760, 262; H = top + oh / S + 8
@@ -108,7 +108,7 @@ def build():
             cy = (y - 28 if lines else 78) * S
             d.line((cx, cy + 3 * S, cx, cy + 22 * S), fill=m.INK, width=max(1, round(1.5 * S)))
         (m.inset if held else m.raised)(im, 40, 202, 130, 38, 19, d=4 if held else 5)
-        d.text((105 * S, 221 * S), 'Right Alt', font=fk, fill=m.INK if held else '#555555', anchor='mm')
+        d.text((105 * S, 221 * S), 'Right Ctrl', font=fk, fill=m.INK if held else '#555555', anchor='mm')
         d.text((186 * S, 221 * S), ('holding · speak ' + ('Chinese' if lang == 'zh' else 'English')) if held else 'hold to talk',
                font=fl, fill=m.SUB, anchor='lm')
         d.text((720 * S, 221 * S), 'input: ' + ('中文' if lang == 'zh' else 'English'), font=fl, fill=m.SUB, anchor='rm')

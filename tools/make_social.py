@@ -12,7 +12,7 @@ small = ImageFont.truetype(str(HERE / 'fonts' / 'NotoSansSC-Medium.otf'), 26)
 d.text((86, 270), 'QUILL', font=title, fill=(30, 30, 30))
 for i, t in enumerate(['Offline voice typing for Windows.', 'Speak messy English or Chinese,', 'get clean English at your cursor.']):
     d.text((90, 380 + i * 48), t, font=body, fill=(43, 43, 43))
-d.text((90, 545), 'Parakeet · SenseVoice · Qwen3 · 100% local', font=small, fill=(140, 140, 140))
+d.text((90, 545), 'Whisper · Qwen3 · 100% local', font=small, fill=(140, 140, 140))
 shot = Image.open(HERE / 'docs' / 'main.png').convert('RGBA'); s = 560 / shot.height
 shot = shot.resize((round(shot.width * s), 560), Image.LANCZOS); im.alpha_composite(shot, (W - shot.width - 90, 40))
 im.convert('RGB').save(HERE / 'docs' / 'social.png'); print('docs/social.png', im.size)
