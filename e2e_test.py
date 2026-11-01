@@ -13,7 +13,7 @@ loader = importlib.machinery.SourceFileLoader('app', str(HERE / 'app.pyw')); spe
 m = importlib.util.module_from_spec(spec); loader.exec_module(m)
 m.load_fonts()
 root = tk.Tk(); root.withdraw(); m.root = root; m.S = root.winfo_fpixels('1i') / 96
-m.setup_fonts(root)
+m.setup_fonts(root); m.apply_theme(m.system_theme())  # QUILL_THEME=dark 看深色浮窗
 m.save_history = lambda *a: None
 latest = [None]; orig = m.ulw
 def ulw(h, img, x, y): orig(h, img, x, y); latest[0] = img

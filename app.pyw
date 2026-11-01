@@ -76,11 +76,44 @@ Reply JSON only: {"fixed": "<cleaned-up Chinese>"}""",
 }
 
 MIC_HINT = '麦克风没有声音：先按笔记本的麦克风静音键（常见 F4 或 Fn+F4，灯亮=静音），或在设置里换一个麦克风。'
-# 软 UI（neumorphism）配色：同一种浅灰底，凸起/凹陷全靠左上白光、右下灰影
-BG, INSET, LIGHT, DARK = '#E6E6E6', '#DFDFDF', '#FFFFFF', '#BDBDBD'
-INK, TEXT, SUB, TICK, TICK_MAJ = '#1E1E1E', '#444444', '#8C8C8C', '#C6C6C6', '#8F8F8F'  # 字只用两种颜色：TEXT 正文 / SUB 说明（INK 是声波条那些画的东西）
-GREEN, ORANGE, RED, TOAST_BG = '#2F9E5B', '#D9822B', '#D64541', '#EFEFEF'
-YELLOW = '#E5B93C'  # 主页 READY 右边的状态点：待机（没声音）
+# 软 UI（neumorphism）配色，浅 / 深两套，跟随 Windows「应用模式」（apply_theme 把一套写进下面这些全局名字）。
+# 浅色：同一种浅灰底，凸起 / 凹陷全靠左上白光、右下灰影。深色（参考 macOS 深色）：不是纯黑，层次靠明度——
+# 窗口底最暗，卡片亮一档，卡片上的按钮再亮一档；凸起靠一圈很淡的上亮边 + 下面的黑影。
+# 字只用两种颜色：TEXT 正文 / SUB 说明（INK 是标题和声波条那些画的东西）；CARD 卡片和圆盘，FACE 按钮面。
+THEMES = {
+    'light': dict(BG='#E6E6E6', CARD='#E6E6E6', FACE='#E6E6E6', INSET='#DFDFDF', LIGHT='#FFFFFF', DARK='#BDBDBD',
+                  INK='#1E1E1E', TEXT='#444444', SUB='#8C8C8C', TICK='#C6C6C6', TICK_MAJ='#8F8F8F', ICON_C='#555555',
+                  GREEN='#2F9E5B', ORANGE='#D9822B', RED='#D64541', YELLOW='#E5B93C',
+                  PRESSED='#D8D8D8', RULE='#DCDCDC', THUMB='#9A9A9E', BALL='#EEEEF0', SHADOW=(40, 40, 48),
+                  BARS=('#4A4A50', '#0E0E10'), BAR_ERR=('#FF9186', '#D64541'), GLASS=(247, 247, 249)),
+    'dark': dict(BG='#1C1C1E', CARD='#262628', FACE='#303033', INSET='#18181A', LIGHT='#3C3C40', DARK='#000000',
+                 INK='#F2F2F7', TEXT='#D1D1D6', SUB='#8E8E93', TICK='#3A3A3C', TICK_MAJ='#7C7C80', ICON_C='#AEAEB2',
+                 GREEN='#30D158', ORANGE='#FF9F0A', RED='#FF453A', YELLOW='#FFD60A',
+                 PRESSED='#3A3A3C', RULE='#3A3A3C', THUMB='#636366', BALL='#2C2C2E', SHADOW=(0, 0, 0),
+                 BARS=('#C7C7CC', '#FFFFFF'), BAR_ERR=('#FF9186', '#FF453A'), GLASS=(30, 30, 32)),
+}
+THEME = 'light'
+
+def system_theme():
+    """Windows 设置里「选择默认应用模式」：AppsUseLightTheme=0 是深色。环境变量 QUILL_THEME=light / dark 可以强制（截图测试用）。"""
+    if os.environ.get('QUILL_THEME') in THEMES: return os.environ['QUILL_THEME']
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r'Software\Microsoft\Windows\CurrentVersion\Themes\Personalize') as k:
+            return 'light' if winreg.QueryValueEx(k, 'AppsUseLightTheme')[0] else 'dark'
+    except OSError: return 'light'
+
+def apply_theme(name):
+    """换一套配色：改全局颜色名，清掉按颜色画好的缓存。已经画出来的窗口要 App.rebuild() 重建才会变。"""
+    global THEME
+    THEME = name; globals().update(THEMES[name])
+    for cache in ('_sprites', '_grads'):
+        if cache in globals(): globals()[cache].clear()
+    for cls in ('History', 'Overlay'):  # 记录 / 常用词的渐隐带、浮窗的小图标
+        if cls in globals(): getattr(globals()[cls], '_fades' if cls == 'History' else '_badges').clear()
+
+(BG, CARD, FACE, INSET, LIGHT, DARK, INK, TEXT, SUB, TICK, TICK_MAJ, ICON_C, GREEN, ORANGE, RED, YELLOW,
+ PRESSED, RULE, THUMB, BALL, SHADOW, BARS, BAR_ERR, GLASS) = THEMES['light'].values()  # 先按浅色；启动时 apply_theme(system_theme())
 FONT, FONT_BOLD = 'Microsoft YaHei UI', None  # 启动时有 fonts\NotoSansSC 就换成 Noto Sans SC Medium / Bold（思源黑体，SIL OFL 开源）
 DISPLAY, ICON = 'Bahnschrift', 'Segoe MDL2 Assets'  # 启动时换成项目里的 Michroma 宽体 / Segoe Fluent Icons（有的话）
 I_SET, I_COPY, I_HIST, I_OK, I_CHECK = '', '', '', '', ''
@@ -91,8 +124,7 @@ I_PIN = '\uE718'  # 浮窗固定后右边的图钉
 I_OPEN, I_SETUP = '', ''  # 记录 / 常用词标题行「用记事本打开」；设置标题行「准备情况」（扳手）
 HIST_DY = 4
 NAV_DY = -4  # 导航按钮里宽体字比按钮中线低 4 像素（实测：按钮身 656~700，字心 682.5），整排上提
-ICON_C = '#555555'  # 图标按钮平时的颜色
-S = 1.0  # 屏幕缩放（150% = 1.5），界面坐标都按 100% 写，画的时候乘 S
+S = 1.0  # 主窗口所在那块屏的缩放（150% = 1.5），界面坐标都按 100% 写，画的时候乘 S；浮窗、悬浮球按自己那块屏临时换（at_scale）
 
 user32, kernel32 = ctypes.windll.user32, ctypes.windll.kernel32
 user32.GetAsyncKeyState.restype = ctypes.c_short
@@ -104,14 +136,38 @@ class _MONITORINFO(ctypes.Structure):
     _fields_ = [('cbSize', ctypes.wintypes.DWORD), ('rcMonitor', ctypes.wintypes.RECT), ('rcWork', ctypes.wintypes.RECT), ('dwFlags', ctypes.wintypes.DWORD)]
 
 
-def active_work_area():
-    """正在用的那块屏（前台窗口所在）的工作区，物理像素；取不到就用主屏。"""
-    wa = ctypes.wintypes.RECT(); user32.SystemParametersInfoW(0x30, 0, ctypes.byref(wa), 0)
+user32.MonitorFromPoint.argtypes, user32.MonitorFromPoint.restype = [ctypes.wintypes.POINT, ctypes.wintypes.DWORD], ctypes.wintypes.HMONITOR
+user32.GetForegroundWindow.restype = ctypes.wintypes.HWND
+user32.GetCursorPos.argtypes = [ctypes.POINTER(ctypes.wintypes.POINT)]
+ctypes.windll.shcore.GetDpiForMonitor.argtypes = [ctypes.wintypes.HMONITOR, ctypes.c_int, ctypes.POINTER(ctypes.c_uint), ctypes.POINTER(ctypes.c_uint)]
+
+def monitor(hmon):
+    """一块屏的 (工作区, 缩放)：工作区不含任务栏，物理像素；缩放是这块屏自己的（每块屏可以不一样，进程是 per-monitor DPI 感知）。"""
+    mi = _MONITORINFO(); mi.cbSize = ctypes.sizeof(mi); user32.GetMonitorInfoW(hmon, ctypes.byref(mi))
+    dx, dy = ctypes.c_uint(96), ctypes.c_uint(96)
+    if ctypes.windll.shcore.GetDpiForMonitor(hmon, 0, ctypes.byref(dx), ctypes.byref(dy)): dx.value = 96  # 0 = MDT_EFFECTIVE_DPI；失败按 100%
+    return mi.rcWork, dx.value / 96
+
+def rect(r): return r.left, r.top, r.right, r.bottom
+
+def monitor_at(x, y): return monitor(user32.MonitorFromPoint(ctypes.wintypes.POINT(int(x), int(y)), 2))  # 包含这个点的那块屏（不在任何屏上就取最近的）
+def monitor_of(hwnd): return monitor(user32.MonitorFromWindow(hwnd, 2))
+
+def active_monitor():
+    """正在用的那块屏（前台窗口所在；没有前台窗口就看光标）。"""
     hwnd = user32.GetForegroundWindow()
-    if hwnd:
-        mi = _MONITORINFO(); mi.cbSize = ctypes.sizeof(mi)
-        if user32.GetMonitorInfoW(user32.MonitorFromWindow(hwnd, 1), ctypes.byref(mi)): return mi.rcWork
-    return wa
+    if hwnd: return monitor_of(hwnd)
+    pt = ctypes.wintypes.POINT(); user32.GetCursorPos(ctypes.byref(pt)); return monitor_at(pt.x, pt.y)
+
+class at_scale:
+    """临时按另一块屏的缩放画（浮窗、悬浮球不一定和主窗口在同一块屏）：px()、pfont()、_sprite 都读全局 S。只在界面线程里用。"""
+    def __init__(self, s): self.s = s
+    def __enter__(self):
+        global S
+        self.old, S = S, self.s
+    def __exit__(self, *e):
+        global S
+        S = self.old
 
 # ---- 快捷键名字 ----
 KEYS = {'右 Ctrl': 0xA3, 'F8': 0x77, 'F9': 0x78}  # 不放 Alt：Claude 桌面版等程序单按 Alt 松开会弹菜单、抢焦点，Ctrl+V 粘不进去（还能「录制」成 Alt）
@@ -547,6 +603,7 @@ class Seg:
     def __init__(self, raw, lang='en'):
         self.raw, self.lang, self.out, self.cv = raw, lang, {}, threading.Condition()
         self.text = raw  # 送去改的文字，prep() 在后台换词 / 理干净
+        self.failed = False  # 改错服务出错、原样输出了（浮窗左边显示橙色「!」）
         if lang == 'zhzh': self.out['zh'] = ''  # 说中文 → 出中文：没有翻译那行
         fixq.put(self)
 
@@ -573,7 +630,7 @@ def fix_worker():
         try:
             if s.prep(): llm(s.text, s.put, lang=s.lang)
         except Exception as e:
-            log('改错失败：', repr(e)); err = '（' + llm_error(e) + '）'
+            log('改错失败：', repr(e)); err = '（' + llm_error(e) + '）'; s.failed = True
             if s.lang == 'zhzh': notify(llm_error(e), 'warn')  # 没有翻译那行可以放提示
             for k in FIELDS:
                 if k not in s.out: s.put(k, err if k == 'zh' else s.text)
@@ -741,7 +798,7 @@ class Engine:
         if not job.by_key: mark('paste')
         r0 = lat.get('rel', t)  # 分段计时（松开后第几秒）：Whisper / 改错首字 / 英文写完 / 粘贴
         log('计时 ' + ' '.join(f'{n}={lat[k] - r0:.2f}' for n, k in (('Whisper', 'wh'), ('首字', 'llm_first'), ('英文', 'llm_en'), ('粘贴', 'paste')) if k in lat))
-        post('fixed', raw, fixed, job.by_key)
+        post('fixed', raw, fixed, job.by_key, seg.failed)
         if self.busy is job: self.busy = False; post('state', 'ready')  # 中文翻译还在后台出，不耽误说下一句
         post('zh', raw, seg.get('zh'))
 
@@ -1065,8 +1122,8 @@ def _stamp(img, kind, x, y, w, h, r, d, fill):
     patch = img.crop((ox, oy, ox + sp.width, oy + sp.height)).convert('RGBA'); patch.alpha_composite(sp)
     img.paste(patch if img.mode == 'RGBA' else patch.convert(img.mode), (ox, oy))
 
-def raised(img, x, y, w, h, r, d=8, fill=BG): _stamp(img, 'raised', x, y, w, h, r, d, fill)
-def inset(img, x, y, w, h, r, d=5, fill=INSET): _stamp(img, 'inset', x, y, w, h, r, d, fill)
+def raised(img, x, y, w, h, r, d=8, fill=None): _stamp(img, 'raised', x, y, w, h, r, d, fill or CARD)  # 默认值不能直接写颜色：换主题后颜色名指向新值
+def inset(img, x, y, w, h, r, d=5, fill=None): _stamp(img, 'inset', x, y, w, h, r, d, fill or INSET)
 
 def ring(img, cx, cy, rad, color, width=1.1, fill=None):
     """抗锯齿的描边小圆（右上角的状态章）。"""
@@ -1097,8 +1154,8 @@ class Neu:
     def raised(self, *a, **k): raised(self.img, *a, **k)
     def inset(self, *a, **k): inset(self.img, *a, **k)
 
-    def text(self, x, y, text, size=13, color=TEXT, weight='normal', family=None, anchor='nw', width=None, lines=None):
-        f = fnt(size, weight, family)
+    def text(self, x, y, text, size=13, color=None, weight='normal', family=None, anchor='nw', width=None, lines=None):
+        f, color = fnt(size, weight, family), color or TEXT
         if width and lines: text, width = fit(text, f, px(width), lines), None
         return self.c.create_text(px(x), px(y), text=text, fill=color, font=f, anchor=anchor, tags='txt', **({'width': px(width)} if width else {}))
 
@@ -1156,10 +1213,10 @@ class CardBtn:
 class Btn:
     """软 UI 按钮。kind：raised 凸起 / inset 凹槽（底栏「设置」）/ ring 描边小圆章。
     on=True 是选中（画成凹下去）。live=True 的按钮整张是贴图，可以隐藏、换颜色。"""
-    def __init__(self, n, x, y, w, h, r=None, cmd=None, text='', icon='', size=13, d=None, color=TEXT, kind='raised',
+    def __init__(self, n, x, y, w, h, r=None, cmd=None, text='', icon='', size=13, d=None, color=None, kind='raised',
                  on=False, live=False, hold=None, weight='normal', family=None, align='center'):
         self.n, self.box, self.r = n, (x, y, w, h), min(w, h) / 2 if r is None else r
-        self.cmd, self.hold, self.text, self.icon, self.size, self.color = cmd, hold, text, icon, size, color
+        self.cmd, self.hold, self.text, self.icon, self.size, self.color = cmd, hold, text, icon, size, color or TEXT
         self.d = ELEV if d is None else d  # 默认和主页一样高
         self.kind, self.on, self.live, self.weight, self.family, self.align = kind, on, live or n.ready, weight, family, align
         self.visible, self.down, self.tile, self.lab = True, False, None, []
@@ -1168,11 +1225,11 @@ class Btn:
     def draw(self, img, x, y, pressed):
         w, h = self.box[2:]
         if self.kind == 'ring':
-            ring(img, x + w / 2, y + h / 2, w / 2 - 1, self.color, fill='#D8D8D8' if pressed else None)
+            ring(img, x + w / 2, y + h / 2, w / 2 - 1, self.color, fill=PRESSED if pressed else None)
         elif self.kind == 'inset' or self.on or pressed:
             inset(img, x, y, w, h, self.r, self.d * INSET_K)  # 凹下去的深度 = 凸起的 INSET_K 倍（同样的深度，凹的比凸的看着更重）
         else:
-            raised(img, x, y, w, h, self.r, self.d)
+            raised(img, x, y, w, h, self.r, self.d, FACE)
 
     def make(self):
         x, y, w, h = self.box
@@ -1257,8 +1314,8 @@ class Switch:
         for i, (v, t) in enumerate(self.opts):
             x, y, w, h = self.box(i); lx, ly = x - self.x + self.ox, y - self.y + self.oy
             if v == self.value or v == self.down:  # 和按钮按下去同一个逻辑（Btn.draw）：先画凸起的边，再在里面压出凹面，所以外沿还留着一圈凸边
-                raised(im, lx, ly, w, h, h / 2, ELEV); inset(im, lx, ly, w, h, h / 2, ELEV * INSET_K)
-            else: raised(im, lx, ly, w, h, h / 2, ELEV)
+                raised(im, lx, ly, w, h, h / 2, ELEV, FACE); inset(im, lx, ly, w, h, h / 2, ELEV * INSET_K)
+            else: raised(im, lx, ly, w, h, h / 2, ELEV, FACE)
             self.lab.append(c.create_text(px(x + w / 2), px(y + h / 2), text=t, font=fnt(11), fill=ICON_C, tags='txt'))
         self.ph = ImageTk.PhotoImage(im); c.itemconfigure(self.tile, image=self.ph)
 
@@ -1309,7 +1366,7 @@ class Chrome:
             size, box = (w + 2 * M, hh + 2 * M), (M, M, M + w, M + hh)
             img = Image.new('RGBA', size, (0, 0, 0, 0)); sm = Image.new('L', size, 0)
             ImageDraw.Draw(sm).rounded_rectangle((M + px(6), M + px(12), M + w - px(6), M + hh + px(4)), R, fill=110)
-            shadow = Image.new('RGBA', size, (40, 40, 48, 0)); shadow.putalpha(_blur(sm, px(14))); img.alpha_composite(shadow)
+            shadow = Image.new('RGBA', size, SHADOW + (0,)); shadow.putalpha(_blur(sm, px(14))); img.alpha_composite(shadow)
             bg = Image.new('RGBA', size, BG); bg.putalpha(_shape(size, box, R, 2))
             img.alpha_composite(bg)  # 不能用 paste(mask)：它把底色和阴影层的深色 RGB 直接按 mask 混，圆角边缘会出一圈深灰（阴影全透明处也会）
             ulw(self.shwnd, img, x - M, y - M)
@@ -1351,12 +1408,12 @@ def place_side(app, t, w):
     side = sorted((c.win for c in CHROMES if getattr(c, 'side', False) and c.win is not t and c.win.winfo_exists() and c.win.winfo_viewable()),
                   key=lambda v: v.winfo_x())
     row = [(t, px(w))] + [(v, v.winfo_width()) for v in side] + [(app.root, app.root.winfo_width())]
-    wa = ctypes.wintypes.RECT(); user32.SystemParametersInfoW(0x30, 0, ctypes.byref(wa), 0)
+    wa = monitor_of(app.chrome.hwnd)[0]  # 主窗口那块屏
     total, gap, k = sum(ww for _, ww in row), px(20), len(row) - 1
     right = app.root.winfo_x() + app.root.winfo_width()
     if right - total - gap * k < wa.left:
         gap = max(0, min(gap, (wa.right - wa.left - total) // max(1, k)))
-        right = (wa.left + wa.right + total + gap * k) // 2
+        right = min(wa.right, (wa.left + wa.right + total + gap * k) // 2)  # 实在放不下也别把主窗口推到别的屏上（会换缩放、整个重建）
     x, y, moves = right, app.root.winfo_y(), []
     for v, ww in reversed(row):
         x -= ww
@@ -1380,8 +1437,6 @@ def move_together(moves):
         if v.chrome.geo: v.chrome.geo = (x, y) + v.chrome.geo[2:]
 
 BAR_BASE = (0.34, 0.68, 1.0, 0.55, 0.84, 0.40)  # 苹果 SpeechAnalyzer 图标那种 6 根圆头声波条，平时的高矮
-BAR_COL = {'error': ('#FF9186', '#D64541')}
-BARS, ACCENT = ('#4A4A50', '#0E0E10'), INK  # 声波条上深灰下黑；外圈刻度亮起来的颜色
 
 def bar_heights(state, lv, t, sm):
     """每根条现在的高度（0~1，已平滑）：rec 随音量跳，busy 波浪流过，loading 慢慢起伏，ready 轻轻呼吸。"""
@@ -1404,14 +1459,15 @@ def _grad(size, y0, y1, top, bot):
         _grads[key] = Image.composite(Image.new('RGBA', size, bot), Image.new('RGBA', size, top), m)
     return _grads[key]
 
-def paint_bars(img, cx, cy, height, state, lv, t, sm):
-    """在 RGBA 图上画 6 根渐变声波条（主页圆盘和浮窗共用），坐标、高度都是像素。"""
+def paint_bars(img, cx, cy, height, state, lv, t, sm, cols=None):
+    """在 RGBA 图上画 6 根渐变声波条（主页圆盘和浮窗共用），坐标、高度都是像素。颜色是主题的 BARS（浅色上深灰下黑，深色反过来）；
+    浮窗按玻璃深浅自己传 cols。"""
     n = len(BAR_BASE); bw = height * 0.13; gap = bw * 0.78; x0 = cx - (n * bw + (n - 1) * gap) / 2
     m = Image.new('L', img.size, 0); d = ImageDraw.Draw(m)
     for i, h in enumerate(bar_heights(state, lv, t, sm)):
         hh = max(bw, h * height) / 2; x = x0 + i * (bw + gap)
         d.rounded_rectangle((x, cy - hh, x + bw, cy + hh), bw / 2, fill=255)
-    img.paste(_grad(img.size, cy - height / 2, cy + height / 2, *BAR_COL.get(state, BARS)), (0, 0), m)
+    img.paste(_grad(img.size, cy - height / 2, cy + height / 2, *(BAR_ERR if state == 'error' else cols or BARS)), (0, 0), m)
 
 
 
@@ -1481,14 +1537,14 @@ def pfont(size, kind='r'):
         except Exception: _pfonts[key] = ImageFont.truetype(str(fonts / 'msyh.ttc'), key[0])
     return _pfonts[key]
 
-def changed_words(raw, fixed):
-    """改后的句子按词切开，标出改过 / 新加的词（忽略大小写和标点的差别）。"""
+def changed_words(raw, fixed, ink):
+    """改后的句子按词切开，标出改过 / 新加的词（忽略大小写和标点的差别）。ink：字的颜色。"""
     norm = lambda w: re.sub(r"[^\w']", '', w.lower())
     a, b = raw.split(), fixed.split(); marks = [False] * len(b)
-    if CJK.search(raw): return [(w + ' ', INK, False) for w in b]  # 说的是中文：英文是翻出来的，没有「改了哪几个词」
+    if CJK.search(raw): return [(w + ' ', ink, False) for w in b]  # 说的是中文：英文是翻出来的，没有「改了哪几个词」
     for op, _, _, j1, j2 in difflib.SequenceMatcher(None, [norm(w) for w in a], [norm(w) for w in b], autojunk=False).get_opcodes():
         if op in ('replace', 'insert'): marks[j1:j2] = [True] * (j2 - j1)
-    return [(w + ' ', INK, m) for w, m in zip(b, marks)]
+    return [(w + ' ', ink, m) for w, m in zip(b, marks)]
 
 def flow(runs, f, width, max_lines, keep='first'):
     """把 (文字, 颜色, 是否标记) 片段按像素宽度折行，返回每行的 [(x, 片段, 颜色, 标记)]。keep='last' 只留最后几行（实时文字）。"""
@@ -1507,22 +1563,29 @@ def flow(runs, f, width, max_lines, keep='first'):
         x0, t, c, m = last[-1]; last[-1] = (x0, t.rstrip() + '…', c, m)
     return lines
 
-def draw_lines(d, lines, f, x, y, lh):
+def draw_lines(d, lines, f, x, y, lh, mark_fill):
     asc, desc = f.getmetrics(); dy = (lh - asc - desc) / 2
     for ln in lines:
         for x0, tok, color, mark in ln:
             if mark and tok.strip():
-                d.rounded_rectangle((x + x0 - px(3), y + px(2), x + x0 + f.getlength(tok.rstrip()) + px(3), y + lh - px(2)), px(6), fill='#D3D3D8')
+                d.rounded_rectangle((x + x0 - px(3), y + px(2), x + x0 + f.getlength(tok.rstrip()) + px(3), y + lh - px(2)), px(6), fill=mark_fill)
             d.text((x + x0, y + dy), tok, font=f, fill=color)
         y += lh
     return y
 
-OV_SUB = '#3A3A3C'  # 浮窗里第二层的字（还没定下来的实时识别、原话、中文意思、提示）和细线图标：在玻璃上也要看得清，用深灰不用浅灰
+# 浮窗的字按玻璃的深浅选（不看主题：浅色主题配深色壁纸时玻璃也是暗的）：(字, 第二层的字和细线图标, 改过的词的底, 声波条)
+# 第二层是还没定下来的实时识别、原话、中文意思、提示：在玻璃上也要看得清，暗字用深灰不用浅灰
+OV_INKS = {'dark': ('#1E1E1E', '#3A3A3C', '#D3D3D8', ('#4A4A50', '#0E0E10')),
+           'light': ('#FFFFFF', '#D1D1D6', (255, 255, 255, 56), ('#D1D1D6', '#FFFFFF'))}
 
 class Overlay:
     """屏幕底部中间的浮窗：说话时实时显示识别的字，之后显示改好的结果（标出改动）。
-    不抢焦点：点它光标还留在你原来的输入框里，所以点了就能直接粘贴进去。"""
+    不抢焦点：点它光标还留在你原来的输入框里，所以点了就能直接粘贴进去。
+    在正在用的那块屏上出现，按那块屏的缩放画（self.s，画的时候 at_scale）。"""
     W, M, ALPHA, ROW_H = 600, 28, 215, 58  # ROW_H：一行样式的最小高度（英文一行 24 + 中文一行 18 + 间隔 2 + 上下各 7）； 卡片宽、四周给阴影留的边（逻辑像素）、卡片底色不透明度（215/255，半透明，后面再乱也看得清字）
+    ICON, EDGE, GAP = 30, 36, 15  # 左边声波条 / 「!」和右边勾的直径一样大；圆心离卡片左右边一样远；图标和字之间
+    TX = EDGE + ICON // 2 + GAP   # 字的左边（66）
+    SLOW = 4                      # 识别超过几秒，「识别中…」换成橙色「…仍在识别」
 
     def __init__(self, app):
         self.app = app
@@ -1537,18 +1600,23 @@ class Overlay:
         self.mouse_down = False  # 上一帧鼠标键是不是按着（点浮窗外面就关）
         self.cards, self.base, self.wgeo, self.bar_c, self.h, self.ck = {}, None, None, (0, 0), self.ROW_H, None
         self.backdrop = (None, None)  # 浮窗后面那块屏幕的模糊图：(屏幕上的范围, 图)，一次截得比浮窗高，浮窗变高时直接从里面裁
-        self.sm, self.lv, self.t0 = [0.0] * 6, 0.0, time.time()
+        self.sm, self.lv, self.t0, self.since = [0.0] * 6, 0.0, time.time(), 0.0
+        self.wa, self.s, self.tone = None, S, 'dark'  # 在哪块屏（工作区）、那块屏的缩放、玻璃上用暗字还是亮字（OV_INKS）
 
     # 对外：每种状态
     def listen(self, by_key):
-        if self.visible: threading.Thread(target=self.refresh_backdrop, args=(True,), daemon=True).start()  # 浮窗还开着就说下一句：背景换新
+        if self.visible:
+            if rect(active_monitor()[0]) != rect(self.wa): self.hide()  # 换了一块屏说话：在那块屏上重新出现
+            else:
+                with at_scale(self.s): r = self.backdrop_rect()  # 位置在界面线程里算好（后台线程不碰 S）
+                threading.Thread(target=self.refresh_backdrop, args=(True, r), daemon=True).start()  # 浮窗还开着就说下一句：背景换新
         self.set('rec', done='', part='', by_key=by_key)
     def live(self, done, part):
         if self.mode == 'rec': self.d.update(done=done, part=part); self.render()
     def think(self, raw):
         self.set('busy', raw=raw)
-    def result(self, raw, fixed, zh, by_key):
-        self.set('result', raw=raw, fixed=fixed, zh=zh, by_key=by_key); self.arm()
+    def result(self, raw, fixed, zh, by_key, unfixed=False):  # unfixed：改错服务没用上，原样输出（左边换成橙色「!」）
+        self.set('result', raw=raw, fixed=fixed, zh=zh, by_key=by_key, unfixed=unfixed); self.arm()
     def set_zh(self, zh):
         if self.mode == 'result':
             self.d['zh'] = zh; self.render(); self.arm()
@@ -1556,7 +1624,7 @@ class Overlay:
         self.set('notice', text=text, level=level); self.arm()
 
     def set(self, mode, **d):
-        self.mode, self.d, self.pinned = mode, d, False
+        self.mode, self.d, self.pinned, self.since = mode, d, False, time.time()
         if self.timer: self.w.after_cancel(self.timer); self.timer = None
         self.render()
 
@@ -1580,8 +1648,9 @@ class Overlay:
         """液态玻璃卡片的固定部分（按高度缓存）：under = 卡片外圈的柔和投影；face = 圆角面的形状（玻璃底每帧贴在这里）；
         over = 玻璃上的光：顶部一层往下淡出的高光、贴着边缘的一圈亮光（上面亮、往下几乎没有，是光不是框）、底部一点点暗。
         没有描边。投影只在卡片外面（卡片是透的，垫在下面会透出来）。"""
-        key = self.ck = h
+        key = self.ck = (h, S)
         if key not in self.cards:
+            k = 1.0 if THEME == 'light' else 0.5  # 深色玻璃上的高光淡一半，不然发灰
             M, W = self.M, self.W; size = (px(W + 2 * M), px(h + 2 * M)); box = (px(M), px(M), px(M + W), px(M + h))
             R = px(h / 2)  # 胶囊：两头是半圆
             face = _shape(size, box, R, 2)
@@ -1589,10 +1658,10 @@ class Overlay:
             under = Image.new('RGBA', size, (30, 30, 40, 0)); under.putalpha(ImageChops.multiply(_blur(sh, px(14)), ImageChops.invert(face)))
             ys = (np.arange(size[1]) - box[1]) / max(1, box[3] - box[1])  # 卡片里从上到下 0→1
             col = lambda v: Image.fromarray(np.repeat(np.clip(v, 0, 255).astype(np.uint8)[:, None], size[0], axis=1))
-            sheen = col(80 * np.clip(1 - ys / 0.55, 0, 1) ** 1.6)                    # 顶部高光
+            sheen = col(80 * k * np.clip(1 - ys / 0.55, 0, 1) ** 1.6)                # 顶部高光
             inner = face.filter(ImageFilter.MinFilter(2 * round(1.6 * S) + 1))       # 往里收一点的形状
             rim = ImageChops.subtract(face, inner).filter(ImageFilter.GaussianBlur(0.6 * S))
-            rim = ImageChops.multiply(rim, col(40 + 190 * np.clip(1 - ys / 0.4, 0, 1) ** 1.3))  # 边缘亮光：上亮下暗
+            rim = ImageChops.multiply(rim, col((40 + 190 * np.clip(1 - ys / 0.4, 0, 1) ** 1.3) * k))  # 边缘亮光：上亮下暗
             light = ImageChops.multiply(ImageChops.lighter(sheen, rim), face)
             over = Image.new('RGBA', size, (255, 255, 255, 0)); over.putalpha(light)
             dark = Image.new('RGBA', size, (40, 40, 50, 0)); dark.putalpha(ImageChops.multiply(col(22 * np.clip((ys - 0.65) / 0.35, 0, 1)), face))
@@ -1612,20 +1681,20 @@ class Overlay:
         make_demo.py 会把它换成固定的底色。"""
         w, h = box[2] - box[0], box[3] - box[1]
         im = grab_small(box, 6).filter(ImageFilter.GaussianBlur(2.2))  # 先在小图上做完模糊、饱和、提亮，最后才放大
-        im = Image.blend(ImageEnhance.Color(im).enhance(1.3), Image.new('RGB', im.size, (247, 247, 249)), 0.45)
+        im = Image.blend(ImageEnhance.Color(im).enhance(1.3), Image.new('RGB', im.size, GLASS), 0.45)  # 浅色主题提亮、深色主题压暗
         return im.resize((w, h), Image.BICUBIC).convert('RGBA')
 
     def backdrop_rect(self):
-        """浮窗底边往上 TALL 那么高、和浮窗一样宽的一块（屏幕物理像素）。"""
-        wa = active_work_area()
+        """浮窗底边往上 TALL 那么高、和浮窗一样宽的一块（屏幕物理像素）。要在 at_scale(self.s) 里调。"""
+        wa = self.wa
         w = px(self.W + 2 * self.M); x = wa.left + (wa.right - wa.left - w) // 2; bottom = wa.bottom + px(self.M) - px(18)
         return (x, bottom - px(self.TALL), x + w, bottom)
 
-    def refresh_backdrop(self, hide_self=False):
-        """截浮窗后面的屏幕当玻璃底。平时在浮窗露面之前截（这时它还没显示，截不到自己）。
+    def refresh_backdrop(self, hide_self=False, r=None):
+        """截浮窗后面的屏幕当玻璃底，顺便按它的亮度定字色（tone）。平时在浮窗露面之前截（这时它还没显示，截不到自己）。
         hide_self：浮窗已经开着（接着说下一句）时，只在截的这一下把浮窗排除在截屏外（WDA_EXCLUDEFROMCAPTURE），截完马上恢复，
         所以别人截屏 / 录屏照样看得到浮窗。"""
-        r = self.backdrop_rect()
+        r = r or self.backdrop_rect()
         try:
             if hide_self:
                 user32.SetWindowDisplayAffinity(ctypes.c_void_p(self.hwnd), 0x11); ctypes.windll.dwmapi.DwmFlush()
@@ -1633,64 +1702,78 @@ class Overlay:
             finally:
                 if hide_self: user32.SetWindowDisplayAffinity(ctypes.c_void_p(self.hwnd), 0)
         except Exception: self.backdrop = (r, None)  # 截不了（锁屏 / UAC 那种安全桌面）：退回半透明纯色
+        im = self.backdrop[1]
+        if im is None: self.tone = 'dark' if THEME == 'light' else 'light'
+        else:  # 只看最底下浮窗会盖住的那一段（最矮的样子）
+            low = im.crop((0, im.height - round((self.ROW_H + 2 * self.M) * self.s), im.width, im.height)).convert('L')
+            self.tone = 'dark' if np.asarray(low).mean() > 150 else 'light'
 
     def glass(self, box):
         """玻璃底：从截好的背景里裁出浮窗现在这块；对不上就是半透明纯色。"""
         r, im = self.backdrop
         if im is not None and r[0] <= box[0] and r[1] <= box[1] and box[2] <= r[2] and box[3] <= r[3]:
             return im.crop((box[0] - r[0], box[1] - r[1], box[2] - r[0], box[3] - r[1]))
-        return Image.new('RGBA', (box[2] - box[0], box[3] - box[1]), (233, 233, 235, self.ALPHA))
+        return Image.new('RGBA', (box[2] - box[0], box[3] - box[1]), (233, 233, 235, self.ALPHA) if THEME == 'light' else (44, 44, 46, self.ALPHA))
 
     def render_row(self):
         """正在听 / 改语病 / 结果 / 提示：一行。左边声波条（每帧在 blit 里画；提示是彩色「!」），中间文字上下居中，
         结果最右边一个勾（固定后换成图钉，只复制没输入时是复制图标）。"""
+        if not self.visible:  # 露面之前：定在哪块屏、按那块屏的缩放，截后面的屏幕（这时还截不到自己）
+            self.wa, self.s = active_monitor()
+            with at_scale(self.s): self.refresh_backdrop()
+        with at_scale(self.s): self._render_row()
+
+    def _render_row(self):
         M, W, d, m = self.M, self.W, self.d, self.mode
-        right = 56 if m == 'result' else 22  # 文字右边留给图标的宽度
-        TX, TW = px(M + 66), px(W - 66 - right)
-        blocks = []  # (行, 字体, 行高)
+        ink, sub, mark, _ = OV_INKS[self.tone]
+        right = self.TX if m == 'result' else self.EDGE - self.ICON // 2  # 文字右边留的宽度：结果右边有勾，和左边对称
+        TX, TW = px(M + self.TX), px(W - self.TX - right)
+        lh = lambda size: size * 1.5  # 行高（逻辑像素）
+        blocks = []  # (行, 字号)
         if m == 'rec':
-            f = pfont(14); runs = [(d['done'] + ' ', INK, False)] * bool(d['done']) + [(d['part'], OV_SUB, False)] * bool(d['part'])
-            blocks.append((flow(runs or [('请说中文…' if cfg['lang'] == 'zh' else '请说英文…', OV_SUB, False)], f, TW, 3, 'last'), f))
+            runs = [(d['done'] + ' ', ink, False)] * bool(d['done']) + [(d['part'], sub, False)] * bool(d['part'])
+            blocks.append((flow(runs or [('请说中文…' if cfg['lang'] == 'zh' else '请说英文…', sub, False)], pfont(14), TW, 3, 'last'), 14))
         elif m == 'busy':
-            f = pfont(14); blocks.append((flow([(d['raw'] or '识别中…', OV_SUB, False)], f, TW, 3), f))
+            text, col = (d['raw'], sub) if d['raw'] else ('…仍在识别', ORANGE) if d.get('slow') else ('识别中…', sub)
+            blocks.append((flow([(text, col, False)], pfont(14), TW, 3), 14))
         elif m == 'result':
-            f = pfont(14); blocks.append((flow(changed_words(d['raw'], d['fixed']), f, TW, 3), f))
-            f2 = pfont(12)
-            if d['zh'] != '': blocks.append((flow([(d['zh'] if d['zh'] is not None else '翻译中…', OV_SUB, False)], f2, TW, 2), f2))  # 出中文：没有翻译那行
+            blocks.append((flow(changed_words(d['raw'], d['fixed'], ink), pfont(14), TW, 3), 14))
+            if d['zh'] != '': blocks.append((flow([(d['zh'] if d['zh'] is not None else '翻译中…', sub, False)], pfont(12), TW, 2), 12))  # 出中文：没有翻译那行
         else:
-            tcol = {'err': RED, 'ok': GREEN}.get(d.get('level'), ORANGE)
-            f = pfont(14); blocks.append((flow([(d['text'], INK, False)], f, TW, 3), f))
-        th = sum(len(ls) * f.size * 1.5 for ls, f in blocks) / S + 2 * (len(blocks) - 1)  # 文字块总高（逻辑像素）
+            blocks.append((flow([(d['text'], ink, False)], pfont(14), TW, 3), 14))
+        th = sum(len(ls) * lh(sz) for ls, sz in blocks) + 2 * (len(blocks) - 1)  # 文字块总高
         h = max(self.ROW_H, round(th + 14))  # 最矮也按「英文一行 + 中文一行」：一句话从正在听到出结果一样高，不会突然变大
         img = self.layer(h); dr = ImageDraw.Draw(img); cy = px(M + h / 2)
-        y = px(M) + (px(h) - px(th)) / 2
-        for ls, f in blocks:
-            draw_lines(dr, ls, f, TX, y, f.size * 1.5); y += len(ls) * f.size * 1.5 + px(2)
-        self.bar_c = (px(M + 36), cy)
-        if m == 'notice':
-            cx = px(M + 36); dr.ellipse((cx - px(14), cy - px(14), cx + px(14), cy + px(14)), fill=tcol)
+        y = px(M + (h - th) / 2)
+        for ls, sz in blocks:
+            y = draw_lines(dr, ls, pfont(sz), TX, y, lh(sz) * S, mark) + px(2)
+        self.bar_c = (px(M + self.EDGE), cy)  # 左边图标的圆心（声波条每帧画在这里）
+        warn = {'err': RED, 'ok': GREEN}.get(d.get('level'), ORANGE) if m == 'notice' else ORANGE if m == 'result' and d.get('unfixed') else None
+        if warn:  # 提示、没改错的结果：左边是彩色「!」，和声波条一样大
+            cx, r = self.bar_c[0], px(self.ICON / 2); dr.ellipse((cx - r, cy - r, cx + r, cy + r), fill=warn)
             dr.text((cx, cy), '!', font=pfont(13), fill='white', anchor='mm')
         if m == 'result':
             badge = self.badge('pin' if self.pinned else 'ok' if d.get('by_key') else 'copy')
-            img.alpha_composite(badge, (px(M + W - 34) - badge.width // 2, round(cy) - badge.height // 2))
+            img.alpha_composite(badge, (px(M + W - self.EDGE) - badge.width // 2, round(cy) - badge.height // 2))
         self.base = img; self.blit()
 
     _badges = {}
     def badge(self, kind):
         """结果右边的小图标，苹果 checkmark.circle 那种细线：浅灰细圆圈 + 深灰细勾（勾是矢量线画的，4 倍大画再缩小，边缘干净）；
         固定后是图钉、只复制时是复制图标（字形，同样的颜色）。"""
-        if kind not in self._badges:
-            n, ss = px(30), 4; N = n * ss; im = Image.new('RGBA', (N, N), (0, 0, 0, 0)); d = ImageDraw.Draw(im)
-            ring_w = round(1.3 * S * ss); d.ellipse((ring_w, ring_w, N - ring_w, N - ring_w), outline=OV_SUB, width=ring_w)
+        key = (kind, S, self.tone); ink, sub, _, _ = OV_INKS[self.tone]
+        if key not in self._badges:
+            n, ss = px(self.ICON), 4; N = n * ss; im = Image.new('RGBA', (N, N), (0, 0, 0, 0)); d = ImageDraw.Draw(im)
+            ring_w = round(1.3 * S * ss); d.ellipse((ring_w, ring_w, N - ring_w, N - ring_w), outline=sub, width=ring_w)
             if kind == 'ok':
                 pts = [(0.31 * N, 0.52 * N), (0.45 * N, 0.65 * N), (0.70 * N, 0.37 * N)]; w = round(1.8 * S * ss)
-                d.line(pts, fill=INK, width=w, joint='curve')
-                for x, y in (pts[0], pts[-1]): d.ellipse((x - w / 2, y - w / 2, x + w / 2, y + w / 2), fill=INK)  # 圆头
+                d.line(pts, fill=ink, width=w, joint='curve')
+                for x, y in (pts[0], pts[-1]): d.ellipse((x - w / 2, y - w / 2, x + w / 2, y + w / 2), fill=ink)  # 圆头
             else:
                 f = ImageFont.truetype(pfont(1, 'i').path, round(11 * S * ss))
-                d.text((N / 2, N / 2), I_PIN if kind == 'pin' else I_COPY, font=f, fill=INK, anchor='mm')
-            Overlay._badges[kind] = im.resize((n, n), Image.LANCZOS)
-        return self._badges[kind]
+                d.text((N / 2, N / 2), I_PIN if kind == 'pin' else I_COPY, font=f, fill=ink, anchor='mm')
+            Overlay._badges[key] = im.resize((n, n), Image.LANCZOS)
+        return self._badges[key]
 
     def render(self):
         """按当前内容重画卡片和文字（左边的声波条每帧另外画）。"""
@@ -1702,25 +1785,29 @@ class Overlay:
         down = key_down(0x01) or key_down(0x02)
         if down and not self.mouse_down and self.visible and self.wgeo and self.mode in ('result', 'notice') and not self.pinned:
             pt = ctypes.wintypes.POINT(); user32.GetCursorPos(ctypes.byref(pt))
-            w, h, x, y = self.wgeo; M = px(self.M)
+            w, h, x, y = self.wgeo; M = round(self.M * self.s)
             if not (x + M <= pt.x <= x + w - M and y + M <= pt.y <= y + h - M): self.hide()
         self.mouse_down = down
+        if self.visible and self.mode == 'busy' and not self.d.get('raw') and not self.d.get('slow') and time.time() - self.since > self.SLOW:
+            self.d['slow'] = True; self.render()
         if self.visible and self.mode in ('rec', 'busy', 'result'): self.blit(level)
 
     def blit(self, level=0.0):
+        with at_scale(self.s): self._blit(level)
+
+    def _blit(self, level):
         c = self.cards[self.ck]; img = c['under'].copy()
-        wa = active_work_area()
+        wa = self.wa
         x, y = wa.left + (wa.right - wa.left - img.width) // 2, wa.bottom - img.height + px(self.M) - px(18)
         geo = (img.width, img.height, x, y)
-        if not self.visible: self.refresh_backdrop()  # 露面之前截后面的屏幕（这时还截不到自己）
         g = self.glass((x, y, x + img.width, y + img.height)); g.putalpha(ImageChops.multiply(g.getchannel('A'), c['face']))
         img.alpha_composite(g)  # 不能用 paste(玻璃, 蒙版)：会把投影层的深色 RGB 混进圆角边缘，一圈黑边
         img.alpha_composite(c['over']); img.alpha_composite(self.base)
-        if self.mode in ('rec', 'busy', 'result'):
+        if self.mode in ('rec', 'busy') or self.mode == 'result' and not self.d.get('unfixed'):
             st = 'ready' if self.mode == 'result' else self.mode; t = time.time() - self.t0
             self.lv += ((level if st == 'rec' else 0) - self.lv) * 0.35
-            n, ss = px(34), 3; Lr = Image.new('RGBA', (n * ss, n * ss), (0, 0, 0, 0))
-            paint_bars(Lr, n * ss / 2, n * ss / 2, n * ss * 0.78, st, self.lv, t, self.sm)
+            n, ss = px(self.ICON), 3; Lr = Image.new('RGBA', (n * ss, n * ss), (0, 0, 0, 0))  # 和右边的勾一样大
+            paint_bars(Lr, n * ss / 2, n * ss / 2, n * ss * 0.88, st, self.lv, t, self.sm, OV_INKS[self.tone][3])
             img.alpha_composite(Lr.resize((n, n), Image.LANCZOS), (round(self.bar_c[0]) - n // 2, round(self.bar_c[1]) - n // 2))
         if self.wgeo != geo: self.wgeo = geo; self.w.geometry(f'{img.width}x{img.height}+{x}+{y}')
         if not self.visible:
@@ -1752,24 +1839,33 @@ class Ball:
         ex = user32.GetWindowLongW(self.hwnd, -20) | 0x08000000 | 0x80 | 0x8  # 不抢焦点 / 不进任务栏 / 置顶
         user32.ShowWindow(self.hwnd, 0)
         user32.SetWindowLongW(self.hwnd, -20, ex & ~0x80000); user32.SetWindowLongW(self.hwnd, -20, ex | 0x80000)  # 分层（先清再设，见 Overlay）
-        self.visible, self.start, self.moved, self.base = False, None, False, None
+        self.visible, self.start, self.moved, self.base, self.s = False, None, False, None, None
         self.sm, self.lv, self.t0, self.x, self.y = [0.0] * 6, 0.0, time.time(), 0, 0
 
     def make_base(self):
-        """球底：柔和投影 + 上亮下暗的浅灰圆盘（只画一次）。"""
+        """球底：柔和投影 + 平面单色圆盘。按球所在那块屏的缩放画（self.s），换到缩放不同的屏再画一次。"""
         n = px(self.D + 2 * self.M); ss = 3; N = n * ss; C = N / 2; R = px(self.D / 2) * ss
         img = Image.new('RGBA', (N, N), (0, 0, 0, 0))
-        sh = Image.new('L', (N, N), 0); ImageDraw.Draw(sh).ellipse((C - R, C - R + N * 0.03, C + R, C + R + N * 0.03), fill=45)
-        layer = Image.new('RGBA', (N, N), (40, 40, 48, 255)); layer.putalpha(_blur(sh, px(5) * ss)); img.alpha_composite(layer)
-        ImageDraw.Draw(img).ellipse((C - R, C - R, C + R, C + R), fill='#EEEEF0')  # 平面单色圆盘
+        sh = Image.new('L', (N, N), 0); ImageDraw.Draw(sh).ellipse((C - R, C - R + N * 0.03, C + R, C + R + N * 0.03), fill=45 if THEME == 'light' else 110)
+        layer = Image.new('RGBA', (N, N), SHADOW + (255,)); layer.putalpha(_blur(sh, px(5) * ss)); img.alpha_composite(layer)
+        ImageDraw.Draw(img).ellipse((C - R, C - R, C + R, C + R), fill=BALL)  # 平面单色圆盘
         self.base = img.resize((n, n), Image.LANCZOS)
 
-    def show(self):
-        if not self.base: self.make_base()
-        n = self.base.width; wa = ctypes.wintypes.RECT(); user32.SystemParametersInfoW(0x30, 0, ctypes.byref(wa), 0)
-        x, y = cfg.get('ball') or (wa.right - n, (wa.top + wa.bottom) // 2 - n // 2)  # 默认贴在屏幕右边中间
+    def place(self, cx, cy):
+        """球心放在 (cx, cy)（物理像素）：按那块屏的缩放画、夹在那块屏的工作区里。"""
+        wa, s = monitor_at(cx, cy)
+        if s != self.s or not self.base:
+            self.s = s
+            with at_scale(s): self.make_base()
+        n = self.base.width; x, y = cx - n // 2, cy - n // 2
         self.x, self.y = min(max(wa.left, x), wa.right - n), min(max(wa.top, y), wa.bottom - n)
-        self.w.geometry(f'{n}x{n}+{self.x}+{self.y}')
+        self.w.geometry(f'{n}x{n}+{self.x}+{self.y}'); user32.SetWindowPos(self.hwnd, None, self.x, self.y, n, n, 0x14)
+
+    def show(self):
+        if cfg.get('ball'): cx, cy = cfg['ball']
+        else:  # 默认贴在主窗口那块屏的右边中间
+            wa, s = monitor_of(self.app.chrome.hwnd); cx, cy = wa.right, (wa.top + wa.bottom) // 2
+        self.place(cx, cy)
         self.visible = True; self.frame(self.app.state, 0.0)
         user32.ShowWindow(self.hwnd, 8); user32.SetWindowPos(self.hwnd, -1, 0, 0, 0, 0, 0x13)  # 显示但不激活、置顶
 
@@ -1780,7 +1876,7 @@ class Ball:
         if not self.visible: return
         t = time.time() - self.t0; self.lv += ((level if state == 'rec' else 0) - self.lv) * 0.35
         n, ss = self.base.width, 3; L = Image.new('RGBA', (n * ss, n * ss), (0, 0, 0, 0))
-        paint_bars(L, n * ss / 2, n * ss / 2, px(self.D) * ss * 0.46, state, self.lv, t, self.sm)
+        paint_bars(L, n * ss / 2, n * ss / 2, self.D * self.s * ss * 0.46, state, self.lv, t, self.sm)
         img = self.base.copy(); img.alpha_composite(L.resize((n, n), Image.LANCZOS)); ulw(self.hwnd, img, self.x, self.y)
 
     def press(self, e): self.start, self.moved = (e.x_root, e.y_root, self.x, self.y), False
@@ -1788,14 +1884,16 @@ class Ball:
     def drag(self, e):
         if not self.start: return
         dx, dy = e.x_root - self.start[0], e.y_root - self.start[1]
-        if abs(dx) + abs(dy) > px(4): self.moved = True
+        if abs(dx) + abs(dy) > 4 * self.s: self.moved = True
         if self.moved:
             self.x, self.y = self.start[2] + dx, self.start[3] + dy
             self.w.geometry(f'+{self.x}+{self.y}'); user32.SetWindowPos(self.hwnd, None, self.x, self.y, 0, 0, 0x15)
 
     def release(self, e):
         if self.start and not self.moved: self.app.restore()
-        elif self.moved: cfg['ball'] = [self.x, self.y]; save_cfg()
+        elif self.moved:  # 松手：按落在的那块屏重新夹一次（换了缩放不同的屏就重画）；记球心，和球多大无关
+            n = self.base.width; self.place(self.x + n // 2, self.y + n // 2)
+            cfg['ball'] = [self.x + n // 2, self.y + n // 2]; save_cfg(); self.frame(self.app.state, 0.0)
         self.start = None
 
 
@@ -1825,7 +1923,7 @@ class Dial:
         N = self.N * ss; u = S * ss; C = (self.rad * S + self.ox) * ss
         L = Image.new('RGBA', (N, N), (0, 0, 0, 0)); d = ImageDraw.Draw(L)
         self.lv += ((level if state == 'rec' else 0) - self.lv) * 0.35
-        hot = RED if state == 'error' else ACCENT
+        hot = RED if state == 'error' else INK  # 外圈刻度亮起来的颜色
         for i in range(60):
             if state == 'rec': g = self.lv * (0.55 + 0.45 * math.sin(t * 7 + i * 0.55))
             elif state in ('busy', 'loading'): g = max(0.0, 1 - ((t * (40 if state == 'busy' else 18) - i) % 60) / 14) * (1 if state == 'busy' else 0.6)
@@ -1840,6 +1938,8 @@ class Dial:
 
 
 INSET_K = 0.5  # 凹下去的阴影深度 / 凸起的深度
+BTN_W, BTN_H, BTN_GAP = 80, 34, 10  # 窗口里的文字按钮（选项 / 开关 / 加入 / 启动）：一样宽、一样高、间距一样，一排右对齐卡片内边（btn_x）
+def btn_x(x, w, i, n): return x + w - 20 - (n - i) * BTN_W - (n - 1 - i) * BTN_GAP  # 卡片 (x, w) 里一排 n 个按钮的第 i 个的左边
 ELEV = 5  # 主页所有凸起（卡片、导航、右上角三个图标、候选词按钮）的凸起高度：阴影深度都用它，感觉一样高
 NAV = ((33, 140), (185, 140), (337, 30))  # 主页导航一排：历史 / 常用词 / 设置，高 30，间距 12；和顶行一样 33~367：HISTORY 左端对 QUILL，设置圆心 (352,487) 落在窗口右下圆角圆心上（和 × 上下对齐）
 WORDS = {'loading': 'WAKING', 'ready': 'READY', 'rec': 'LISTENING', 'busy': 'THINKING', 'error': 'ERROR'}
@@ -1857,7 +1957,18 @@ class App:
         self.settings = self.check_win = self.ready_win = self.history = self.words = self.pop = None
         self.cur = None  # 当前这句 [原话, 输入的英文, 中文]
         self.waiting = {}  # 英文出了、中文还没出就开始说下一句的那些：原话 → [原话, 英文, None]，中文到了再记
+        self.next_look = 0.0  # 下次看系统深浅色 / 主窗口在哪块屏的时间
+        self.build_ui()
+        root.after(2500, self.prewarm)
+        threading.Thread(target=self.ollama_loop, daemon=True).start()
+        threading.Thread(target=self.words_loop, daemon=True).start()
+        self.poll()
 
+    SUBS = ('settings', 'check_win', 'ready_win', 'history', 'words')
+
+    def build_ui(self):
+        """主窗口里的东西 + 浮窗 + 悬浮球。换主题 / 换缩放时 rebuild() 拆掉重来。"""
+        root = self.root; root.configure(bg=BG)
         n = self.n = Neu(root, self.W, self.H); n.c.pack()
         # 能点的都是凸起的，凹下去的只放内容。和设置 / 记录窗口一套网格：左右离边 20，标题行一样，第一张卡片顶边 y=92，
         # 卡片之间都隔 20，卡片圆角 28（窗口圆角 48 = 28 + 20）
@@ -1869,7 +1980,7 @@ class App:
         self.dots = {}; self.dot = n.c.create_image(0, 0, anchor='center', tags='txt')  # 状态点（PIL 抗锯齿画的圆，Tk 自带的 oval 没有抗锯齿看着不圆）：绿 = 麦克风有输入，黄 = 没声音（待机），红 = 不可用
         self.word = n.text(40, 109, '', 15, INK, family=DISPLAY)  # 左边缘都对在 40：QUILL / READY / HISTORY / 候选词
         self.sub = n.text(200, 416, '', 11, SUB, anchor='n'); n.c.itemconfigure(self.sub, justify='center')  # 提示放圆盘下面居中
-        n.raised(200 - 124, 148, 248, 248, 124, d=ELEV)  # 圆盘本身是凸起的大圆（能点 = 凸起），整页的视觉主角；按住时凹下去
+        n.raised(200 - 124, 148, 248, 248, 124, d=ELEV, fill=FACE)  # 圆盘本身是凸起的大圆（能点 = 凸起），整页的视觉主角；按住时凹下去
         self.dial = Dial(n, 200, 272, 124, (lambda: eng.start('mouse'), eng.stop))
         # 说哪种语言（出来的都是英文）：两个小胶囊和 READY 同一行、右边对齐卡片内边；选中的凹下去
         self.lang_sw = Switch(n, 299, 105, 30, 30, 8, (('en', 'EN'), ('zh', 'CN')), cfg['lang'], self.set_lang); n.btns.append(self.lang_sw)
@@ -1879,12 +1990,41 @@ class App:
         self.nav_label(n, 103, I_HIST, 'HISTORY'); self.nav_label(n, 255, I_EDIT, 'WORDS')
         n.commit()
         self.wn = Neu(root, self.W, 122); self.wn.c.pack(); self.build_words()
-        self.set_state('loading')
         self.overlay = Overlay(self); self.ball = Ball(self)
-        root.after(2500, self.prewarm)
-        threading.Thread(target=self.ollama_loop, daemon=True).start()
-        threading.Thread(target=self.words_loop, daemon=True).start()
-        self.poll()
+        self.set_state(self.state)
+
+    def rebuild(self, theme, s):
+        """系统换了深浅色，或主窗口拖到缩放不同的屏上：所有窗口按新的配色和缩放重画，开着的子窗口重新打开。
+        Tk 不会自己跟着缩放（字号、坐标都是按 S 算好的像素），所以整个拆掉重建；只在闲着、没按着鼠标时做。"""
+        global S
+        log(f'界面重建：{THEME} → {theme}，缩放 {S} → {s}')
+        opened = [a for a in self.SUBS if self.alive(a) and getattr(self, a).w.winfo_viewable()]
+        ball = self.ball.visible
+        for a in self.SUBS:
+            if self.alive(a): getattr(self, a).w.destroy()
+            setattr(self, a, None)
+        self.overlay.hide(); self.ball.hide()
+        for w in (self.overlay.w, self.ball.w, self.n.c, self.wn.c): w.destroy()
+        S = s; apply_theme(theme)
+        self.build_ui(); self.chrome.geo = None  # 窗口圆角、阴影也按新配色 / 缩放重画
+        self.root.update_idletasks()
+        wa, _ = monitor_of(self.chrome.hwnd)  # 变大了别伸出这块屏
+        r = self.root; x0, y0 = r.winfo_x(), r.winfo_y()
+        x = max(wa.left, min(x0, wa.right - r.winfo_width() - px(20))); y = max(wa.top, min(y0, wa.bottom - r.winfo_height() - px(12)))
+        if (x, y) != (x0, y0): r.geometry(f'+{x}+{y}')
+        self.chrome.sync()
+        for a in opened: self._open(a, {'settings': Settings, 'check_win': Checks, 'ready_win': Ready, 'history': History, 'words': Words}[a])
+        if ball: self.ball.show()
+        self.root.after(1500, self.prewarm)
+
+    def look_around(self):
+        """每秒看一次：系统深浅色变了、主窗口到了缩放不同的屏上，就 rebuild()。正在说话 / 改错、按着鼠标（还在拖窗口）时先不动。"""
+        if time.time() < self.next_look: return
+        self.next_look = time.time() + 1
+        h = self.chrome.hwnd  # 主窗口藏着（还没摆好 / 变成悬浮球）时不看它在哪块屏
+        theme, s = system_theme(), monitor_of(h)[1] if user32.IsWindowVisible(h) else S
+        if (theme, s) == (THEME, S) or self.state not in ('ready', 'loading', 'error') or self.overlay.visible or key_down(0x01): return
+        self.rebuild(theme, s)
 
     def nav_label(self, n, cx, icon, label):
         """导航按钮里的字：图标 + 宽体小标题，一起在按钮里居中；图标和文字的垂直中心对齐（HIST_DY 实测补偿）。"""
@@ -1947,13 +2087,13 @@ class App:
         rh = [m + 4 + len(b) * lh11 + 16 for (a, b), m in zip(rows, mm)]  # 一行 = 格子 + 灰字 + 16 间距（分隔线画在间距正中）
         h = round(20 + sum(rh) + 4 + (18 if extra > 0 else 0)) if show else 0; H = y + h + 20 if show else 27  # 没有卡片时导航下面留 33（主画布已有 6）：和顶上一样，按钮圆心离窗口边 48 = 窗口圆角，同心
         wn.reset(H); wn.c.configure(height=px(H))
-        for nx, nw in NAV: wn.raised(nx, 472 - self.H, nw, 30, 15, d=ELEV)  # 上面三个导航按钮的阴影伸过来
+        for nx, nw in NAV: wn.raised(nx, 472 - self.H, nw, 30, 15, d=ELEV, fill=FACE)  # 上面三个导航按钮的阴影伸过来
         if not show: wn.commit(); return
         down = wn.img.copy()  # 试验：候选词不要卡片框，直接放在窗口底色上（点这一块仍打开常用词窗口，按下时没有凹陷效果）；想要框回来：inset(down, x, y, w, h, 28, 5) + wn.raised(x, y, w, h, 28, d=7)
         if extra > 0: wn.text(x + w, y + h - 30, f'还有 {extra} 条', 11, SUB, anchor='ne')
         ry = y + 20
         for i, ((hd, c, k, src), (a, b), r, m) in enumerate(zip(show, rows, rh, mm)):
-            if i: wn.c.create_line(px(x), px(ry - 8), px(x + w), px(ry - 8), fill='#DCDCDC', width=1)
+            if i: wn.c.create_line(px(x), px(ry - 8), px(x + w), px(ry - 8), fill=RULE, width=1)
             ty = ry + (m - 2 * lh12) / 2; wn.text(x, ty, a[0], 12, SUB); wn.text(x, ty + lh12, a[1], 12, TEXT)
             for bx, bw, t, fn in ((158, 56, '加入', self.add_word), (96, 56, '修改', self.fix_word)):  # 两列等宽 56、间距 6
                 wn.button(x + w - bx, ry + (m - BH) / 2, bw, BH, text=t, size=11, d=ELEV, color=ICON_C, cmd=lambda fn=fn, hd=hd, c=c: fn(hd, c))
@@ -2017,9 +2157,11 @@ class App:
         self.root.after(15100, self.refresh_sub)
 
     def update_dot(self):
-        """READY 右边的状态点：红 = 出错 / 麦克风没打开，黄 = 麦克风 10 秒没声音（待机），绿 = 正常有输入。"""
+        """READY 右边的状态点：红 = 出错 / 麦克风没打开，橙 = 改错服务（Ollama）没起来、说的话会原样输出，
+        黄 = 麦克风 10 秒没声音（待机），绿 = 正常有输入。"""
         c = self.n.c; x0, y0, x1, y1 = c.bbox(self.word); cy = (y0 + y1) / 2
-        col = RED if self.state == 'error' or self.mic == 'off' else YELLOW if self.mic == 'silent' else GREEN
+        col = (RED if self.state == 'error' or self.mic == 'off' else ORANGE if self.ol_last in ('down', 'no_model')
+               else YELLOW if self.mic == 'silent' else GREEN)
         if col not in self.dots:
             n = px(6) + 2; ss = 8; im = Image.new('RGBA', (n * ss, n * ss), (0, 0, 0, 0))
             ImageDraw.Draw(im).ellipse((ss, ss, (n - 1) * ss, (n - 1) * ss), fill=col)
@@ -2094,6 +2236,7 @@ class App:
         for a in ('settings', 'pop'):
             if self.alive(a): getattr(self, a).tick(self.shown, mic)
         sync_chromes()
+        self.look_around()
         self.overlay.frame(self.shown)
         if self.ball.visible:
             if user32.IsWindowVisible(self.chrome.hwnd): self.ball.hide()  # 别处把主窗口叫出来了（比如再双击图标）
@@ -2110,7 +2253,7 @@ class App:
         elif kind == 'live': self.overlay.live(*a)
         elif kind == 'thinking': self.overlay.think(a[0])
         elif kind == 'fixed':
-            raw, fixed, by_key = a; self.park(); self.cur = [raw, fixed, None]; self.overlay.result(raw, fixed, None, by_key)
+            raw, fixed, by_key, unfixed = a; self.park(); self.cur = [raw, fixed, None]; self.overlay.result(raw, fixed, None, by_key, unfixed)
             if not by_key: self.show_notice('已复制到剪贴板，去要输入的地方按 Ctrl+V。', 'ok')
         elif kind == 'zh':
             raw, zh = a
@@ -2122,7 +2265,7 @@ class App:
                 log('改错服务：', st)
                 if st == 'down' and time.time() - self.ol_starting > 30: self.show_notice('改错服务没开：去设置里点「启动」。', 'warn')
             changed, self.ol_last = st != self.ol_last, st
-            if changed: self.refresh_settings()
+            if changed: self.refresh_settings(); self.update_dot()
         elif kind == 'key_recorded':
             if self.alive('settings'): self.settings.key_recorded(a[0])
         elif kind == 'mode':  # Whisper 载完 / 载不了：第一次启动有缺的东西就自己弹出准备情况窗口
@@ -2153,7 +2296,7 @@ class Settings:
         self.label(n, x, y, w, h, '麦克风')
         for i, name in enumerate(devs):
             on = name == cur
-            n.button(x + 20, dev_y + i * 44, w - 40, 34, r=17, text=name, icon=I_OK if on else '', size=12, on=on, align='left', cmd=lambda name=name: self.pick_dev(name))
+            n.button(x + 20, dev_y + i * 44, w - 40, BTN_H, r=BTN_H / 2, text=name, icon=I_OK if on else '', size=12, on=on, align='left', cmd=lambda name=name: self.pick_dev(name))
         self.bar = None
         if self.tip_state != 'ok':  # 出问题时标题行右边换成一句橙 / 红字（不画音量条）；正常时不放字，黑条会跳就是好的
             text, color = {'silent': ('10 秒没声音 · 静音键常是 F4', ORANGE), 'off': ('打不开：换一个设备', RED)}[self.tip_state]
@@ -2161,7 +2304,7 @@ class Settings:
             return h
         track_y = y + 28; n.inset(x + 100, track_y, w - 120, 10, 5, d=2.5)
         self.bar_x, self.bar_w = x + 106, w - 132
-        self.bar = n.c.create_line(px(self.bar_x), px(track_y + 5), px(self.bar_x), px(track_y + 5), width=px(4), fill=ACCENT, capstyle='round')
+        self.bar = n.c.create_line(px(self.bar_x), px(track_y + 5), px(self.bar_x), px(track_y + 5), width=px(4), fill=INK, capstyle='round')
         return h
 
     def sec_key(self, n, x, y, w, draw):
@@ -2169,16 +2312,16 @@ class Settings:
         cols, gap = 4, 10; cw = (w - 40 - gap * (cols - 1)) / cols  # 4 列网格：每个一样宽、间距一样
         chips = [(vk, x + 20 + (i % cols) * (cw + gap), (i // cols) * 46, cw) for i, vk in enumerate(keys + [None])]
         cy = chips[-1][2]
-        chip_y = y + 56; h = chip_y + cy + 34 + 20 - y  # 提示字放在标题那行右边
+        chip_y = y + 56; h = chip_y + cy + BTN_H + 20 - y  # 提示字放在标题那行右边
         if not draw: return h
         self.label(n, x, y, w, h, '快捷键')
         for vk, cx, dy, cw in chips:
             if vk is None:
-                self.rec_btn = n.button(cx, chip_y + dy, cw, 34, text='请按键…' if self.recording else '录制', size=12,
+                self.rec_btn = n.button(cx, chip_y + dy, cw, BTN_H, text='请按键…' if self.recording else '录制', size=12,
                                         color=ORANGE if self.recording else TEXT, cmd=self.record)
             else:
                 on = vk == cfg['hotkey']
-                n.button(cx, chip_y + dy, cw, 34, text=key_name(vk), size=12, on=on, cmd=lambda vk=vk: self.set_hot(vk))
+                n.button(cx, chip_y + dy, cw, BTN_H, text=key_name(vk), size=12, on=on, cmd=lambda vk=vk: self.set_hot(vk))
         self.ktip = n.text(x + w - 20, y + 25, self.key_tip[0], 11, self.key_tip[1], anchor='ne', width=w - 110, lines=1)
         return h
 
@@ -2187,7 +2330,7 @@ class Settings:
         if not draw: return h
         self.label(n, x, y, w, h, '说中文时')
         for i, (m, name, _) in enumerate(self.ZH_OUTS):
-            n.button(x + w - 210 + i * 100, y + 14, 90, 34, text=name, size=12, on=m == cfg.get('zh_out', 'en'), cmd=lambda m=m: self.set_zh_out(m))
+            n.button(btn_x(x, w, i, 2), y + 14, BTN_W, BTN_H, text=name, size=12, on=m == cfg.get('zh_out', 'en'), cmd=lambda m=m: self.set_zh_out(m))
         return h
 
     def sec_ol(self, n, x, y, w, draw):
@@ -2203,14 +2346,14 @@ class Settings:
         info = f'Ollama · {LLM_MODEL} · ' + ('显卡' if on_gpu else 'CPU' + ('（显卡慢，暂时换）' if LLM_GPU_LAYERS else ''))
         if llm_stat: info += f' · 上一句 {llm_stat["secs"]:.1f} 秒'
         n.text(x + 20, y + 56, info, 11, SUB, width=w - (130 if st == 'down' else 40), lines=1)
-        if st == 'down': n.button(x + w - 90, y + 46, 70, 34, text='启动', size=12, cmd=self.start_ol)
+        if st == 'down': n.button(btn_x(x, w, 0, 1), y + 46, BTN_W, BTN_H, text='启动', size=12, cmd=self.start_ol)
         n.text(x + 20, y + 96, '改错模型', 12, TEXT)
         for i, (k, name) in enumerate(LLM_MODELS):
-            n.button(x + w - 210 + i * 100, y + 86, 90, 34, text=name, size=12, on=k == LLM_MODEL, cmd=lambda k=k: self.set_llm(k))
+            n.button(btn_x(x, w, i, 2), y + 86, BTN_W, BTN_H, text=name, size=12, on=k == LLM_MODEL, cmd=lambda k=k: self.set_llm(k))
         n.text(x + 20, y + 138, '不用时释放显存', 12, TEXT)
         cols, gap = len(KEEPS), 10; cw = (w - 40 - gap * (cols - 1)) / cols  # 和快捷键那排一样：等宽、等间距
         for i, (k, name) in enumerate(KEEPS):
-            n.button(x + 20 + i * (cw + gap), y + 166, cw, 34, text=name, size=12, on=k == cfg.get('keep', '2m'), cmd=lambda k=k: self.set_keep(k))
+            n.button(x + 20 + i * (cw + gap), y + 166, cw, BTN_H, text=name, size=12, on=k == cfg.get('keep', '2m'), cmd=lambda k=k: self.set_keep(k))
         return h
 
     @classmethod
@@ -2222,7 +2365,7 @@ class Settings:
     @classmethod
     def view_height(cls):
         """窗口实际多高：最多到屏幕工作区高度减上下各 20，超出的内容滚着看（麦克风多 / 屏幕矮时会超）。"""
-        wa = ctypes.wintypes.RECT(); user32.SystemParametersInfoW(0x30, 0, ctypes.byref(wa), 0)
+        wa = monitor_of(root.chrome.hwnd)[0]  # 主窗口那块屏
         return min(cls.full_height(), int((wa.bottom - wa.top) / S) - 40)
 
     def scroll(self, k):
@@ -2368,18 +2511,18 @@ class History:
         self.opened ^= {key}; self.build(keep=True)
 
     def prefs(self, n, y, h, on):
-        """记录设置卡片：右边是 3 列网格（每格 70 宽、间隔 10，右对齐），开 / 关占后两列，清空跨后两列，上下对齐。"""
-        x, w = 20, 360; col = lambda i: x + w - 20 - (3 - i) * 70 - (2 - i) * 10
+        """记录设置卡片：右边是 3 列网格（BTN_W 宽、BTN_GAP 间隔，右对齐），开 / 关占后两列，清空跨后两列，上下对齐。"""
+        x, w = 20, 360; col = lambda i: btn_x(x, w, i, 3)
         n.raised(x, y, w, h, 28, d=ELEV)
         n.text(x + 20, y + 24, '保存记录', 12, TEXT)
         for i, (v, name) in enumerate(((True, '开'), (False, '关'))):
-            n.button(col(i + 1), y + 14, 70, 34, text=name, size=12, on=v == on, cmd=lambda v=v: self.set_hist(v))
+            n.button(col(i + 1), y + 14, BTN_W, BTN_H, text=name, size=12, on=v == on, cmd=lambda v=v: self.set_hist(v))
         if not on: return
         n.text(x + 20, y + 70, '只留最近', 12, TEXT)
         for i, (d, name) in enumerate(HIST_DAYS):
-            n.button(col(i), y + 60, 70, 34, text=name, size=12, on=d == cfg.get('hist_days', 0), cmd=lambda d=d: self.set_days(d))
+            n.button(col(i), y + 60, BTN_W, BTN_H, text=name, size=12, on=d == cfg.get('hist_days', 0), cmd=lambda d=d: self.set_days(d))
         n.text(x + 20, y + 116, f'共 {len(hist_blocks())} 条', 11, SUB)
-        self.clear_btn = n.button(col(1), y + 106, 150, 34, text='再点一下确认' if self.arm_clear else '清空记录', size=12,
+        self.clear_btn = n.button(col(1), y + 106, 2 * BTN_W + BTN_GAP, BTN_H, text='再点一下确认' if self.arm_clear else '清空记录', size=12,
                                   color=RED if self.arm_clear else TEXT, cmd=self.clear)
 
     def set_hist(self, v):
@@ -2447,9 +2590,9 @@ class Words:
         close_btn(h, self.W, self.w.withdraw)
         h.button(299, 33, 30, 30, icon=I_OPEN, size=9, color=ICON_C, cmd=self.open_file)  # 用记事本改：复杂写法 / 一次改很多
         h.raised(20, y, 360, ch, 28, d=ELEV)
-        h.inset(40, y + 20, 230, 40, 20, d=ELEV * INSET_K)  # 输入框凹下去，按钮和它上下居中、右对齐卡片内边
-        h.c.create_window(px(56), px(y + 40), window=self.ent, anchor='w', width=px(198))
-        h.button(290, y + 23, 70, 34, text='保存' if self.editing else '加入', size=12, cmd=self.submit)
+        h.inset(40, y + 20, btn_x(20, 360, 0, 1) - 20 - 40, 40, 20, d=ELEV * INSET_K)  # 输入框凹下去，按钮和它上下居中、右对齐卡片内边
+        h.c.create_window(px(56), px(y + 40), window=self.ent, anchor='w', width=px(btn_x(20, 360, 0, 1) - 20 - 56 - 16))
+        h.button(btn_x(20, 360, 0, 1), y + 23, BTN_W, BTN_H, text='保存' if self.editing else '加入', size=12, cmd=self.submit)
         tip = (f'正在改「{parse_word(self.editing)[0]}」 · Enter 保存 · Esc 取消' if self.editing
                else '例：Claude: cloud, 克劳德（冒号后面是听错的写法，可不写）')
         h.text(40, y + 72, tip, 11, SUB, width=320, lines=1)
@@ -2545,13 +2688,13 @@ class ScrollBar:
         self.n, self.total, self.view, self.cmd = n, total, view, None
         self.visible, self.hold = total > view, (self.press, self.release)
         self.pins = []
-        self.thumb = n.c.create_line(0, 0, 0, 0, width=px(4), fill='#9A9A9E', capstyle='round', tags='txt')
+        self.thumb = n.c.create_line(0, 0, 0, 0, width=px(4), fill=THUMB, capstyle='round', tags='txt')
         self.drag = None; n.btns.append(self)
 
     def pin(self, item, y): self.pins.append((item, y))
 
     def make(self): pass  # Neu.commit 会调，这里没有要预先画的
-    def set_down(self, v): self.n.c.itemconfigure(self.thumb, fill=INK if v else '#9A9A9E')
+    def set_down(self, v): self.n.c.itemconfigure(self.thumb, fill=INK if v else THUMB)
 
     def geom(self):
         """滑块在视口里的上下端（逻辑像素）和轨道长度。"""
@@ -2590,8 +2733,11 @@ class ScrollBar:
 
 class Checks:
     """自检窗口：一项项打勾。"""
-    ICON = {'wait': ('', SUB), 'run': ('…', INK), 'ok': ('✓', GREEN), 'fail': ('✕', RED), 'warn': ('!', ORANGE)}
     W, ROW = 400, 84
+
+    @staticmethod
+    def icon(st):  # 每次现取：换主题后颜色不一样
+        return {'wait': ('', SUB), 'run': ('…', INK), 'ok': ('✓', GREEN), 'fail': ('✕', RED), 'warn': ('!', ORANGE), 'info': ('–', SUB)}[st]
 
     def __init__(self, app):
         self.app, self.running, self.extra = app, False, None
@@ -2623,12 +2769,12 @@ class Checks:
         threading.Thread(target=lambda: post('checks_done', run_checks(report, not SELFTEST)), daemon=True).start()
 
     def update(self, i, st, text, extra):
-        ic, d, y = self.rows[i]; sym, color = self.ICON[st]
+        ic, d, y = self.rows[i]; sym, color = self.icon(st)
         self.n.c.itemconfigure(ic, text=sym, fill=color)
         self.n.c.itemconfigure(d, text=fit(text, fnt(11), px(276), 3), fill=RED if st == 'fail' else SUB)
         if extra is not None:
             def use(): self.app.set_key(extra); self.n.remove(self.extra); self.extra = None
-            self.extra = self.n.button(254, y + 4, 110, 30, r=15, text=f'改用「{key_name(extra)}」', size=12, cmd=use)
+            self.extra = self.n.button(254, y + 2, 110, BTN_H, text=f'改用「{key_name(extra)}」', size=12, cmd=use)
 
     def done(self, ok):
         self.running = False; self.btn.set(text='全部通过 · 再测一次' if ok else '再测一次', color=INK)
@@ -2657,7 +2803,6 @@ def readiness(ol):
 
 class Ready:
     """准备情况窗口：缺 Ollama / 模型 / 显卡库时说清楚缺什么，按钮在黑框 PowerShell 里运行 setup.ps1（装完自动重新检查）。"""
-    ICON = {**Checks.ICON, 'info': ('–', SUB)}
     NAMES = ['识别模型（Whisper）', '改错服务']
     W, ROW = 400, 88
 
@@ -2692,10 +2837,10 @@ class Ready:
         for b in self.btns: self.n.remove(b)
         self.btns = []
         for (lv, text, act), (ic, _, d, y) in zip(rows, self.rows):
-            sym, color = self.ICON[lv]
+            sym, color = Checks.icon(lv)
             self.n.c.itemconfigure(ic, text=sym, fill=color)
-            self.n.c.itemconfigure(d, text=fit(text, fnt(11), px(196 if act else 276), 3), fill=RED if lv == 'fail' else SUB)
-            if act: self.btns.append(self.n.button(300, y + 20, 64, 30, r=15, text='进行中' if self.proc else act, size=12, color=SUB if self.proc else INK, cmd=self.run_setup))
+            self.n.c.itemconfigure(d, text=fit(text, fnt(11), px(190 if act else 276), 3), fill=RED if lv == 'fail' else SUB)
+            if act: self.btns.append(self.n.button(364 - BTN_W, y + 18, BTN_W, BTN_H, text='进行中' if self.proc else act, size=12, color=SUB if self.proc else INK, cmd=self.run_setup))
 
     def run_setup(self):
         if self.proc or not SETUP_PS1.exists(): return notify('找不到 setup.ps1，请重新下载 Quill。', 'err')
@@ -2784,17 +2929,19 @@ if __name__ == '__main__':
     trim_history()
     try: ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('local.voice-input')  # 任务栏显示自己的图标
     except Exception: pass
-    try: ctypes.windll.shcore.SetProcessDpiAwareness(1)  # 高分屏下不模糊；坐标按 S 缩放
+    try: ctypes.windll.shcore.SetProcessDpiAwareness(2)  # 每块屏按自己的缩放（per-monitor），高分屏下不模糊；坐标按 S 缩放
     except Exception: pass
     load_fonts()
     root = tk.Tk(); root.withdraw()
-    S = root.winfo_fpixels('1i') / 96
+    pt = ctypes.wintypes.POINT(); user32.GetCursorPos(ctypes.byref(pt))
+    wa, S = monitor_at(pt.x, pt.y)  # 开在光标所在的那块屏
+    log(f"光标 {pt.x},{pt.y}，工作区 {rect(wa)}，缩放 {S}")
+    apply_theme(system_theme())
     setup_fonts(root)
     root.report_callback_exception = lambda *e: (log('界面出错', ''.join(traceback.format_exception(*e))),
                                                  notify('出了点问题，已记到 run.log。', 'err'))
     threading.excepthook = lambda a: log('后台出错', ''.join(traceback.format_exception(a.exc_type, a.exc_value, a.exc_traceback)))
     app = App(root)
-    wa = ctypes.wintypes.RECT(); user32.SystemParametersInfoW(0x30, 0, ctypes.byref(wa), 0)  # 工作区（不含任务栏），物理像素
     root.geometry(f'+{wa.right - px(App.W) - px(20)}+{wa.top + px(12)}')  # 离右边 20：四个窗口全开时排得下，不用挪
     root.deiconify(); root.update()  # 先把窗口画出来：冷启动时开麦克风要等声卡驱动一两秒，放在前面窗口会白一阵
     threading.Thread(target=lambda: (eng.open(cfg['device']), eng.load()), daemon=True).start()  # 开麦克风、载识别模型都在后台
