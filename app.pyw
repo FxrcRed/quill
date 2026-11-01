@@ -97,6 +97,7 @@ THEME = 'light'
 def system_theme():
     """Windows 设置里「选择默认应用模式」：AppsUseLightTheme=0 是深色。环境变量 QUILL_THEME=light / dark 可以强制（截图测试用）。"""
     if os.environ.get('QUILL_THEME') in THEMES: return os.environ['QUILL_THEME']
+    if cfg.get('theme') in THEMES: return cfg['theme']  # 主页右上角手动切过（App.toggle_theme）
     try:
         import winreg
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r'Software\Microsoft\Windows\CurrentVersion\Themes\Personalize') as k:
@@ -122,9 +123,11 @@ I_DOWN, I_UP = '\uE70D', '\uE70E'  # 记录里展开 / 收起原话
 I_EDIT, I_DEL = '\uE70F', '\uE74D'  # 常用词窗口：改 / 删
 I_PIN = '\uE718'  # 浮窗固定后右边的图钉
 I_OPEN, I_SETUP = '', ''  # 记录 / 常用词标题行「用记事本打开」；设置标题行「准备情况」（扳手）
+I_MOON, I_SUN = '', ''  # 主页右上角切深 / 浅色
+ICON_NUDGE = {I_MOON: (-1.1, -0.7)}  # 字形墨迹不在字框中心的图标，按 100% 补回（月牙重心偏右下，PIL 量的）
 HIST_DY = 4
 NAV_DY = -4  # 导航按钮里宽体字比按钮中线低 4 像素（实测：按钮身 656~700，字心 682.5），整排上提
-S = 1.0  # 屏幕缩放（150% = 1.5），界面坐标都按 100% 写，画的时候乘 S。启动时按光标那块屏定一次，之后不变：
+S = 1.0  # 屏幕缩放（150% = 1.5），界面坐标都按 100% 写，画的时候乘 S。按主屏（系统）缩放，之后不变，别的屏由 Windows 拉伸：
          # 窗口拖到缩放不同的屏上保持同样的像素大小（用户要的，2026-11-01；不跟着那块屏放大缩小）
 
 user32, kernel32 = ctypes.windll.user32, ctypes.windll.kernel32
@@ -143,7 +146,7 @@ user32.GetCursorPos.argtypes = [ctypes.POINTER(ctypes.wintypes.POINT)]
 ctypes.windll.shcore.GetDpiForMonitor.argtypes = [ctypes.wintypes.HMONITOR, ctypes.c_int, ctypes.POINTER(ctypes.c_uint), ctypes.POINTER(ctypes.c_uint)]
 
 def monitor(hmon):
-    """一块屏的 (工作区, 缩放)：工作区不含任务栏，物理像素；缩放是这块屏自己的（每块屏可以不一样，进程是 per-monitor DPI 感知）。"""
+    """一块屏的 (工作区, 缩放)：工作区不含任务栏。进程是系统级 DPI 感知，坐标、缩放都按主屏的算（别的屏 Windows 换算好）。"""
     mi = _MONITORINFO(); mi.cbSize = ctypes.sizeof(mi); user32.GetMonitorInfoW(hmon, ctypes.byref(mi))
     dx, dy = ctypes.c_uint(96), ctypes.c_uint(96)
     if ctypes.windll.shcore.GetDpiForMonitor(hmon, 0, ctypes.byref(dx), ctypes.byref(dy)): dx.value = 96  # 0 = MDT_EFFECTIVE_DPI；失败按 100%
@@ -153,6 +156,14 @@ def rect(r): return r.left, r.top, r.right, r.bottom
 
 def monitor_at(x, y): return monitor(user32.MonitorFromPoint(ctypes.wintypes.POINT(int(x), int(y)), 2))  # 包含这个点的那块屏（不在任何屏上就取最近的）
 def monitor_of(hwnd): return monitor(user32.MonitorFromWindow(hwnd, 2))
+
+def monitors():
+    """所有屏：[(整块屏的矩形（含任务栏）, 缩放), ...]。"""
+    hm = []; cb = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.wintypes.HMONITOR, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)(lambda h, *_: hm.append(h) or 1)
+    user32.EnumDisplayMonitors(None, None, cb, None); out = []
+    for h in hm:
+        mi = _MONITORINFO(); mi.cbSize = ctypes.sizeof(mi); user32.GetMonitorInfoW(h, ctypes.byref(mi)); out.append((rect(mi.rcMonitor), monitor(h)[1]))
+    return out
 
 def active_monitor():
     """正在用的那块屏（前台窗口所在；没有前台窗口就看光标）。"""
@@ -1057,6 +1068,12 @@ def fnt(size, weight='normal', family=None):
     if key not in _fonts: _fonts[key] = tkfont.Font(family=key[0], size=key[1], weight=weight)
     return _fonts[key]
 
+_ref_fonts = {}
+def ref_fnt(size):
+    """按固定 200% 缩放的字体，只用来量宽度（截断结果和当前在哪块屏无关，见 App.build_words）。"""
+    if size not in _ref_fonts: _ref_fonts[size] = tkfont.Font(family=FONT, size=-round(size * 2))
+    return _ref_fonts[size]
+
 def wrap(text, f, width):
     """按像素宽度折行：英文按词、中文按字。width 是物理像素。"""
     out, line = [], ''
@@ -1074,6 +1091,19 @@ def fit(text, f, width, n=1):
         while last and f.measure(last + '…') > width: last = last[:-1]
         ls[-1] = last.rstrip() + '…'
     return '\n'.join(ls)
+
+def excerpt(text, word, f, width):
+    """一行里放得下的、以 word 为中心的一段原话，两头截掉的用 … 标出；找不到 word 就从头截。"""
+    text = ' '.join(text.split()); i = text.lower().find(word.lower())
+    if i < 0: return fit(text, f, width)
+    l, r = i, i + len(word)
+    show = lambda l, r: ('…' if l else '') + text[l:r] + ('…' if r < len(text) else '')
+    while l > 0 or r < len(text):  # 左右轮流各加一个字，放不下就停
+        grew = False
+        for nl, nr in ((l - 1, r), (l, r + 1)) if r - i - len(word) >= i - l else ((l, r + 1), (l - 1, r)):
+            if 0 <= nl and nr <= len(text) and f.measure(show(nl, nr)) <= width: l, r, grew = nl, nr, True; break
+        if not grew: break
+    return show(l, r)
 
 def _shape(size, box, r, ss=1, off=0.0):
     """圆角矩形蒙版（ss 倍超采样再按块缩小 = 抗锯齿，比 LANCZOS 快）。"""
@@ -1175,15 +1205,19 @@ class Neu:
         if b:
             b.set_down(True)
             if b.hold: b.hold[0]()
-        elif hasattr(top, 'chrome'): self.drag = (e.x_root - top.winfo_x(), e.y_root - top.winfo_y())
+        elif hasattr(top, 'chrome'):
+            self.drag = (e.x_root - top.winfo_x(), e.y_root - top.winfo_y())
+            if getattr(top, 'on_press', None): top.on_press()  # 主窗口：后台先备好跨屏替身（App.on_press）
 
     def _drag(self, e):
         if self.active and hasattr(self.active, 'motion'): return self.active.motion(e)
         if self.drag:
             top = self.c.winfo_toplevel(); top.geometry(f'+{e.x_root - self.drag[0]}+{e.y_root - self.drag[1]}'); top.chrome.sync()
+            if getattr(top, 'on_drag', None): top.on_drag(e.x_root, e.y_root)  # 主窗口：跨屏替身跟着走（App.on_drag）
 
     def _release(self, e):
-        b, self.active, self.drag = self.active, None, None
+        b, d, self.active, self.drag = self.active, self.drag, None, None
+        if d and getattr(self.c.winfo_toplevel(), 'on_drop', None): self.c.winfo_toplevel().on_drop()  # 主窗口：松手后按落点那块屏重建（App.on_drop）
         if not b: return
         b.set_down(False)
         if b.hold: b.hold[1]()
@@ -1251,7 +1285,8 @@ class Btn:
             wi, wt = fi.measure(self.icon) if self.icon else 0, ft.measure(self.text) if self.text else 0
             gap = px(8) if self.icon and self.text else 0; left = px(x + w / 2) - (wi + gap + wt) / 2
             self.lab = []
-            if self.icon: self.lab.append(c.create_text(left + wi / 2, cy, text=self.icon, font=fi, fill=self.color, anchor='center', tags='txt'))
+            nx, ny = ICON_NUDGE.get(self.icon, (0, 0))
+            if self.icon: self.lab.append(c.create_text(left + wi / 2 + px(nx), cy + px(ny), text=self.icon, font=fi, fill=self.color, anchor='center', tags='txt'))
             if self.text: self.lab.append(c.create_text(left + wi + gap + wt / 2, cy, text=self.text, font=ft, fill=self.color, anchor='center', tags='txt'))
         self.sync()
 
@@ -1308,7 +1343,7 @@ class Switch:
             if v == self.value or v == self.down:  # 和按钮按下去同一个逻辑（Btn.draw）：先画凸起的边，再在里面压出凹面，所以外沿还留着一圈凸边
                 raised(im, lx, ly, w, h, h / 2, ELEV, FACE); inset(im, lx, ly, w, h, h / 2, ELEV * INSET_K)
             else: raised(im, lx, ly, w, h, h / 2, ELEV, FACE)
-            self.lab.append(c.create_text(px(x + w / 2), px(y + h / 2), text=t, font=fnt(11), fill=ICON_C, tags='txt'))
+            self.lab.append(c.create_text(px(x + w / 2), px(y + h / 2 - 1), text=t, font=fnt(11), fill=ICON_C, tags='txt'))  # -1：思源黑体的大写字母墨迹比字框中心低约 1 像素（PIL 量的）
         self.ph = ImageTk.PhotoImage(im); c.itemconfigure(self.tile, image=self.ph)
 
     def contains(self, x, y):
@@ -1351,22 +1386,43 @@ class Chrome:
         if not user32.IsWindowVisible(h) or user32.IsIconic(h):
             if self.shown: user32.ShowWindow(self.shwnd, 0); self.shown = False
             return
+        if getattr(self, 'hidden', False):  # 拖动跨屏时主窗口由 Proxy 替身顶着，阴影也藏
+            if self.shown: user32.ShowWindow(self.shwnd, 0); self.shown = False
+            return
         r = ctypes.wintypes.RECT(); user32.GetWindowRect(h, ctypes.byref(r)); x, y, w, hh = r.left, r.top, r.right - r.left, r.bottom - r.top
         M = px(self.M)
         if self.geo is None or self.geo[2:] != (w, hh):
-            R = px(self.R); user32.SetWindowRgn(h, gdi32.CreateRoundRectRgn(1, 1, w - 1, hh - 1, 2 * R - 2, 2 * R - 2), True)
-            size, box = (w + 2 * M, hh + 2 * M), (M, M, M + w, M + hh)
-            img = Image.new('RGBA', size, (0, 0, 0, 0)); sm = Image.new('L', size, 0)
-            ImageDraw.Draw(sm).rounded_rectangle((M + px(6), M + px(12), M + w - px(6), M + hh + px(4)), R, fill=110)
-            shadow = Image.new('RGBA', size, SHADOW + (0,)); shadow.putalpha(_blur(sm, px(14))); img.alpha_composite(shadow)
-            bg = Image.new('RGBA', size, BG); bg.putalpha(_shape(size, box, R, 2))
-            img.alpha_composite(bg)  # 不能用 paste(mask)：它把底色和阴影层的深色 RGB 直接按 mask 混，圆角边缘会出一圈深灰（阴影全透明处也会）
-            ulw(self.shwnd, img, x - M, y - M)
+            self.clip(); ulw(self.shwnd, self.frame_img(w, hh, S), x - M, y - M)
         elif self.geo[:2] != (x, y):
             user32.SetWindowPos(self.shwnd, None, x - M, y - M, 0, 0, 0x15)
         self.geo = (x, y, w, hh)
         if not self.shown: user32.ShowWindow(self.shwnd, 8); self.shown = True
         if self.taskbar: set_win_icon(h)
+
+    def clip(self):
+        """按窗口现在的大小、缩放裁圆角（同样的就不重设，重设会重画一遍）。"""
+        r = ctypes.wintypes.RECT(); user32.GetWindowRect(self.hwnd, ctypes.byref(r)); w, hh = r.right - r.left, r.bottom - r.top; R = px(self.R)
+        if getattr(self, 'rgn', None) == (w, hh, R): return
+        self.rgn = (w, hh, R); user32.SetWindowRgn(self.hwnd, gdi32.CreateRoundRectRgn(1, 1, w - 1, hh - 1, 2 * R - 2, 2 * R - 2), True)
+
+    _frames = {}
+    def frame_img(self, w, hh, s):
+        """w × hh 的窗口按缩放 s 画的阴影 + 圆角底（四周留 M 给阴影）。按尺寸 / 缩放 / 主题缓存（大图模糊要上百毫秒，拖动跨屏时现画会卡，App.prewarm 先画好）。"""
+        key = (w, hh, round(s, 2), THEME, self.R)
+        if key not in Chrome._frames:
+            if len(Chrome._frames) > 12: Chrome._frames.clear()
+            Chrome._frames[key] = self._frame_img(w, hh, s)
+        return Chrome._frames[key].copy()
+
+    def _frame_img(self, w, hh, s):
+        p = lambda v: round(v * s); M, R = p(self.M), p(self.R)
+        size, box = (w + 2 * M, hh + 2 * M), (M, M, M + w, M + hh)
+        img = Image.new('RGBA', size, (0, 0, 0, 0)); sm = Image.new('L', size, 0)
+        ImageDraw.Draw(sm).rounded_rectangle((M + p(6), M + p(12), M + w - p(6), M + hh + p(4)), R, fill=110)
+        shadow = Image.new('RGBA', size, SHADOW + (0,)); shadow.putalpha(_blur(sm, p(14))); img.alpha_composite(shadow)
+        bg = Image.new('RGBA', size, BG); bg.putalpha(_shape(size, box, R, 2))
+        img.alpha_composite(bg)  # 不能用 paste(mask)：它把底色和阴影层的深色 RGB 直接按 mask 混，圆角边缘会出一圈深灰（阴影全透明处也会）
+        return img
 
 def sync_chromes():
     for c in CHROMES[:]:
@@ -1375,15 +1431,15 @@ def sync_chromes():
         except tk.TclError: pass
         CHROMES.remove(c)
 
-_icons = []
+_icons = {}
 def set_win_icon(hwnd):
-    """任务栏 / Alt+Tab 里的图标。Tk 显示窗口时会把它换回自己的羽毛，所以 sync 里发现被换了就再设一次；
-    窗口类的默认图标也换成我们的，Tk 退回默认时也是它。"""
-    if not _icons:
-        for metric in (11, 49):  # 大：SM_CXICON；小：SM_CXSMICON
-            n = user32.GetSystemMetrics(metric)
-            _icons.append(user32.LoadImageW(None, str(HERE / 'icon_dial.ico'), 1, n, n, 0x10))  # IMAGE_ICON, LR_LOADFROMFILE
-    big, small = _icons
+    """任务栏 / Alt+Tab 里的图标，跟着主题换（深色用 icon_dial_dark.ico，tools\\make_dial_icon.py 生成）。Tk 显示窗口时会把它换回自己的羽毛，
+    所以 sync 里发现被换了就再设一次；窗口类的默认图标也换成我们的，Tk 退回默认时也是它。"""
+    if THEME not in _icons:
+        f = HERE / ('icon_dial_dark.ico' if THEME == 'dark' else 'icon_dial.ico')
+        if not f.exists(): f = HERE / 'icon_dial.ico'
+        _icons[THEME] = [user32.LoadImageW(None, str(f), 1, user32.GetSystemMetrics(m), user32.GetSystemMetrics(m), 0x10) for m in (11, 49)]  # 大 SM_CXICON / 小 SM_CXSMICON；IMAGE_ICON, LR_LOADFROMFILE
+    big, small = _icons[THEME]
     if not big or user32.SendMessageW(hwnd, 0x7F, 1, 0) == big: return  # WM_GETICON：已经是我们的
     user32.SendMessageW(hwnd, 0x80, 1, big); user32.SendMessageW(hwnd, 0x80, 0, small)  # WM_SETICON 大 / 小
     user32.SetClassLongPtrW(hwnd, -14, big); user32.SetClassLongPtrW(hwnd, -34, small)  # GCLP_HICON / GCLP_HICONSM
@@ -1487,7 +1543,10 @@ class _BMIH(ctypes.Structure):
 def ulw(hwnd, img, x, y):
     """把 RGBA 图整张贴成分层窗口的样子（每个像素带透明度）。"""
     w, h = img.size; r, g, b, a = img.split()
-    data = Image.merge('RGBA', [ImageChops.multiply(c, a) for c in (r, g, b)] + [a]).tobytes('raw', 'BGRA')  # 要预乘透明度
+    ulw_bytes(hwnd, Image.merge('RGBA', [ImageChops.multiply(c, a) for c in (r, g, b)] + [a]).tobytes('raw', 'BGRA'), w, h, x, y)  # 要预乘透明度
+
+def ulw_bytes(hwnd, data, w, h, x, y):
+    """同 ulw，data 是已经预乘好透明度的 BGRA（换主题的 Wipe 每帧自己用 numpy 算）。"""
     sdc = user32.GetDC(None); mdc = gdi32.CreateCompatibleDC(sdc); bits = _vp()
     bi = _BMIH(ctypes.sizeof(_BMIH), w, -h, 1, 32, 0, 0, 0, 0, 0, 0)
     bmp = gdi32.CreateDIBSection(mdc, ctypes.byref(bi), 0, ctypes.byref(bits), None, 0)
@@ -1504,17 +1563,37 @@ for _fn, _res, _args in ((gdi32.CreateCompatibleBitmap, _vp, [_vp, ctypes.c_int,
                          (gdi32.GetDIBits, ctypes.c_int, [_vp, _vp, _u32, _u32, _vp, _vp, _u32])):
     _fn.restype, _fn.argtypes = _res, _args
 
-def grab_small(box, k=6):
+def grab_small(box, k=6, rop=0x00CC0020):
     """把屏幕上 box（物理像素，副屏的负坐标也行）直接缩小 k 倍截下来。比 ImageGrab 快 8 倍：
     ImageGrab 不管 box 多小都要先截整个桌面（两块屏约 100ms），这里只拷要的那块（约 13ms）。"""
     x0, y0, x1, y1 = box; w, h = x1 - x0, y1 - y0; sw, sh = max(1, w // k), max(1, h // k)
     sdc = user32.GetDC(None); mdc = gdi32.CreateCompatibleDC(sdc); bmp = gdi32.CreateCompatibleBitmap(sdc, sw, sh); old = gdi32.SelectObject(mdc, bmp)
     gdi32.SetStretchBltMode(mdc, 4)  # HALFTONE：缩小时取平均，不是丢像素
-    gdi32.StretchBlt(mdc, 0, 0, sw, sh, sdc, x0, y0, w, h, 0x00CC0020)
+    gdi32.StretchBlt(mdc, 0, 0, sw, sh, sdc, x0, y0, w, h, rop)
     bi = _BMIH(ctypes.sizeof(_BMIH), sw, -sh, 1, 32, 0, 0, 0, 0, 0, 0); buf = ctypes.create_string_buffer(sw * sh * 4)
     gdi32.GetDIBits(mdc, bmp, 0, sh, buf, ctypes.byref(bi), 0)
     gdi32.SelectObject(mdc, old); gdi32.DeleteObject(bmp); gdi32.DeleteDC(mdc); user32.ReleaseDC(None, sdc)
     return Image.frombuffer('RGBA', (sw, sh), buf, 'raw', 'BGRA', 0, 1).convert('RGB')
+
+_gdi = ctypes.WinDLL('gdi32')  # 另一份：设 argtypes 不影响别处用 gdi32 的调用
+_gdi.CreateCompatibleDC.argtypes, _gdi.CreateCompatibleDC.restype = [ctypes.wintypes.HDC], ctypes.wintypes.HDC
+_gdi.CreateCompatibleBitmap.argtypes, _gdi.CreateCompatibleBitmap.restype = [ctypes.wintypes.HDC, ctypes.c_int, ctypes.c_int], ctypes.wintypes.HBITMAP
+_gdi.SelectObject.argtypes, _gdi.SelectObject.restype = [ctypes.wintypes.HDC, ctypes.wintypes.HGDIOBJ], ctypes.wintypes.HGDIOBJ
+_gdi.GetDIBits.argtypes = [ctypes.wintypes.HDC, ctypes.wintypes.HBITMAP, ctypes.c_uint, ctypes.c_uint, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint]
+_gdi.DeleteObject.argtypes, _gdi.DeleteDC.argtypes = [ctypes.wintypes.HGDIOBJ], [ctypes.wintypes.HDC]
+_u32 = ctypes.WinDLL('user32')
+_u32.GetDC.argtypes, _u32.GetDC.restype = [ctypes.wintypes.HWND], ctypes.wintypes.HDC
+_u32.ReleaseDC.argtypes = [ctypes.wintypes.HWND, ctypes.wintypes.HDC]
+_u32.PrintWindow.argtypes = [ctypes.wintypes.HWND, ctypes.wintypes.HDC, ctypes.c_uint]
+
+def print_window(hwnd):
+    """窗口自己的画面（PW_RENDERFULLCONTENT，从 DWM 取：被挡着、正在挪也对，和截屏逐像素一样，约 30ms）。后台线程可用。"""
+    r = ctypes.wintypes.RECT(); user32.GetWindowRect(hwnd, ctypes.byref(r)); w, h = r.right - r.left, r.bottom - r.top
+    sdc = _u32.GetDC(None); mdc = _gdi.CreateCompatibleDC(sdc); bmp = _gdi.CreateCompatibleBitmap(sdc, w, h); old = _gdi.SelectObject(mdc, bmp)
+    ok = _u32.PrintWindow(hwnd, mdc, 2); buf = ctypes.create_string_buffer(w * h * 4)
+    if ok: _gdi.GetDIBits(mdc, bmp, 0, h, buf, ctypes.byref(_BMIH(ctypes.sizeof(_BMIH), w, -h, 1, 32, 0, 0, 0, 0, 0, 0)), 0)
+    _gdi.SelectObject(mdc, old); _gdi.DeleteObject(bmp); _gdi.DeleteDC(mdc); _u32.ReleaseDC(None, sdc)
+    return Image.frombuffer('RGBA', (w, h), buf, 'raw', 'BGRA', 0, 1).convert('RGB') if ok else None
 
 _pfonts = {}
 def pfont(size, kind='r'):
@@ -1593,7 +1672,7 @@ class Overlay:
         self.cards, self.base, self.wgeo, self.bar_c, self.h, self.ck = {}, None, None, (0, 0), self.ROW_H, None
         self.backdrop = (None, None)  # 浮窗后面那块屏幕的模糊图：(屏幕上的范围, 图)，一次截得比浮窗高，浮窗变高时直接从里面裁
         self.sm, self.lv, self.t0, self.since = [0.0] * 6, 0.0, time.time(), 0.0
-        self.wa, self.tone = None, 'dark'  # 在哪块屏（工作区）、玻璃上用暗字还是亮字（OV_INKS）
+        self.wa, self.s, self.tone = None, S, 'dark'  # 在哪块屏（工作区）、那块屏的缩放、玻璃上用暗字还是亮字（OV_INKS）
 
     # 对外：每种状态
     def listen(self, by_key):
@@ -1677,9 +1756,9 @@ class Overlay:
 
     def backdrop_rect(self):
         """浮窗底边往上 TALL 那么高、和浮窗一样宽的一块（屏幕物理像素）。"""
-        wa = self.wa
-        w = px(self.W + 2 * self.M); x = wa.left + (wa.right - wa.left - w) // 2; bottom = wa.bottom + px(self.M) - px(18)
-        return (x, bottom - px(self.TALL), x + w, bottom)
+        wa, p = self.wa, lambda v: round(v * self.s)  # 不用 px：接着说下一句时在后台线程里调，不能动全局 S
+        w = p(self.W + 2 * self.M); x = wa.left + (wa.right - wa.left - w) // 2; bottom = wa.bottom + p(self.M) - p(18)
+        return (x, bottom - p(self.TALL), x + w, bottom)
 
     def refresh_backdrop(self, hide_self=False):
         """截浮窗后面的屏幕当玻璃底，顺便按它的亮度定字色（tone）。平时在浮窗露面之前截（这时它还没显示，截不到自己）。
@@ -1696,7 +1775,7 @@ class Overlay:
         im = self.backdrop[1]
         if im is None: self.tone = 'dark' if THEME == 'light' else 'light'
         else:  # 只看最底下浮窗会盖住的那一段（最矮的样子）
-            low = im.crop((0, im.height - px(self.ROW_H + 2 * self.M), im.width, im.height)).convert('L')
+            low = im.crop((0, im.height - round((self.ROW_H + 2 * self.M) * self.s), im.width, im.height)).convert('L')
             self.tone = 'dark' if np.asarray(low).mean() > 150 else 'light'
 
     def glass(self, box):
@@ -1709,8 +1788,6 @@ class Overlay:
     def render_row(self):
         """正在听 / 改语病 / 结果 / 提示：一行。左边声波条（每帧在 blit 里画；提示是彩色「!」），中间文字上下居中，
         结果最右边一个勾（固定后换成图钉，只复制没输入时是复制图标）。"""
-        if not self.visible:  # 露面之前：定在哪块屏，截后面的屏幕（这时还截不到自己）
-            self.wa = active_monitor()[0]; self.refresh_backdrop()
         M, W, d, m = self.M, self.W, self.d, self.mode
         ink, sub, mark, _ = OV_INKS[self.tone]
         right = self.TX if m == 'result' else self.EDGE - self.ICON // 2  # 文字右边留的宽度：结果右边有勾，和左边对称
@@ -1765,9 +1842,20 @@ class Overlay:
     def render(self):
         """按当前内容重画卡片和文字（左边的声波条每帧另外画）。"""
         if not self.mode: return
-        self.render_row()
+        if not self.visible:  # 露面之前：定在哪块屏，截后面的屏幕（这时还截不到自己）
+            self.wa, self.s = active_monitor(); self.refresh_backdrop()
+        self.scaled(self.render_row)
 
-    def frame(self, level):
+    def scaled(self, f, *a):
+        """按浮窗所在那块屏的缩放画（全局 S 跟着主窗口那块屏；主窗口拖到别的屏、在原来的屏上说话时两者不同）。"""
+        global S
+        S0, S = S, self.s
+        try: return f(*a)
+        finally: S = S0
+
+    def frame(self, level): self.scaled(self._frame, level)
+
+    def _frame(self, level):
         """每帧调：说话 / 思考时让左上角小光球动起来；结果 / 提示显示着时，点屏幕上浮窗以外的地方就关（固定了的不关）。"""
         down = key_down(0x01) or key_down(0x02)
         if down and not self.mouse_down and self.visible and self.wgeo and self.mode in ('result', 'notice') and not self.pinned:
@@ -1791,7 +1879,7 @@ class Overlay:
             st = 'ready' if self.mode == 'result' else self.mode; t = time.time() - self.t0
             self.lv += ((level if st == 'rec' else 0) - self.lv) * 0.35
             n, ss = px(self.ICON), 3; Lr = Image.new('RGBA', (n * ss, n * ss), (0, 0, 0, 0))  # 和右边的勾一样大
-            paint_bars(Lr, n * ss / 2, n * ss / 2, n * ss * 0.88, st, self.lv, t, self.sm, OV_INKS[self.tone][3])
+            paint_bars(Lr, n * ss / 2, n * ss / 2, n * ss * 0.74, st, self.lv, t, self.sm, OV_INKS[self.tone][3])
             img.alpha_composite(Lr.resize((n, n), Image.LANCZOS), (round(self.bar_c[0]) - n // 2, round(self.bar_c[1]) - n // 2))
         if self.wgeo != geo: self.wgeo = geo; self.w.geometry(f'{img.width}x{img.height}+{x}+{y}')
         if not self.visible:
@@ -1807,6 +1895,161 @@ class Overlay:
         else:
             self.pinned = True; self.render()
             if self.timer: self.w.after_cancel(self.timer); self.timer = None
+
+
+class Proxy:
+    """拖主窗口跨到缩放不同的屏时的替身：碰到屏幕边界那一刻把主窗口截下来，贴成分层窗口跟着光标走、大小随跨过去的比例变（morph），
+    真窗口先藏起来（拖动中重建要 0.3 秒，手上一顿一顿的）。松手后 App.on_drop 按落点那块屏重建，替身淡出。拖动中略软，松手就清晰。"""
+    _masks = {}
+
+    def __init__(self, app, off, pre=None):
+        r = ctypes.wintypes.RECT(); user32.GetWindowRect(app.chrome.hwnd, ctypes.byref(r))
+        self.app, self.off, self.s0, self.s, self.k, self.f, self.gdi, self.k_cur, self.shown = app, off, S, None, 1.0, 0.0, [], 1.0, False
+        self.w0, self.h0 = r.right - r.left, r.bottom - r.top
+        ok = pre and pre['s0'] == S and 'src' in pre and pre['src'].size == (self.w0, self.h0)
+        self.pre = pre if ok else None  # 按下时后台备好的（App.on_press）；还没备完就现截现画
+        self.src = pre['src'] if ok else grab_small(rect(r), 1)  # 拖着的窗口在最前面，直接截屏就是它
+        self.hwnd = Proxy.window(app.root); Proxy.current = self
+
+    @staticmethod
+    def window(root):
+        """替身用的分层窗口：建一次一直留着（现建要 20ms，跨屏那一下会顿），App.prewarm 先建好；用完只藏起来。"""
+        if getattr(Proxy, 'hwnd', None) and Proxy.win.winfo_exists(): return Proxy.hwnd
+        win = Proxy.win = tk.Toplevel(root); win.title('Quill proxy'); win.overrideredirect(True); win.geometry('1x1+-300+-300'); win.update()
+        h = Proxy.hwnd = user32.GetParent(win.winfo_id()) or win.winfo_id()
+        ex = user32.GetWindowLongW(h, -20) | 0x08000000 | 0x80 | 0x20  # 不抢焦点 / 不进任务栏 / 鼠标穿透（鼠标还在真窗口的画布上按着）
+        user32.ShowWindow(h, 0)
+        user32.SetWindowLongW(h, -20, ex & ~0x80000); user32.SetWindowLongW(h, -20, ex | 0x80000)  # 分层（先清再设，见 Overlay）
+        return h
+
+    def hide(self):
+        self.dead = True; self.free()
+        if Proxy.current is self:  # 已经有新替身用着这个窗口就别藏
+            user32.SetWindowPos(self.hwnd, _vp(-2), 0, 0, 0, 0, 0x13); user32.ShowWindow(self.hwnd, 0)
+
+    def target(self, s):
+        """要去的那块屏的缩放 s：底图按 1 和 s/s0 里大的那个画好（阴影、圆角按那个缩放重画，内容按比例缩放），
+        中间大小都从它往下拉、不往上放大。换了目标屏才重画。"""
+        if s == self.s and getattr(self, 'gdi', None): return
+        self.s, self.k = s, s / self.s0
+        data, size, self.kb, self.Mb = (self.pre and self.pre['imgs'].get(s)) or Proxy.build(self.app.chrome, self.src, self.w0, self.h0, self.s0, s)
+        self.load_bytes(data, size)
+
+    @staticmethod
+    def build(chrome, src, w0, h0, s0, s):
+        """target 的底图：返回 (预乘好的 BGRA 字节, 大小, kb, 阴影留边 Mb)。不碰 Tk / GDI，App.on_press 在后台线程里先算。"""
+        kb = max(1.0, s / s0); sb = s0 * kb; w, hh = round(w0 * kb), round(h0 * kb)
+        img = chrome.frame_img(w, hh, sb); Mb = round(Chrome.M * sb)
+        key = (w, hh, round(chrome.R * sb))
+        if key not in Proxy._masks: Proxy._masks = {key: _shape((w, hh), (0, 0, w, hh), key[2], 2)}  # 只留最近一个：来回拖同一对屏时不重算
+        body = src.resize((w, hh), Image.BILINEAR).convert('RGBA'); body.putalpha(Proxy._masks[key])
+        img.alpha_composite(body, (Mb, Mb))
+        return Proxy.premul(img), img.size, kb, Mb
+
+    @staticmethod
+    def premul(img):
+        r, g, b, a = img.split()
+        return Image.merge('RGBA', [ImageChops.multiply(c, a) for c in (r, g, b)] + [a]).tobytes('raw', 'BGRA')
+
+    def morph(self, f, xr, yr):
+        """f = 窗口跨进那块屏的比例（0 = 还没碰边，1 = 完全过去）：大小在两块屏的缩放之间跟着 f 连续变（smoothstep），按住的点留在光标下。
+        碰到边框开始变、完全离开原屏变完（用户要的；不按时间播动画，也不等 Windows 判定过半）。"""
+        if not self.gdi: return
+        self.f = f; e = f * f * (3 - 2 * f); k = self.k_cur = 1 + (self.k - 1) * e; r = k / self.kb
+        (a, _, _), (b, _, _) = self.gdi; W_, H_ = self.size; w, h = max(1, round(W_ * r)), max(1, round(H_ * r))
+        dc = a if abs(r - 1) < 1e-3 else b
+        if dc == b: gdi32.StretchBlt(b, 0, 0, w, h, a, 0, 0, W_, H_, 0x00CC0020)
+        x, y = self.pos(xr, yr, k)
+        dst, sz, src = ctypes.wintypes.POINT(round(x - self.Mb * r), round(y - self.Mb * r)), ctypes.wintypes.SIZE(w, h), ctypes.wintypes.POINT(0, 0)
+        user32.UpdateLayeredWindow(self.hwnd, self.sdc, ctypes.byref(dst), ctypes.byref(sz), dc, ctypes.byref(src), 0, ctypes.byref(_BLEND(0, 0, 255, 1)), 2)
+        if not self.shown:  # 置顶：重建时主窗口会被提到前面，盖不住就闪
+            self.shown = True; user32.ShowWindow(self.hwnd, 8); user32.SetWindowPos(self.hwnd, _vp(-1), 0, 0, 0, 0, 0x13)
+
+    def load(self, img):
+        """底图预乘透明度后放进 GDI（a），每次移动用 StretchBlt 拉到当前大小（b）再贴：0.4ms 一次。
+        PIL 每帧缩放 + 预乘要 25~40ms，帧率太低（用户嫌不丝滑）。COLORONCOLOR 是最近邻，边缘略毛，只在跨屏途中；HALFTONE 会把透明度清零，不能用。"""
+        self.load_bytes(Proxy.premul(img), img.size)
+
+    def load_bytes(self, data, size):
+        self.free(); W_, H_ = self.size = size
+        self.sdc = user32.GetDC(None); self.gdi = []
+        for i in range(2):
+            dc = gdi32.CreateCompatibleDC(self.sdc); bits = _vp(); bi = _BMIH(ctypes.sizeof(_BMIH), W_, -H_, 1, 32, 0, 0, 0, 0, 0, 0)
+            bmp = gdi32.CreateDIBSection(dc, ctypes.byref(bi), 0, ctypes.byref(bits), None, 0)
+            if i == 0: ctypes.memmove(bits, data, len(data))
+            self.gdi.append((dc, bmp, gdi32.SelectObject(dc, bmp)))
+        gdi32.SetStretchBltMode(self.gdi[1][0], 3)
+
+    def free(self):
+        for dc, bmp, old in getattr(self, 'gdi', []): gdi32.SelectObject(dc, old); gdi32.DeleteObject(bmp); gdi32.DeleteDC(dc)
+        if getattr(self, 'gdi', None): user32.ReleaseDC(None, self.sdc)
+        self.gdi = []
+
+    def body(self, k):
+        """松手用：窗口本体按 k 倍大小重采样（LANCZOS，比拖动中的最近邻干净），不带阴影、圆角外透明。"""
+        w, h = round(self.w0 * k), round(self.h0 * k)
+        img = self.src.resize((w, h), Image.LANCZOS).convert('RGBA'); img.putalpha(_shape((w, h), (0, 0, w, h), round(self.app.chrome.R * self.s0 * k), 2))
+        return img
+
+    def fade(self, x, y, ms=140):
+        """先 load(body()) 再调：换成它盖在重建好的真窗口上淡出。阴影交给真窗口自己的（替身带阴影叠在上面会深一圈），
+        糊 → 清晰是渐变的（直接撤掉是跳一下）。"""
+        self.t0, self.fpos = time.perf_counter(), (x, y); self._fade_step(ms)
+
+    def _fade_step(self, ms):
+        if Proxy.current is not self or not self.gdi: return  # 淡出途中又开始拖：窗口归新替身了
+        t = min(1.0, (time.perf_counter() - self.t0) * 1000 / ms); W_, H_ = self.size
+        dst, sz, src = ctypes.wintypes.POINT(*self.fpos), ctypes.wintypes.SIZE(W_, H_), ctypes.wintypes.POINT(0, 0)
+        user32.UpdateLayeredWindow(self.hwnd, self.sdc, ctypes.byref(dst), ctypes.byref(sz), self.gdi[0][0], ctypes.byref(src), 0,
+                                   ctypes.byref(_BLEND(0, 0, round(255 * (1 - t) ** 2), 1)), 2)
+        if t < 1: self.app.root.after(10, self._fade_step, ms)
+        else: self.hide()
+
+    def pos(self, xr, yr, k):
+        """光标在 (xr, yr)、大小是原来 k 倍时替身窗口本体的左上角：按住的那一点跟着缩放，还在光标下。"""
+        return xr - round(self.off[0] * k), yr - round(self.off[1] * k)
+
+
+class Wipe:
+    """换深浅色时盖在 Quill 各窗口上的旧画面截图（分层、置顶、鼠标穿透），下面重建完再退场：
+    有 center（屏幕坐标，手动切时点的那个按钮）就从那里扩一个圆露出新配色；没有（跟随系统换的）就整体淡出。"""
+    MS, FEATHER = 450, 80  # 时长；扩散圆边渐变的宽度（逻辑像素）
+
+    def __init__(self, app, hwnds, center=None):
+        M = px(Chrome.M); rs = []
+        for h in hwnds:
+            r = ctypes.wintypes.RECT(); user32.GetWindowRect(h, ctypes.byref(r)); rs.append((r.left - M, r.top - M, r.right + M, r.bottom + M))
+        box = self.box = (min(r[0] for r in rs), min(r[1] for r in rs), max(r[2] for r in rs), max(r[3] for r in rs))
+        rgb = np.asarray(grab_small(box, 1, 0x40CC0020)); h, w = rgb.shape[:2]  # 加 CAPTUREBLT：分层的阴影窗口也截进来
+        self.bgra = np.concatenate([rgb[..., ::-1], np.full((h, w, 1), 255, np.uint8)], 2).astype(np.float32)
+        self.d = None
+        if center:
+            yy, xx = np.ogrid[:h, :w]; self.d = np.hypot(xx - (center[0] - box[0]), yy - (center[1] - box[1])).astype(np.float32)
+            self.rmax = float(self.d.max()) + 2
+        win = self.w = tk.Toplevel(app.root); win.title('Quill wipe'); win.overrideredirect(True); win.geometry('1x1+-300+-300'); win.update()
+        self.hwnd = user32.GetParent(win.winfo_id()) or win.winfo_id()
+        ex = user32.GetWindowLongW(self.hwnd, -20) | 0x08000000 | 0x80 | 0x8 | 0x20  # 不抢焦点 / 不进任务栏 / 置顶 / 鼠标穿透
+        user32.ShowWindow(self.hwnd, 0)
+        user32.SetWindowLongW(self.hwnd, -20, ex & ~0x80000); user32.SetWindowLongW(self.hwnd, -20, ex | 0x80000)  # 分层（先清再设，见 Overlay）
+        self.frame(1.0); user32.ShowWindow(self.hwnd, 8); user32.SetWindowPos(self.hwnd, _vp(-1), 0, 0, 0, 0, 0x13)
+
+    def frame(self, k):
+        """k = 旧画面还剩多少：1 全盖着，0 全露出新的。圆边是 FEATHER 宽的柔和渐变（smoothstep）。"""
+        if self.d is None: m = np.float32(k)
+        else:
+            F = px(self.FEATHER); m = np.clip((self.d - ((1 - k) * (self.rmax + F) - F)) / F, 0, 1)
+            m = (m * m * (3 - 2 * m))[..., None]
+        h, w = self.bgra.shape[:2]
+        ulw_bytes(self.hwnd, (self.bgra * m).astype(np.uint8).tobytes(), w, h, self.box[0], self.box[1])  # 预乘：四个通道一起乘
+
+    def play(self):
+        self.t0 = time.perf_counter(); self.n = 0; self.step()
+
+    def step(self):
+        t = min(1.0, (time.perf_counter() - self.t0) * 1000 / self.MS)
+        self.frame((1 - t) ** 3); self.n += 1  # 先快后慢
+        if t < 1: self.w.after(10, self.step)
+        else: self.w.destroy(); log(f'换主题动画 {self.n} 帧 / {self.MS}ms，{self.bgra.shape[1]}×{self.bgra.shape[0]}')
 
 
 class Ball:
@@ -1919,11 +2162,11 @@ class Dial:
         out = self.base[self.down].copy(); out.alpha_composite(L.resize((self.N, self.N), Image.BOX)); self.photo.paste(out)
 
 
-INSET_K = 0.5  # 凹下去的阴影深度 / 凸起的深度
+INSET_K = 0.3  # 凹下去的阴影深度 / 凸起的深度（0.5 用户嫌重，2026-11-01）
 BTN_W, BTN_H, BTN_GAP = 80, 34, 10  # 窗口里的文字按钮（选项 / 开关 / 加入 / 启动）：一样宽、一样高、间距一样，一排右对齐卡片内边（btn_x）
 def btn_x(x, w, i, n): return x + w - 20 - (n - i) * BTN_W - (n - 1 - i) * BTN_GAP  # 卡片 (x, w) 里一排 n 个按钮的第 i 个的左边
 ELEV = 5  # 主页所有凸起（卡片、导航、右上角三个图标、候选词按钮）的凸起高度：阴影深度都用它，感觉一样高
-NAV = ((33, 140), (185, 140), (337, 30))  # 主页导航一排：历史 / 常用词 / 设置，高 30，间距 12；和顶行一样 33~367：HISTORY 左端对 QUILL，设置圆心 (352,487) 落在窗口右下圆角圆心上（和 × 上下对齐）
+NAV = ((33, 140), (185, 140), (337, 30))  # 主页导航一排：历史 / 常用词 / 设置，高 30，间距 12；和顶行一样 33~367：HISTORY 左端对 QUILL，设置圆心 (352,487) 落在窗口右下圆角圆心上（和 × 上下对齐）。试过对齐卡片 20~380，用户又改回来（2026-11-01）
 WORDS = {'loading': 'WAKING', 'ready': 'READY', 'rec': 'LISTENING', 'busy': 'THINKING', 'error': 'ERROR'}
 
 class App:
@@ -1940,6 +2183,10 @@ class App:
         self.cur = None  # 当前这句 [原话, 输入的英文, 中文]
         self.waiting = {}  # 英文出了、中文还没出就开始说下一句的那些：原话 → [原话, 英文, None]，中文到了再记
         self.next_look = 0.0  # 下次看系统深浅色 / 主窗口在哪块屏的时间
+        self.dpi_new = None  # 主窗口跨到的那块屏的缩放（hook_dpi 记，poll 里 rescale）
+        self.proxy, self._mons = None, None  # 拖动跨屏时顶替主窗口的替身（Proxy）；这次拖动的屏幕列表（monitors，拖动中缓存）
+        root.on_press, root.on_drag, root.on_drop = self.on_press, self.on_drag, self.on_drop  # Neu 拖主窗口时调
+        self.pre = None  # 按下时后台备的替身底图（on_press）
         self.build_ui()
         root.after(2500, self.prewarm)
         threading.Thread(target=self.ollama_loop, daemon=True).start()
@@ -1954,29 +2201,35 @@ class App:
         n = self.n = Neu(root, self.W, self.H); n.c.pack()
         # 能点的都是凸起的，凹下去的只放内容。和设置 / 记录窗口一套网格：左右离边 20，标题行一样，第一张卡片顶边 y=92，
         # 卡片之间都隔 20，卡片圆角 28（窗口圆角 48 = 28 + 20）
-        n.text(33, 26, 'QUILL', 18, INK, family=DISPLAY)  # 和 SETTINGS 一样的宽体大字（不加粗，见 HANDOFF §5）
+        n.text(33, 23.5, 'QUILL', 22, INK, family=DISPLAY)  # 22 号（18 在 30 的按钮旁显小）；字心 y=48 = 右上角按钮圆心 = 窗口圆角圆心那条线（截图量：字顶在 y+0.706×字号，大写高 0.811×字号）  # 和 SETTINGS 一样的宽体大字（不加粗，见 HANDOFF §5）
+        n.button(223, 33, 30, 30, icon=I_MOON if THEME == 'light' else I_SUN, size=9, d=ELEV, color=ICON_C, cmd=self.toggle_theme)
         n.button(261, 33, 30, 30, icon=I_BALL, size=9, d=ELEV, color=ICON_C, cmd=self.to_ball)   # 缩成悬浮球
         n.button(299, 33, 30, 30, icon=I_MIN, size=9, d=ELEV, color=ICON_C, cmd=self.minimize)
         n.button(337, 33, 30, 30, icon=I_CLOSE, size=9, d=ELEV, color=ICON_C, cmd=quit_app)
         n.raised(20, 92, 360, 360, 28, d=ELEV)                      # 状态卡片（凸起，和设置里的卡片一样）：大字 + 提示 + 刻度和声波条；按住中间那圈说话时那圈凹下去
         self.dots = {}; self.dot = n.c.create_image(0, 0, anchor='center', tags='txt')  # 状态点（PIL 抗锯齿画的圆，Tk 自带的 oval 没有抗锯齿看着不圆）：绿 = 麦克风有输入，黄 = 没声音（待机），红 = 不可用
-        self.word = n.text(40, 109, '', 15, INK, family=DISPLAY)  # 左边缘都对在 40：QUILL / READY / HISTORY / 候选词
+        self.word = n.text(40, 104, '', 15, INK, family=DISPLAY)  # 104：字的中心和右边 EN / CN 的中心（y=120）对齐（截图量的，109 时低 4.5）  # 左边缘都对在 40：QUILL / READY / HISTORY / 候选词
         self.sub = n.text(200, 416, '', 11, SUB, anchor='n'); n.c.itemconfigure(self.sub, justify='center')  # 提示放圆盘下面居中
         n.raised(200 - 124, 148, 248, 248, 124, d=ELEV, fill=FACE)  # 圆盘本身是凸起的大圆（能点 = 凸起），整页的视觉主角；按住时凹下去
         self.dial = Dial(n, 200, 272, 124, (lambda: eng.start('mouse'), eng.stop))
         # 说哪种语言（出来的都是英文）：两个小胶囊和 READY 同一行、右边对齐卡片内边；选中的凹下去
         self.lang_sw = Switch(n, 299, 105, 30, 30, 8, (('en', 'EN'), ('zh', 'CN')), cfg['lang'], self.set_lang); n.btns.append(self.lang_sw)
-        n.button(33, 472, 140, 30, r=15, d=ELEV, cmd=self.open_history)
-        n.button(185, 472, 140, 30, r=15, d=ELEV, cmd=self.edit_words)
-        n.button(337, 472, 30, 30, icon=I_SET, size=9, d=ELEV, color=ICON_C, cmd=self.open_settings)
-        self.nav_label(n, 103, I_HIST, 'HISTORY'); self.nav_label(n, 255, I_EDIT, 'WORDS')
+        (hx, hw), (wx, ww), (sx, sw) = NAV
+        n.button(hx, 472, hw, 30, r=15, d=ELEV, cmd=self.open_history)
+        n.button(wx, 472, ww, 30, r=15, d=ELEV, cmd=self.edit_words)
+        n.button(sx, 472, sw, 30, icon=I_SET, size=9, d=ELEV, color=ICON_C, cmd=self.open_settings)
+        self.nav_label(n, hx + hw / 2, I_HIST, 'HISTORY'); self.nav_label(n, wx + ww / 2, I_EDIT, 'WORDS')
         n.commit()
         self.wn = Neu(root, self.W, 122); self.wn.c.pack(); self.build_words()
         self.overlay = Overlay(self); self.ball = Ball(self)
         self.set_state(self.state)
 
-    def rebuild(self, theme):
-        """系统换了深浅色：所有窗口按新的配色重画，开着的子窗口重新打开。只在闲着、没按着鼠标时做。"""
+    def rebuild(self, theme, center=None, pos=None):
+        """换了深浅色或缩放：所有窗口按新的配色 / S 重画，开着的子窗口重新打开。
+        换主题时先用 Wipe 把旧画面盖住，重建完它再退场（center 见 Wipe），不闪；换缩放不盖，pos 见 on_drop。"""
+        hw = [c.hwnd for c in CHROMES if user32.IsWindowVisible(c.hwnd) and not user32.IsIconic(c.hwnd)]
+        try: wipe = Wipe(self, hw, center) if hw and theme != THEME else None
+        except Exception: wipe = None; log('换主题动画出错', traceback.format_exc())
         r = ctypes.wintypes.RECT(); user32.GetWindowRect(self.chrome.hwnd, ctypes.byref(r))
         log(f'界面重建：{THEME} → {theme}，主窗口 {rect(r)}')
         wa = monitor_of(self.chrome.hwnd)[0]  # 重建前它在哪块屏，重建完还放在那块屏
@@ -1992,13 +2245,106 @@ class App:
         root = self.root; root.update_idletasks()
         # 一律按重建前的实际位置摆一次（变大了别伸出这块屏）：拖动后 Tk 自己记的位置可能是旧的，
         # 不设的话它重新排版时会把窗口放回那里——拖回左屏缩小后，2 秒后又跳回右屏变大，来回重建（2026-11-01 用户实测）
-        x = max(wa.left, min(r.left, wa.right - root.winfo_reqwidth() - px(20))); y = max(wa.top, min(r.top, wa.bottom - root.winfo_reqheight() - px(12)))
+        if pos: x, y = pos  # 拖动跨屏松手：放在替身的位置（见 on_drop），不夹回屏内
+        else:
+            x = max(wa.left, min(r.left, wa.right - root.winfo_reqwidth() - px(20))); y = max(wa.top, min(r.top, wa.bottom - root.winfo_reqheight() - px(12)))
         root.geometry(f'+{x}+{y}'); root.update_idletasks()
         user32.GetWindowRect(self.chrome.hwnd, ctypes.byref(r)); log(f'重建后主窗口 {rect(r)}')
         self.chrome.sync()
         for a in opened: self._open(a, {'settings': Settings, 'check_win': Checks, 'ready_win': Ready, 'history': History, 'words': Words}[a])
         if ball: self.ball.show()
+        if wipe: sync_chromes(); self.root.update(); wipe.play()  # 新画面（含子窗口阴影）都画好了再揭开
         self.root.after(1500, self.prewarm)
+
+    def rescale(self, s):
+        """主窗口跨到缩放不同的屏（WM_DPICHANGED，见 hook_dpi）。正拖着：先换成按新缩放的替身（Proxy）跟着走，松手再重建；
+        没在拖（比如 Win+Shift+方向键）：立刻按那块屏的缩放重建。两块屏都清晰。说话 / 改错时先不动。"""
+        global S
+        if self.state not in ('ready', 'loading', 'error'): return
+        if self.proxy or any(n.drag for n in (self.n, self.wn)) or abs(s - S) < 0.01: return  # 拖动中由 on_drag 的替身管
+        log(f'换缩放 {S} → {s}'); S = s; self.rebuild(THEME)
+
+    def on_press(self):
+        """按下要拖主窗口：后台线程截窗口（PrintWindow）、按别的缩放的屏把替身底图都备好。
+        以前快到屏幕边才备（截图 20~28ms + 底图 26~40ms），拖着拖着顿一下。"""
+        self.pre = None
+        if self.state not in ('ready', 'loading', 'error'): return
+        self._mons = monitors(); scales = {s for _, s in self._mons if abs(s - S) > 0.01}
+        if not scales: return  # 只有一种缩放：不会有替身
+        pre = self.pre = {'s0': S, 'imgs': {}}
+        def run():
+            src = print_window(self.chrome.hwnd)
+            if src is None: return
+            pre['src'] = src
+            for s in scales: pre['imgs'][s] = Proxy.build(self.chrome, src, *src.size, pre['s0'], s)
+        threading.Thread(target=run, daemon=True).start()
+
+    def on_drag(self, xr, yr):
+        """拖主窗口的每一步（真窗口已按旧大小挪到位）：看它跨进缩放不同的那块屏多少（按面积），碰到边就换成替身，大小跟着比例变。"""
+        if self.state not in ('ready', 'loading', 'error'): return
+        r = ctypes.wintypes.RECT(); user32.GetWindowRect(self.chrome.hwnd, ctypes.byref(r))
+        if self.proxy:  # 有替身就按替身现在显示的大小算（藏着的真窗口还是旧大小，比它大或小）
+            p = self.proxy; x, y = p.pos(xr, yr, p.k_cur); r = ctypes.wintypes.RECT(x, y, x + round(p.w0 * p.k_cur), y + round(p.h0 * p.k_cur))
+        A = max(1, (r.right - r.left) * (r.bottom - r.top)); m = px(130)  # 离边还有这么远就先把替身备好（备要 55ms，碰到边才备会顿）
+        if self._mons is None: self._mons = monitors()
+        ov, near, s = max(((max(0, min(r.right, R) - max(r.left, L)) * max(0, min(r.bottom, B) - max(r.top, T)),
+                            min(r.right + m, R) > max(r.left - m, L) and min(r.bottom + m, B) > max(r.top - m, T), s)
+                           for (L, T, R, B), s in self._mons if abs(s - S) > 0.01), default=(0, False, S))
+        if not self.proxy:
+            if not near: return
+            n = self.n if self.n.drag else self.wn; t = time.perf_counter()
+            self.proxy = Proxy(self, n.drag, self.pre); self.proxy.target(s); log(f'快到 {s} 的屏，备好替身（{(time.perf_counter() - t) * 1000:.0f}ms）')
+        p = self.proxy
+        if near or ov: p.target(s)
+        if not ov and not p.shown: return  # 还没碰边：真窗口照常拖，替身先不露面
+        p.morph(ov / A, xr, yr)
+        if not getattr(self.chrome, 'hidden', False): self.root.attributes('-alpha', 0.0); self.chrome.hidden = True; self.chrome.sync()  # 替身露面之后才藏真窗口，先藏会空一下（闪）
+
+    def on_drop(self):
+        """松手：有替身就按落点（跨过去过半算那块屏）的缩放、替身的位置重建主窗口（替身盖着，看不到重建），再淡出替身。"""
+        self._mons, self.pre = None, None; p = self.proxy
+        if not p: return
+        if not p.shown: self.proxy = None; p.hide(); return  # 备好了但没碰边：真窗口一直在，什么都不用做
+        def done():
+            global S
+            k, s = (p.k, p.s) if p.f >= 0.5 else (1.0, S)
+            pt = ctypes.wintypes.POINT(); user32.GetCursorPos(ctypes.byref(pt)); x, y = p.pos(pt.x, pt.y, k)
+            log('松手', (pt.x, pt.y), p.off, round(p.f, 2), round(k, 3), (x, y))
+            self.proxy = None; t = time.perf_counter()
+            if abs(s - S) > 0.01: S = s; self.rebuild(THEME, pos=(x, y))
+            else: self.root.geometry(f'+{x}+{y}')
+            # 重建完才放出阴影：重建里建浮窗 / 悬浮球会 update()，跑到 poll 的 sync_chromes，这时真窗口还是旧大小，
+            # 阴影窗口（圆角深底）按旧大小露出来，比替身大的那圈闪一下黑（大屏拖到小屏时，2026-11-01 截屏测到）
+            self.chrome.clip()  # 先裁圆角再显示：阴影藏着时 sync 不动它，不裁的话直角会从替身透明的圆角外露出来（闪）
+            self.root.attributes('-alpha', 1.0); self.root.update()
+            for _ in range(2): ctypes.windll.dwmapi.DwmFlush()  # 等真窗口真的合成上屏（在替身下面）再动替身：不等会空一下（闪）
+            p.load(p.body(k))  # 先备好（预乘大图要几十毫秒），下面放出阴影和换替身紧挨着，落在同一帧
+            self.chrome.hidden = False; self.chrome.sync(); p.fade(x, y)
+            log(f'松手重建用了 {(time.perf_counter() - t) * 1000:.0f}ms')
+        self.root.after(0, done)  # 别在画布自己的松手事件里拆画布
+
+    def hook_dpi(self):
+        """接主窗口的 WM_DPICHANGED：Windows 在窗口大半跨进另一块屏的那一刻发，比每秒轮询及时（以前轮询，拖过去一两秒后才跳）。"""
+        proc = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, _vp, ctypes.c_uint, ctypes.c_size_t, ctypes.c_ssize_t, ctypes.c_size_t, ctypes.c_size_t)
+        cc = ctypes.windll.comctl32
+        cc.DefSubclassProc.restype, cc.DefSubclassProc.argtypes = ctypes.c_ssize_t, [_vp, ctypes.c_uint, ctypes.c_size_t, ctypes.c_ssize_t]
+        cc.SetWindowSubclass.restype, cc.SetWindowSubclass.argtypes = ctypes.c_int, [_vp, proc, ctypes.c_size_t, ctypes.c_size_t]
+        def on_msg(h, msg, wp, lp, uid, data):
+            if msg == 0x02E0:  # WM_DPICHANGED：低 16 位是新 DPI；不交给默认处理（它会按建议尺寸拉伸窗口），重建时自己定
+                self.dpi_new = (wp & 0xFFFF) / 96; return 0  # 这里不能碰 Tk（在 Tk 自己的消息处理里，调 after 会崩），poll 来取
+            return cc.DefSubclassProc(h, msg, wp, lp)
+        self._dpi_proc = proc(on_msg)  # 留着引用，被回收会崩
+        cc.SetWindowSubclass(self.chrome.hwnd, self._dpi_proc, 1, 0)
+
+    def toggle_theme(self):
+        """手动切深 / 浅色，记进设置；切到和系统一样时清掉，回到跟随系统。说话 / 改错时不切。"""
+        if self.state not in ('ready', 'loading', 'error'): return
+        cfg.pop('theme', None)
+        want = 'dark' if THEME == 'light' else 'light'
+        if want != system_theme(): cfg['theme'] = want
+        save_cfg()
+        c = self.n.c; center = (c.winfo_rootx() + px(238), c.winfo_rooty() + px(48))  # 新配色从这个按钮的圆心扩出去
+        self.root.after(10, lambda: self.rebuild(want, center))  # 等这次点击处理完再拆按钮
 
     def look_around(self):
         """每秒看一次：系统深浅色变了就 rebuild()。正在说话 / 改错、按着鼠标时先不动。"""
@@ -2033,6 +2379,11 @@ class App:
         """启动后先把设置、记录窗口在后台建好（藏着），第一次点开也不卡。"""
         for attr, cls in (('settings', Settings), ('history', History), ('words', Words)):
             if not self.alive(attr): setattr(self, attr, cls(self))
+        # 别的缩放的屏：主窗口拖过去时替身（Proxy）要的窗口和阴影图先备好
+        Proxy.window(self.root)
+        r = ctypes.wintypes.RECT(); user32.GetWindowRect(self.chrome.hwnd, ctypes.byref(r)); w, hh = r.right - r.left, r.bottom - r.top
+        for s in {round(s, 2) for _, s in monitors()} - {round(S, 2)}:
+            k = max(1.0, s / S); self.chrome.frame_img(round(w * k), round(hh * k), S * k)  # 和 Proxy.target 画底图用的一样
 
     def open_settings(self): self._open('settings', Settings)
     def open_checks(self): self._open('check_win', Checks)
@@ -2057,30 +2408,34 @@ class App:
 
     def build_words(self):
         """主页最下面的常用词卡片：标题 + 灰字词表，整张卡片能点（打开常用词窗口，CardBtn）；Quill 从记录里找到可能听错的词时，
-        下面多一行「听到 → 正确写法」+ 加入 / 忽略（右对齐卡片内边）和灰字「可能听错 · 说过几次 · 例句」，最多 3 条，处理完补上下一条。
+        下面多一行「听到 → 正确写法」+ 加入 / 忽略（右对齐卡片内边）和一行灰字例句（以听到的词为中心截取，excerpt），最下面一行左「说过 N 次」右「还有 N 条」，最多 3 条，处理完补上下一条。
         卡片变高窗口跟着变高（Chrome.sync 会重画圆角和阴影）。"""
-        wn = self.wn; sugs = word_sugs(); x, y, w = 20, 14, 360
+        wn = self.wn; sugs = word_sugs(); x, y, w = 33, 14, 334  # 没有卡片框，字直接放在窗口底色上：左右和 QUILL 字 / 右上角关闭按钮对齐 33~367（2026-11-01 用户画线定的；20 太挤，40 太收）
         show = sugs[:1]; extra = len(sugs) - 1  # 只显示第一条，其余写「还有 N 条」，点卡片进常用词窗口；没有候选就没有这张卡片
         f12, f11 = fnt(12), fnt(11); lh12, lh11 = f12.metrics('linespace') / S, f11.metrics('linespace') / S
-        # 「听到」「→ 正确写法」永远分两行（听到的灰字、正确写法黑字，太长用省略号）；下面灰字例句最多 2 行
-        rows = [([fit(hd, f12, px(w - 170)), fit(f'→ {c}', f12, px(w - 170))], fit(f'可能听错 · 说过 {k} 次 · {src}', f11, px(w), 2).split('\n')) for hd, c, k, src in show]
-        BH = 34  # 按钮高；文字块（可能折成两行）和按钮组在 m 高的格子里各自垂直居中
+        # 「听到 → 正确写法」一行（听到的灰字、正确写法黑字），放不下各自截断；下面一行灰字例句
+        # 截断按固定 200% 的字号量（ref_fnt），不按当前缩放：不同缩放下字宽不完全成比例，拖到别的屏重建后截出来的字会多几个 / 少几个，松手那一下看着抖
+        r12, r11 = ref_fnt(12), ref_fnt(11); room = (w - 154) * 2; rows = []
+        for hd, c, k, src in show:
+            ht = fit(hd, r12, room // 2); rows.append(([ht, fit(f'→ {c}', r12, room - r12.measure(ht + ' '))], [excerpt(src, hd, r11, w * 2)]))
+        BH = 30  # 按钮高，和主页其他按钮一样（叉是 30 的圆，和设置按钮一样大）；文字块（可能折成两行）和按钮组在 m 高的格子里各自垂直居中
         mm = [BH for a, b in rows]
-        rh = [m + 4 + len(b) * lh11 + 16 for (a, b), m in zip(rows, mm)]  # 一行 = 格子 + 灰字 + 16 间距（分隔线画在间距正中）
-        h = round(20 + sum(rh) + 4 + (18 if extra > 0 else 0)) if show else 0; H = y + h + 20 if show else 27  # 没有卡片时导航下面留 33（主画布已有 6）：和顶上一样，按钮圆心离窗口边 48 = 窗口圆角，同心
+        rh = [m + 12 + len(b) * lh11 + 16 for (a, b), m in zip(rows, mm)]  # 一行 = 格子 + 灰字 + 16 间距（分隔线画在间距正中）
+        h = round(sum(rh) + 4 + 18) if show else 0; H = y + h + 20 if show else 27  # 没有卡片时导航下面留 33（主画布已有 6）：和顶上一样，按钮圆心离窗口边 48 = 窗口圆角，同心
         wn.reset(H); wn.c.configure(height=px(H))
         for nx, nw in NAV: wn.raised(nx, 472 - self.H, nw, 30, 15, d=ELEV, fill=FACE)  # 上面三个导航按钮的阴影伸过来
         if not show: wn.commit(); return
         down = wn.img.copy()  # 试验：候选词不要卡片框，直接放在窗口底色上（点这一块仍打开常用词窗口，按下时没有凹陷效果）；想要框回来：inset(down, x, y, w, h, 28, 5) + wn.raised(x, y, w, h, 28, d=7)
+        wn.text(x, y + h - 30, f'说过 {show[0][2]} 次', 11, SUB)  # 最下面一行：左次数、右「还有 N 条」
         if extra > 0: wn.text(x + w, y + h - 30, f'还有 {extra} 条', 11, SUB, anchor='ne')
-        ry = y + 20
+        ry = y  # 按钮顶边离导航一排 20（主画布到 508 + y 14 = 522 = 502 + 20），和卡片之间的间距一样
         for i, ((hd, c, k, src), (a, b), r, m) in enumerate(zip(show, rows, rh, mm)):
             if i: wn.c.create_line(px(x), px(ry - 8), px(x + w), px(ry - 8), fill=RULE, width=1)
-            ty = ry + (m - 2 * lh12) / 2; wn.text(x, ty, a[0], 12, SUB); wn.text(x, ty + lh12, a[1], 12, TEXT)
-            for bx, bw, t, fn in ((158, 56, '加入', self.add_word), (96, 56, '修改', self.fix_word)):  # 两列等宽 56、间距 6
+            ty = ry + (m - lh12) / 2; wn.text(x, ty, a[0], 12, SUB); wn.text(x + f12.measure(a[0] + ' ') / S, ty, a[1], 12, TEXT)
+            for bx, bw, t, fn in ((BH + 112, 50, '加入', self.add_word), (BH + 56, 50, '修改', self.fix_word)):  # 两列等宽 50、间距 6
                 wn.button(x + w - bx, ry + (m - BH) / 2, bw, BH, text=t, size=11, d=ELEV, color=ICON_C, cmd=lambda fn=fn, hd=hd, c=c: fn(hd, c))
-            wn.button(x + w - 34, ry + (m - BH) / 2, BH, BH, icon=I_CLOSE, size=8, d=ELEV, color=ICON_C, cmd=lambda hd=hd, c=c: self.ignore_word(hd, c))  # 忽略 = 一个叉（圆），右边缘 = 卡片内边 20
-            wn.text(x, ry + m + 4, '\n'.join(b), 11, SUB)  # 灰字和上面的文字同一左边缘
+            wn.button(x + w - BH, ry + (m - BH) / 2, BH, BH, icon=I_CLOSE, size=8, d=ELEV, color=ICON_C, cmd=lambda hd=hd, c=c: self.ignore_word(hd, c))  # 忽略 = 一个叉（圆），右边缘 = 卡片内边 20
+            wn.text(x, ry + m + 12, '\n'.join(b), 11, SUB)  # 灰字和上面的文字同一左边缘
             ry += r
         for b in wn.btns: b.draw(down, *b.box[:2], False)
         wn.commit(); wn.btns.insert(0, CardBtn(wn, (x, y, w, h), down, self.edit_words))  # 点卡片任何地方 = 打开常用词窗口
@@ -2141,14 +2496,14 @@ class App:
     def update_dot(self):
         """READY 右边的状态点：红 = 出错 / 麦克风没打开，橙 = 改错服务（Ollama）没起来、说的话会原样输出，
         黄 = 麦克风 10 秒没声音（待机），绿 = 正常有输入。"""
-        c = self.n.c; x0, y0, x1, y1 = c.bbox(self.word); cy = (y0 + y1) / 2
+        c = self.n.c; x0, y0, x1, y1 = c.bbox(self.word); cy = px(119)  # READY 字的墨迹中心是 120（截屏量的，和 EN / CN 同一条线）；正对 120 用户看着偏下，视觉上提 1
         col = (RED if self.state == 'error' or self.mic == 'off' else ORANGE if self.ol_last in ('down', 'no_model')
                else YELLOW if self.mic == 'silent' else GREEN)
         if col not in self.dots:
             n = px(6) + 2; ss = 8; im = Image.new('RGBA', (n * ss, n * ss), (0, 0, 0, 0))
             ImageDraw.Draw(im).ellipse((ss, ss, (n - 1) * ss, (n - 1) * ss), fill=col)
             self.dots[col] = ImageTk.PhotoImage(im.resize((n, n), Image.LANCZOS))
-        c.coords(self.dot, x1 + px(15), cy); c.itemconfigure(self.dot, image=self.dots[col])
+        c.coords(self.dot, x1 + px(8), cy); c.itemconfigure(self.dot, image=self.dots[col])  # 点离字墨迹约 8（原来 15，用户嫌远）
 
     def set_state(self, s, toast=False):
         self.state = s
@@ -2214,10 +2569,11 @@ class App:
         if mic != self.mic:
             self.mic = mic
             self.update_dot()
-        self.dial.frame(self.state, self.shown)
+        if not (self.proxy and self.proxy.shown): self.dial.frame(self.state, self.shown)  # 替身顶着时真窗口藏着，不画（一帧最多 20ms，挤得拖动一卡一卡）
         for a in ('settings', 'pop'):
             if self.alive(a): getattr(self, a).tick(self.shown, mic)
         sync_chromes()
+        if self.dpi_new: s, self.dpi_new = self.dpi_new, None; self.rescale(s)  # hook_dpi 收到的换屏
         self.look_around()
         self.overlay.frame(self.shown)
         if self.ball.visible:
@@ -2364,7 +2720,7 @@ class Settings:
         H = self.full_height()
         V, oy = self.view_height(), n.c.canvasy(0) / S  # 改了设置重画时停在原来滚到的位置
         n.reset(H); n.c.configure(height=px(V), scrollregion=(0, 0, px(self.Wd), px(H)), yscrollincrement=px(20))
-        n.text(33, 26, 'SETTINGS', 18, INK, family=DISPLAY)
+        n.text(33, 23.5, 'SETTINGS', 22, INK, family=DISPLAY)
         n.button(261, 33, 30, 30, icon=I_SETUP, size=9, color=ICON_C, cmd=app.open_ready)  # 准备情况；和主页右上角三个圆同位置
         n.button(299, 33, 30, 30, icon=I_CHECK, size=9, color=ICON_C, cmd=app.open_checks)  # 自检
         close_btn(n, self.Wd, self.w.withdraw)
@@ -2453,7 +2809,7 @@ class History:
         h = self.head; top_h = self.CARD_Y + ch + self.PAD
         self.lv = lv = self.view - top_h  # 固定区高度、列表视口高度
         h.reset(top_h); h.c.configure(height=px(top_h))
-        h.text(33, 26, 'HISTORY', 18, INK, family=DISPLAY)
+        h.text(33, 23.5, 'HISTORY', 22, INK, family=DISPLAY)
         close_btn(h, self.W, self.w.withdraw)
         h.button(299, 33, 30, 30, icon=I_OPEN, size=9, color=ICON_C, cmd=lambda: os.startfile(HIST) if HIST.exists() else None)  # 用记事本打开
         self.prefs(h, self.CARD_Y, ch, on); h.commit()
@@ -2568,7 +2924,7 @@ class Words:
         oy = n.c.canvasy(0) / S if keep else 0
         y, ch = self.CARD_Y, 110; top_h = y + ch + self.PAD; self.lv = lv = self.view - top_h
         h.reset(top_h); h.c.configure(height=px(top_h))
-        h.text(33, 26, 'WORDS', 18, INK, family=DISPLAY)
+        h.text(33, 23.5, 'WORDS', 22, INK, family=DISPLAY)
         close_btn(h, self.W, self.w.withdraw)
         h.button(299, 33, 30, 30, icon=I_OPEN, size=9, color=ICON_C, cmd=self.open_file)  # 用记事本改：复杂写法 / 一次改很多
         h.raised(20, y, 360, ch, 28, d=ELEV)
@@ -2727,7 +3083,7 @@ class Checks:
         top = 92; by = top + 5 * self.ROW + 16 + 22
         n = self.n = Neu(self.w, self.W, by + 52 + 20); n.c.pack()
         close_btn(n, self.W, self.w.withdraw)
-        n.text(33, 26, 'CHECK', 18, INK, family=DISPLAY)
+        n.text(33, 23.5, 'CHECK', 22, INK, family=DISPLAY)
         n.raised(20, top, 360, 5 * self.ROW + 16, 28, d=ELEV)
         self.rows = []
         for i, name in enumerate(CHECKS):
@@ -2794,7 +3150,7 @@ class Ready:
         top = 92; by = top + len(self.NAMES) * self.ROW + 16 + 22
         n = self.n = Neu(self.w, self.W, by + 52 + 20); n.c.pack()
         close_btn(n, self.W, self.w.withdraw)
-        n.text(33, 26, 'SETUP', 18, INK, family=DISPLAY)
+        n.text(33, 23.5, 'SETUP', 22, INK, family=DISPLAY)
         n.raised(20, top, 360, len(self.NAMES) * self.ROW + 16, 28, d=ELEV)
         self.rows = []
         for i, name in enumerate(self.NAMES):
@@ -2911,13 +3267,13 @@ if __name__ == '__main__':
     trim_history()
     try: ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('local.voice-input')  # 任务栏显示自己的图标
     except Exception: pass
-    try: ctypes.windll.shcore.SetProcessDpiAwareness(2)  # 每块屏按自己的缩放（per-monitor），高分屏下不模糊；坐标按 S 缩放
+    try: ctypes.windll.shcore.SetProcessDpiAwareness(2)  # 每块屏按自己的缩放（per-monitor）：主窗口跨屏时收 WM_DPICHANGED 立刻重建（App.hook_dpi），两块屏都清晰。
+    # 试过系统级（1，Windows 拉伸）：大小对但高缩放屏上糊；也试过启动时定死 S（按光标 / 上次那块屏 / 最小缩放），拖到别的屏会大到放不下（2026-11-01）
     except Exception: pass
     load_fonts()
     root = tk.Tk(); root.withdraw()
-    pt = ctypes.wintypes.POINT(); user32.GetCursorPos(ctypes.byref(pt))
-    wa, S = monitor_at(pt.x, pt.y)  # 开在光标所在的那块屏
-    log(f"光标 {pt.x},{pt.y}，工作区 {rect(wa)}，缩放 {S}")
+    wa, S = monitor_at(0, 0)  # 开在主屏，按主屏缩放画；拖到别的屏再按那块屏重建（App.rescale）
+    log(f"开在主屏，工作区 {rect(wa)}，缩放 {S}")
     apply_theme(system_theme())
     setup_fonts(root)
     root.report_callback_exception = lambda *e: (log('界面出错', ''.join(traceback.format_exception(*e))),
@@ -2925,7 +3281,7 @@ if __name__ == '__main__':
     threading.excepthook = lambda a: log('后台出错', ''.join(traceback.format_exception(a.exc_type, a.exc_value, a.exc_traceback)))
     app = App(root)
     root.geometry(f'+{wa.right - px(App.W) - px(20)}+{wa.top + px(12)}')  # 离右边 20：四个窗口全开时排得下，不用挪
-    root.deiconify(); root.update()  # 先把窗口画出来：冷启动时开麦克风要等声卡驱动一两秒，放在前面窗口会白一阵
+    root.deiconify(); root.update(); app.hook_dpi()  # 先把窗口画出来：冷启动时开麦克风要等声卡驱动一两秒，放在前面窗口会白一阵
     threading.Thread(target=lambda: (eng.open(cfg['device']), eng.load()), daemon=True).start()  # 开麦克风、载识别模型都在后台
     threading.Thread(target=fix_worker, daemon=True).start()
     threading.Thread(target=eng.hotkey_loop, daemon=True).start()
