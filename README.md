@@ -33,7 +33,7 @@ all of that verbatim, or send my voice to the cloud. Quill does the cleanup loca
 - **Cleans up speech, not just grammar** — removes fillers, stutters, false starts and self-corrections ("no, I mean…"); fixes tense, articles and plurals.
 - **Speak Chinese, get English** — tap **EN / 中** on the home screen; mixed Chinese-English works too. Or get clean Chinese instead (Settings → *When speaking Chinese*).
 - **Fast** — English appears about 1 s after you let go, clean Chinese in about half a second.
-- **See what changed** — an overlay at the bottom of the screen shows the live text, the words that were fixed and a Chinese translation.
+- **See what changed** — an overlay at the bottom of the screen shows the live text, the words that were fixed and a Chinese translation. With several monitors it appears on the one you're working on.
 - **Learns your words** — names, projects, tools. Write `Claude: cloud` and Quill decides from context whether "cloud" meant Claude. Once a day it suggests words it probably misheard.
 
 <p align="center">

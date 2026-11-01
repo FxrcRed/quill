@@ -96,6 +96,22 @@ S = 1.0  # 屏幕缩放（150% = 1.5），界面坐标都按 100% 写，画的�
 
 user32, kernel32 = ctypes.windll.user32, ctypes.windll.kernel32
 user32.GetAsyncKeyState.restype = ctypes.c_short
+user32.MonitorFromWindow.argtypes, user32.MonitorFromWindow.restype = [ctypes.wintypes.HWND, ctypes.wintypes.DWORD], ctypes.wintypes.HMONITOR
+user32.GetMonitorInfoW.argtypes = [ctypes.wintypes.HMONITOR, ctypes.c_void_p]
+
+
+class _MONITORINFO(ctypes.Structure):
+    _fields_ = [('cbSize', ctypes.wintypes.DWORD), ('rcMonitor', ctypes.wintypes.RECT), ('rcWork', ctypes.wintypes.RECT), ('dwFlags', ctypes.wintypes.DWORD)]
+
+
+def active_work_area():
+    """正在用的那块屏（前台窗口所在）的工作区，物理像素；取不到就用主屏。"""
+    wa = ctypes.wintypes.RECT(); user32.SystemParametersInfoW(0x30, 0, ctypes.byref(wa), 0)
+    hwnd = user32.GetForegroundWindow()
+    if hwnd:
+        mi = _MONITORINFO(); mi.cbSize = ctypes.sizeof(mi)
+        if user32.GetMonitorInfoW(user32.MonitorFromWindow(hwnd, 1), ctypes.byref(mi)): return mi.rcWork
+    return wa
 
 # ---- 快捷键名字 ----
 KEYS = {'右 Alt': 0xA5, '右 Ctrl': 0xA3, '左 Alt': 0xA4, 'F8': 0x77, 'F9': 0x78}
@@ -1363,6 +1379,23 @@ def ulw(hwnd, img, x, y):
 
 ulw.warned = False
 
+for _fn, _res, _args in ((gdi32.CreateCompatibleBitmap, _vp, [_vp, ctypes.c_int, ctypes.c_int]), (gdi32.SetStretchBltMode, ctypes.c_int, [_vp, ctypes.c_int]),
+                         (gdi32.StretchBlt, ctypes.c_int, [_vp] + [ctypes.c_int] * 4 + [_vp] + [ctypes.c_int] * 4 + [_u32]),
+                         (gdi32.GetDIBits, ctypes.c_int, [_vp, _vp, _u32, _u32, _vp, _vp, _u32])):
+    _fn.restype, _fn.argtypes = _res, _args
+
+def grab_small(box, k=6):
+    """把屏幕上 box（物理像素，副屏的负坐标也行）直接缩小 k 倍截下来。比 ImageGrab 快 8 倍：
+    ImageGrab 不管 box 多小都要先截整个桌面（两块屏约 100ms），这里只拷要的那块（约 13ms）。"""
+    x0, y0, x1, y1 = box; w, h = x1 - x0, y1 - y0; sw, sh = max(1, w // k), max(1, h // k)
+    sdc = user32.GetDC(None); mdc = gdi32.CreateCompatibleDC(sdc); bmp = gdi32.CreateCompatibleBitmap(sdc, sw, sh); old = gdi32.SelectObject(mdc, bmp)
+    gdi32.SetStretchBltMode(mdc, 4)  # HALFTONE：缩小时取平均，不是丢像素
+    gdi32.StretchBlt(mdc, 0, 0, sw, sh, sdc, x0, y0, w, h, 0x00CC0020)
+    bi = _BMIH(ctypes.sizeof(_BMIH), sw, -sh, 1, 32, 0, 0, 0, 0, 0, 0); buf = ctypes.create_string_buffer(sw * sh * 4)
+    gdi32.GetDIBits(mdc, bmp, 0, sh, buf, ctypes.byref(bi), 0)
+    gdi32.SelectObject(mdc, old); gdi32.DeleteObject(bmp); gdi32.DeleteDC(mdc); user32.ReleaseDC(None, sdc)
+    return Image.frombuffer('RGBA', (sw, sh), buf, 'raw', 'BGRA', 0, 1).convert('RGB')
+
 _pfonts = {}
 def pfont(size, kind='r'):
     """PIL 用的字体：r 正文 / b 粗一点 / i 图标（项目里的 Noto Sans SC，没有就用系统雅黑）。"""
@@ -1417,7 +1450,7 @@ OV_SUB = '#3A3A3C'  # 浮窗里第二层的字（还没定下来的实时识别�
 class Overlay:
     """屏幕底部中间的浮窗：说话时实时显示识别的字，之后显示改好的结果（标出改动）。
     不抢焦点：点它光标还留在你原来的输入框里，所以点了就能直接粘贴进去。"""
-    W, M, ALPHA, ROW_H = 600, 28, 215, 74  # ROW_H：一行样式的最小高度（英文一行 24 + 中文一行 18 + 间隔 2 + 上下各 15）； 卡片宽、四周给阴影留的边（逻辑像素）、卡片底色不透明度（215/255，半透明，后面再乱也看得清字）
+    W, M, ALPHA, ROW_H = 600, 28, 215, 58  # ROW_H：一行样式的最小高度（英文一行 24 + 中文一行 18 + 间隔 2 + 上下各 7）； 卡片宽、四周给阴影留的边（逻辑像素）、卡片底色不透明度（215/255，半透明，后面再乱也看得清字）
 
     def __init__(self, app):
         self.app = app
@@ -1506,14 +1539,13 @@ class Overlay:
         """浮窗后面那块屏幕：截下来 → 缩小模糊 → 稍微加饱和、提亮（上面深色的字才看得清）。只在内存里用。
         make_demo.py 会把它换成固定的底色。"""
         w, h = box[2] - box[0], box[3] - box[1]
-        im = ImageGrab.grab(box).convert('RGB')
-        im = im.resize((max(1, w // 6), max(1, h // 6)), Image.BILINEAR).filter(ImageFilter.GaussianBlur(2.2)).resize((w, h), Image.BICUBIC)
-        im = Image.blend(ImageEnhance.Color(im).enhance(1.3), Image.new('RGB', (w, h), (247, 247, 249)), 0.45)
-        return im.convert('RGBA')
+        im = grab_small(box, 6).filter(ImageFilter.GaussianBlur(2.2))  # 先在小图上做完模糊、饱和、提亮，最后才放大
+        im = Image.blend(ImageEnhance.Color(im).enhance(1.3), Image.new('RGB', im.size, (247, 247, 249)), 0.45)
+        return im.resize((w, h), Image.BICUBIC).convert('RGBA')
 
     def backdrop_rect(self):
         """浮窗底边往上 TALL 那么高、和浮窗一样宽的一块（屏幕物理像素）。"""
-        wa = ctypes.wintypes.RECT(); user32.SystemParametersInfoW(0x30, 0, ctypes.byref(wa), 0)
+        wa = active_work_area()
         w = px(self.W + 2 * self.M); x = wa.left + (wa.right - wa.left - w) // 2; bottom = wa.bottom + px(self.M) - px(18)
         return (x, bottom - px(self.TALL), x + w, bottom)
 
@@ -1557,7 +1589,7 @@ class Overlay:
             tcol = {'err': RED, 'ok': GREEN}.get(d.get('level'), ORANGE)
             f = pfont(14); blocks.append((flow([(d['text'], INK, False)], f, TW, 3), f))
         th = sum(len(ls) * f.size * 1.5 for ls, f in blocks) / S + 2 * (len(blocks) - 1)  # 文字块总高（逻辑像素）
-        h = max(self.ROW_H, round(th + 30))  # 最矮也按「英文一行 + 中文一行」：一句话从正在听到出结果一样高，不会突然变大
+        h = max(self.ROW_H, round(th + 14))  # 最矮也按「英文一行 + 中文一行」：一句话从正在听到出结果一样高，不会突然变大
         img = self.layer(h); dr = ImageDraw.Draw(img); cy = px(M + h / 2)
         y = px(M) + (px(h) - px(th)) / 2
         for ls, f in blocks:
@@ -1605,7 +1637,7 @@ class Overlay:
 
     def blit(self, level=0.0):
         c = self.cards[self.ck]; img = c['under'].copy()
-        wa = ctypes.wintypes.RECT(); user32.SystemParametersInfoW(0x30, 0, ctypes.byref(wa), 0)
+        wa = active_work_area()
         x, y = wa.left + (wa.right - wa.left - img.width) // 2, wa.bottom - img.height + px(self.M) - px(18)
         geo = (img.width, img.height, x, y)
         if not self.visible: self.refresh_backdrop()  # 露面之前截后面的屏幕（这时还截不到自己）
@@ -1637,7 +1669,7 @@ class Overlay:
 class Ball:
     """悬浮球：主窗口缩小成屏幕边上的一个小圆球（和图标一个样子），声波条跟着状态动。
     点一下回到主窗口；按住拖可以挪位置（记在 settings.json 的 ball）。不抢焦点，快捷键照常用。"""
-    D, M = 60, 16  # 球直径、四周阴影留边（逻辑像素）
+    D, M = 44, 16  # 球直径、四周阴影留边（逻辑像素）
 
     def __init__(self, app):
         self.app = app
@@ -1655,10 +1687,9 @@ class Ball:
         """球底：柔和投影 + 上亮下暗的浅灰圆盘（只画一次）。"""
         n = px(self.D + 2 * self.M); ss = 3; N = n * ss; C = N / 2; R = px(self.D / 2) * ss
         img = Image.new('RGBA', (N, N), (0, 0, 0, 0))
-        sh = Image.new('L', (N, N), 0); ImageDraw.Draw(sh).ellipse((C - R, C - R + N * 0.04, C + R, C + R + N * 0.04), fill=120)
-        layer = Image.new('RGBA', (N, N), (40, 40, 48, 255)); layer.putalpha(_blur(sh, px(7) * ss)); img.alpha_composite(layer)
-        disc = Image.new('L', (N, N), 0); ImageDraw.Draw(disc).ellipse((C - R, C - R, C + R, C + R), fill=255)
-        img.paste(_grad((N, N), C - R, C + R, '#F6F6F7', '#DCDCDF'), (0, 0), disc)
+        sh = Image.new('L', (N, N), 0); ImageDraw.Draw(sh).ellipse((C - R, C - R + N * 0.03, C + R, C + R + N * 0.03), fill=45)
+        layer = Image.new('RGBA', (N, N), (40, 40, 48, 255)); layer.putalpha(_blur(sh, px(5) * ss)); img.alpha_composite(layer)
+        ImageDraw.Draw(img).ellipse((C - R, C - R, C + R, C + R), fill='#EEEEF0')  # 平面单色圆盘
         self.base = img.resize((n, n), Image.LANCZOS)
 
     def show(self):
@@ -2652,6 +2683,7 @@ def quit_app():
         if eng.stream: eng.stream.close()
     except Exception: pass
     stop_ollama()  # 自己拉起的改错服务跟着关，别一直占着显存
+    log('退出（quit_app）')
     os._exit(0)
 
 
@@ -2662,8 +2694,15 @@ if __name__ == '__main__':
         h = user32.FindWindowW(None, TITLE)
         if h: user32.ShowWindow(h, 9); user32.SetForegroundWindow(h)
         sys.exit(0)
+    try: (HERE / 'run.prev.log').write_bytes((HERE / 'run.log').read_bytes())  # 上一轮的日志留一份：莫名退出时才查得到原因
+    except Exception: pass
     (HERE / 'run.log').write_text('', encoding='utf-8')
     log('启动' + ('（自检模式）' if SELFTEST else ''))
+    try:  # 闪退（原生崩溃）时把各线程栈写进 crash.log；正常退出和异常退出都在 run.log 记一行
+        import faulthandler, atexit
+        _crash = open(HERE / 'crash.log', 'a', encoding='utf-8'); faulthandler.enable(_crash, all_threads=True)
+        atexit.register(lambda: log('进程退出（atexit）'))
+    except Exception: pass
     trim_history()
     try: ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('local.voice-input')  # 任务栏显示自己的图标
     except Exception: pass
