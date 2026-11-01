@@ -124,7 +124,8 @@ I_PIN = '\uE718'  # 浮窗固定后右边的图钉
 I_OPEN, I_SETUP = '', ''  # 记录 / 常用词标题行「用记事本打开」；设置标题行「准备情况」（扳手）
 HIST_DY = 4
 NAV_DY = -4  # 导航按钮里宽体字比按钮中线低 4 像素（实测：按钮身 656~700，字心 682.5），整排上提
-S = 1.0  # 主窗口所在那块屏的缩放（150% = 1.5），界面坐标都按 100% 写，画的时候乘 S；浮窗、悬浮球按自己那块屏临时换（at_scale）
+S = 1.0  # 屏幕缩放（150% = 1.5），界面坐标都按 100% 写，画的时候乘 S。启动时按光标那块屏定一次，之后不变：
+         # 窗口拖到缩放不同的屏上保持同样的像素大小（用户要的，2026-11-01；不跟着那块屏放大缩小）
 
 user32, kernel32 = ctypes.windll.user32, ctypes.windll.kernel32
 user32.GetAsyncKeyState.restype = ctypes.c_short
@@ -159,15 +160,6 @@ def active_monitor():
     if hwnd: return monitor_of(hwnd)
     pt = ctypes.wintypes.POINT(); user32.GetCursorPos(ctypes.byref(pt)); return monitor_at(pt.x, pt.y)
 
-class at_scale:
-    """临时按另一块屏的缩放画（浮窗、悬浮球不一定和主窗口在同一块屏）：px()、pfont()、_sprite 都读全局 S。只在界面线程里用。"""
-    def __init__(self, s): self.s = s
-    def __enter__(self):
-        global S
-        self.old, S = S, self.s
-    def __exit__(self, *e):
-        global S
-        S = self.old
 
 # ---- 快捷键名字 ----
 KEYS = {'右 Ctrl': 0xA3, 'F8': 0x77, 'F9': 0x78}  # 不放 Alt：Claude 桌面版等程序单按 Alt 松开会弹菜单、抢焦点，Ctrl+V 粘不进去（还能「录制」成 Alt）
@@ -1581,7 +1573,7 @@ OV_INKS = {'dark': ('#1E1E1E', '#3A3A3C', '#D3D3D8', ('#4A4A50', '#0E0E10')),
 class Overlay:
     """屏幕底部中间的浮窗：说话时实时显示识别的字，之后显示改好的结果（标出改动）。
     不抢焦点：点它光标还留在你原来的输入框里，所以点了就能直接粘贴进去。
-    在正在用的那块屏上出现，按那块屏的缩放画（self.s，画的时候 at_scale）。"""
+    在正在用的那块屏上出现（大小和主窗口一样按 S，不看那块屏的缩放）。"""
     W, M, ALPHA, ROW_H = 600, 28, 215, 58  # ROW_H：一行样式的最小高度（英文一行 24 + 中文一行 18 + 间隔 2 + 上下各 7）； 卡片宽、四周给阴影留的边（逻辑像素）、卡片底色不透明度（215/255，半透明，后面再乱也看得清字）
     ICON, EDGE, GAP = 30, 36, 15  # 左边声波条 / 「!」和右边勾的直径一样大；圆心离卡片左右边一样远；图标和字之间
     TX = EDGE + ICON // 2 + GAP   # 字的左边（66）
@@ -1601,15 +1593,14 @@ class Overlay:
         self.cards, self.base, self.wgeo, self.bar_c, self.h, self.ck = {}, None, None, (0, 0), self.ROW_H, None
         self.backdrop = (None, None)  # 浮窗后面那块屏幕的模糊图：(屏幕上的范围, 图)，一次截得比浮窗高，浮窗变高时直接从里面裁
         self.sm, self.lv, self.t0, self.since = [0.0] * 6, 0.0, time.time(), 0.0
-        self.wa, self.s, self.tone = None, S, 'dark'  # 在哪块屏（工作区）、那块屏的缩放、玻璃上用暗字还是亮字（OV_INKS）
+        self.wa, self.tone = None, 'dark'  # 在哪块屏（工作区）、玻璃上用暗字还是亮字（OV_INKS）
 
     # 对外：每种状态
     def listen(self, by_key):
         if self.visible:
             if rect(active_monitor()[0]) != rect(self.wa): self.hide()  # 换了一块屏说话：在那块屏上重新出现
             else:
-                with at_scale(self.s): r = self.backdrop_rect()  # 位置在界面线程里算好（后台线程不碰 S）
-                threading.Thread(target=self.refresh_backdrop, args=(True, r), daemon=True).start()  # 浮窗还开着就说下一句：背景换新
+                threading.Thread(target=self.refresh_backdrop, args=(True,), daemon=True).start()  # 浮窗还开着就说下一句：背景换新
         self.set('rec', done='', part='', by_key=by_key)
     def live(self, done, part):
         if self.mode == 'rec': self.d.update(done=done, part=part); self.render()
@@ -1685,16 +1676,16 @@ class Overlay:
         return im.resize((w, h), Image.BICUBIC).convert('RGBA')
 
     def backdrop_rect(self):
-        """浮窗底边往上 TALL 那么高、和浮窗一样宽的一块（屏幕物理像素）。要在 at_scale(self.s) 里调。"""
+        """浮窗底边往上 TALL 那么高、和浮窗一样宽的一块（屏幕物理像素）。"""
         wa = self.wa
         w = px(self.W + 2 * self.M); x = wa.left + (wa.right - wa.left - w) // 2; bottom = wa.bottom + px(self.M) - px(18)
         return (x, bottom - px(self.TALL), x + w, bottom)
 
-    def refresh_backdrop(self, hide_self=False, r=None):
+    def refresh_backdrop(self, hide_self=False):
         """截浮窗后面的屏幕当玻璃底，顺便按它的亮度定字色（tone）。平时在浮窗露面之前截（这时它还没显示，截不到自己）。
         hide_self：浮窗已经开着（接着说下一句）时，只在截的这一下把浮窗排除在截屏外（WDA_EXCLUDEFROMCAPTURE），截完马上恢复，
         所以别人截屏 / 录屏照样看得到浮窗。"""
-        r = r or self.backdrop_rect()
+        r = self.backdrop_rect()
         try:
             if hide_self:
                 user32.SetWindowDisplayAffinity(ctypes.c_void_p(self.hwnd), 0x11); ctypes.windll.dwmapi.DwmFlush()
@@ -1705,7 +1696,7 @@ class Overlay:
         im = self.backdrop[1]
         if im is None: self.tone = 'dark' if THEME == 'light' else 'light'
         else:  # 只看最底下浮窗会盖住的那一段（最矮的样子）
-            low = im.crop((0, im.height - round((self.ROW_H + 2 * self.M) * self.s), im.width, im.height)).convert('L')
+            low = im.crop((0, im.height - px(self.ROW_H + 2 * self.M), im.width, im.height)).convert('L')
             self.tone = 'dark' if np.asarray(low).mean() > 150 else 'light'
 
     def glass(self, box):
@@ -1718,12 +1709,8 @@ class Overlay:
     def render_row(self):
         """正在听 / 改语病 / 结果 / 提示：一行。左边声波条（每帧在 blit 里画；提示是彩色「!」），中间文字上下居中，
         结果最右边一个勾（固定后换成图钉，只复制没输入时是复制图标）。"""
-        if not self.visible:  # 露面之前：定在哪块屏、按那块屏的缩放，截后面的屏幕（这时还截不到自己）
-            self.wa, self.s = active_monitor()
-            with at_scale(self.s): self.refresh_backdrop()
-        with at_scale(self.s): self._render_row()
-
-    def _render_row(self):
+        if not self.visible:  # 露面之前：定在哪块屏，截后面的屏幕（这时还截不到自己）
+            self.wa = active_monitor()[0]; self.refresh_backdrop()
         M, W, d, m = self.M, self.W, self.d, self.mode
         ink, sub, mark, _ = OV_INKS[self.tone]
         right = self.TX if m == 'result' else self.EDGE - self.ICON // 2  # 文字右边留的宽度：结果右边有勾，和左边对称
@@ -1785,7 +1772,7 @@ class Overlay:
         down = key_down(0x01) or key_down(0x02)
         if down and not self.mouse_down and self.visible and self.wgeo and self.mode in ('result', 'notice') and not self.pinned:
             pt = ctypes.wintypes.POINT(); user32.GetCursorPos(ctypes.byref(pt))
-            w, h, x, y = self.wgeo; M = round(self.M * self.s)
+            w, h, x, y = self.wgeo; M = px(self.M)
             if not (x + M <= pt.x <= x + w - M and y + M <= pt.y <= y + h - M): self.hide()
         self.mouse_down = down
         if self.visible and self.mode == 'busy' and not self.d.get('raw') and not self.d.get('slow') and time.time() - self.since > self.SLOW:
@@ -1793,9 +1780,6 @@ class Overlay:
         if self.visible and self.mode in ('rec', 'busy', 'result'): self.blit(level)
 
     def blit(self, level=0.0):
-        with at_scale(self.s): self._blit(level)
-
-    def _blit(self, level):
         c = self.cards[self.ck]; img = c['under'].copy()
         wa = self.wa
         x, y = wa.left + (wa.right - wa.left - img.width) // 2, wa.bottom - img.height + px(self.M) - px(18)
@@ -1839,11 +1823,11 @@ class Ball:
         ex = user32.GetWindowLongW(self.hwnd, -20) | 0x08000000 | 0x80 | 0x8  # 不抢焦点 / 不进任务栏 / 置顶
         user32.ShowWindow(self.hwnd, 0)
         user32.SetWindowLongW(self.hwnd, -20, ex & ~0x80000); user32.SetWindowLongW(self.hwnd, -20, ex | 0x80000)  # 分层（先清再设，见 Overlay）
-        self.visible, self.start, self.moved, self.base, self.s = False, None, False, None, None
+        self.visible, self.start, self.moved, self.base = False, None, False, None
         self.sm, self.lv, self.t0, self.x, self.y = [0.0] * 6, 0.0, time.time(), 0, 0
 
     def make_base(self):
-        """球底：柔和投影 + 平面单色圆盘。按球所在那块屏的缩放画（self.s），换到缩放不同的屏再画一次。"""
+        """球底：柔和投影 + 平面单色圆盘（只画一次）。"""
         n = px(self.D + 2 * self.M); ss = 3; N = n * ss; C = N / 2; R = px(self.D / 2) * ss
         img = Image.new('RGBA', (N, N), (0, 0, 0, 0))
         sh = Image.new('L', (N, N), 0); ImageDraw.Draw(sh).ellipse((C - R, C - R + N * 0.03, C + R, C + R + N * 0.03), fill=45 if THEME == 'light' else 110)
@@ -1852,11 +1836,9 @@ class Ball:
         self.base = img.resize((n, n), Image.LANCZOS)
 
     def place(self, cx, cy):
-        """球心放在 (cx, cy)（物理像素）：按那块屏的缩放画、夹在那块屏的工作区里。"""
-        wa, s = monitor_at(cx, cy)
-        if s != self.s or not self.base:
-            self.s = s
-            with at_scale(s): self.make_base()
+        """球心放在 (cx, cy)（物理像素），夹在那块屏的工作区里。"""
+        wa = monitor_at(cx, cy)[0]
+        if not self.base: self.make_base()
         n = self.base.width; x, y = cx - n // 2, cy - n // 2
         self.x, self.y = min(max(wa.left, x), wa.right - n), min(max(wa.top, y), wa.bottom - n)
         self.w.geometry(f'{n}x{n}+{self.x}+{self.y}'); user32.SetWindowPos(self.hwnd, None, self.x, self.y, n, n, 0x14)
@@ -1864,7 +1846,7 @@ class Ball:
     def show(self):
         if cfg.get('ball'): cx, cy = cfg['ball']
         else:  # 默认贴在主窗口那块屏的右边中间
-            wa, s = monitor_of(self.app.chrome.hwnd); cx, cy = wa.right, (wa.top + wa.bottom) // 2
+            wa = monitor_of(self.app.chrome.hwnd)[0]; cx, cy = wa.right, (wa.top + wa.bottom) // 2
         self.place(cx, cy)
         self.visible = True; self.frame(self.app.state, 0.0)
         user32.ShowWindow(self.hwnd, 8); user32.SetWindowPos(self.hwnd, -1, 0, 0, 0, 0, 0x13)  # 显示但不激活、置顶
@@ -1876,7 +1858,7 @@ class Ball:
         if not self.visible: return
         t = time.time() - self.t0; self.lv += ((level if state == 'rec' else 0) - self.lv) * 0.35
         n, ss = self.base.width, 3; L = Image.new('RGBA', (n * ss, n * ss), (0, 0, 0, 0))
-        paint_bars(L, n * ss / 2, n * ss / 2, self.D * self.s * ss * 0.46, state, self.lv, t, self.sm)
+        paint_bars(L, n * ss / 2, n * ss / 2, px(self.D) * ss * 0.46, state, self.lv, t, self.sm)
         img = self.base.copy(); img.alpha_composite(L.resize((n, n), Image.LANCZOS)); ulw(self.hwnd, img, self.x, self.y)
 
     def press(self, e): self.start, self.moved = (e.x_root, e.y_root, self.x, self.y), False
@@ -1884,14 +1866,14 @@ class Ball:
     def drag(self, e):
         if not self.start: return
         dx, dy = e.x_root - self.start[0], e.y_root - self.start[1]
-        if abs(dx) + abs(dy) > 4 * self.s: self.moved = True
+        if abs(dx) + abs(dy) > px(4): self.moved = True
         if self.moved:
             self.x, self.y = self.start[2] + dx, self.start[3] + dy
             self.w.geometry(f'+{self.x}+{self.y}'); user32.SetWindowPos(self.hwnd, None, self.x, self.y, 0, 0, 0x15)
 
     def release(self, e):
         if self.start and not self.moved: self.app.restore()
-        elif self.moved:  # 松手：按落在的那块屏重新夹一次（换了缩放不同的屏就重画）；记球心，和球多大无关
+        elif self.moved:  # 松手：按落在的那块屏重新夹一次；记球心
             n = self.base.width; self.place(self.x + n // 2, self.y + n // 2)
             cfg['ball'] = [self.x + n // 2, self.y + n // 2]; save_cfg(); self.frame(self.app.state, 0.0)
         self.start = None
@@ -1993,11 +1975,11 @@ class App:
         self.overlay = Overlay(self); self.ball = Ball(self)
         self.set_state(self.state)
 
-    def rebuild(self, theme, s):
-        """系统换了深浅色，或主窗口拖到缩放不同的屏上：所有窗口按新的配色和缩放重画，开着的子窗口重新打开。
-        Tk 不会自己跟着缩放（字号、坐标都是按 S 算好的像素），所以整个拆掉重建；只在闲着、没按着鼠标时做。"""
-        global S
-        log(f'界面重建：{THEME} → {theme}，缩放 {S} → {s}')
+    def rebuild(self, theme):
+        """系统换了深浅色：所有窗口按新的配色重画，开着的子窗口重新打开。只在闲着、没按着鼠标时做。"""
+        r = ctypes.wintypes.RECT(); user32.GetWindowRect(self.chrome.hwnd, ctypes.byref(r))
+        log(f'界面重建：{THEME} → {theme}，主窗口 {rect(r)}')
+        wa = monitor_of(self.chrome.hwnd)[0]  # 重建前它在哪块屏，重建完还放在那块屏
         opened = [a for a in self.SUBS if self.alive(a) and getattr(self, a).w.winfo_viewable()]
         ball = self.ball.visible
         for a in self.SUBS:
@@ -2005,26 +1987,26 @@ class App:
             setattr(self, a, None)
         self.overlay.hide(); self.ball.hide()
         for w in (self.overlay.w, self.ball.w, self.n.c, self.wn.c): w.destroy()
-        S = s; apply_theme(theme)
+        apply_theme(theme)
         self.build_ui(); self.chrome.geo = None  # 窗口圆角、阴影也按新配色 / 缩放重画
-        self.root.update_idletasks()
-        wa, _ = monitor_of(self.chrome.hwnd)  # 变大了别伸出这块屏
-        r = self.root; x0, y0 = r.winfo_x(), r.winfo_y()
-        x = max(wa.left, min(x0, wa.right - r.winfo_width() - px(20))); y = max(wa.top, min(y0, wa.bottom - r.winfo_height() - px(12)))
-        if (x, y) != (x0, y0): r.geometry(f'+{x}+{y}')
+        root = self.root; root.update_idletasks()
+        # 一律按重建前的实际位置摆一次（变大了别伸出这块屏）：拖动后 Tk 自己记的位置可能是旧的，
+        # 不设的话它重新排版时会把窗口放回那里——拖回左屏缩小后，2 秒后又跳回右屏变大，来回重建（2026-11-01 用户实测）
+        x = max(wa.left, min(r.left, wa.right - root.winfo_reqwidth() - px(20))); y = max(wa.top, min(r.top, wa.bottom - root.winfo_reqheight() - px(12)))
+        root.geometry(f'+{x}+{y}'); root.update_idletasks()
+        user32.GetWindowRect(self.chrome.hwnd, ctypes.byref(r)); log(f'重建后主窗口 {rect(r)}')
         self.chrome.sync()
         for a in opened: self._open(a, {'settings': Settings, 'check_win': Checks, 'ready_win': Ready, 'history': History, 'words': Words}[a])
         if ball: self.ball.show()
         self.root.after(1500, self.prewarm)
 
     def look_around(self):
-        """每秒看一次：系统深浅色变了、主窗口到了缩放不同的屏上，就 rebuild()。正在说话 / 改错、按着鼠标（还在拖窗口）时先不动。"""
+        """每秒看一次：系统深浅色变了就 rebuild()。正在说话 / 改错、按着鼠标时先不动。"""
         if time.time() < self.next_look: return
         self.next_look = time.time() + 1
-        h = self.chrome.hwnd  # 主窗口藏着（还没摆好 / 变成悬浮球）时不看它在哪块屏
-        theme, s = system_theme(), monitor_of(h)[1] if user32.IsWindowVisible(h) else S
-        if (theme, s) == (THEME, S) or self.state not in ('ready', 'loading', 'error') or self.overlay.visible or key_down(0x01): return
-        self.rebuild(theme, s)
+        theme = system_theme()
+        if theme == THEME or self.state not in ('ready', 'loading', 'error') or self.overlay.visible or key_down(0x01): return
+        self.rebuild(theme)
 
     def nav_label(self, n, cx, icon, label):
         """导航按钮里的字：图标 + 宽体小标题，一起在按钮里居中；图标和文字的垂直中心对齐（HIST_DY 实测补偿）。"""
