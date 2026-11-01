@@ -114,7 +114,7 @@ def active_work_area():
     return wa
 
 # ---- 快捷键名字 ----
-KEYS = {'右 Alt': 0xA5, '右 Ctrl': 0xA3, '左 Alt': 0xA4, 'F8': 0x77, 'F9': 0x78}
+KEYS = {'右 Ctrl': 0xA3, 'F8': 0x77, 'F9': 0x78}  # 不放 Alt：Claude 桌面版等程序单按 Alt 松开会弹菜单、抢焦点，Ctrl+V 粘不进去（还能「录制」成 Alt）
 NAMES = {0xA5: '右 Alt', 0xA4: '左 Alt', 0xA3: '右 Ctrl', 0xA2: '左 Ctrl', 0xA1: '右 Shift', 0xA0: '左 Shift',
          0x5B: '左 Win', 0x5C: '右 Win', 0x5D: '菜单键', 0x14: '大写锁定', 0x20: '空格', 0x09: 'Tab', 0x1B: 'Esc',
          0x2D: 'Insert', 0x13: 'Pause', 0x91: 'ScrollLock', 0x0D: '回车'}
@@ -138,7 +138,7 @@ def log(*a):
     if sys.stdout: print(line, flush=True)
     with open(HERE / 'run.log', 'a', encoding='utf-8') as f: f.write(line + '\n')
 
-cfg = {'hotkey': 0xA5, 'device': None, 'lang': 'en', 'zh_out': 'en', 'keep': '2m', 'hist': True, 'hist_days': 0}  # hist：存不存记录；hist_days：只留最近几天（0 = 永久）；keep：不用多久释放显存（见 KEEPS）；lang：en 说英文 / zh 说中文；zh_out：说中文时出英文 / 出中文
+cfg = {'hotkey': 0xA3, 'device': None, 'lang': 'en', 'zh_out': 'en', 'keep': '2m', 'hist': True, 'hist_days': 0}  # hist：存不存记录；hist_days：只留最近几天（0 = 永久）；keep：不用多久释放显存（见 KEEPS）；lang：en 说英文 / zh 说中文；zh_out：说中文时出英文 / 出中文
 try: cfg.update(json.loads((HERE / 'settings.json').read_text(encoding='utf-8')))
 except Exception: pass
 if cfg.get('llm') in dict(LLM_MODELS): LLM_MODEL = cfg['llm']
@@ -359,12 +359,17 @@ def mark(k): lat[k] = time.time()
 def llm_opts():
     on_gpu = LLM_GPU_LAYERS != 0 and time.time() > gpu['off_until']
     layers = {} if on_gpu and LLM_GPU_LAYERS < 0 else {'num_gpu': LLM_GPU_LAYERS if on_gpu else 0}
-    return {'temperature': 0.2, 'num_ctx': 2048, **layers}, on_gpu
+    return {'temperature': 0, 'num_ctx': 2048, **layers}, on_gpu  # 改错不要随机性：0.2 时同一句线上每次可能不同，评测固定 seed 才稳
 
 def with_glossary(p):
     """常用词表插在例子前面（放最后模型常不理）。"""
     g = glossary()[1]; i = p.find('\nExamples:')
     return p if not g else p + g if i < 0 else p[:i] + g + p[i:]
+
+_APOS = re.compile(r"\b(?:(do|does|did|is|are|was|were|ca|could|would|should|wo|have|has|had|need|must)n|(can)): (t)\b|\b(it|that|there|what|he|she|let|I|you|we|they): (s|m|re|ll|ve|d)\b", re.I)
+def fix_apos(t):
+    """qwen 在 JSON 模式下偶尔把撇号写成「: 」（didn't → didn: t，history 里有过）：只认常见缩写，换回撇号。"""
+    return _APOS.sub(lambda m: (m.group(1) and m.group(1) + 'n' or m.group(2) or m.group(4)) + "'" + (m.group(3) or m.group(5)), t)
 
 def llm(text, on_field=None, timeout=60, watch=True, lang='en'):  # watch=False：预热那种很短的请求不算进显卡测速
     """流式调 Ollama：JSON 里每个字段一写完就回调 on_field(名字, 内容)，英文不用等中文翻译生成完。返回所有字段。"""
@@ -374,6 +379,7 @@ def llm(text, on_field=None, timeout=60, watch=True, lang='en'):  # watch=False�
     req = urllib.request.Request(LLM_URL + '/api/chat', json.dumps(body).encode(), {'Content-Type': 'application/json'})
     buf, got, stats, t0 = '', {}, {}, time.time()
     def give(k, v):
+        if k == 'fixed' and lang != 'zhzh': v = fix_apos(v)
         got[k] = v
         if k == 'fixed': mark('llm_en')
         if on_field: on_field(k, v)
@@ -654,10 +660,10 @@ class Engine:
 
     def idle_state(self): return 'ready' if self.wh else 'error' if self.loaded.is_set() else 'loading'
 
-    def recognize(self, a, lang='en'):
-        """lang：en 说英文 / zh 说中文（Whisper language=zh，标点换全角）。"""
+    def recognize(self, a, lang='en', preview=False):
+        """lang：en 说英文 / zh 说中文（Whisper language=zh，标点换全角）。preview：说话时的预览（解码从简，见 asr_worker）。"""
         if not self.wh: return ''
-        t = self.wh.recognize(a, zh=lang == 'zh')
+        t = self.wh.recognize(a, zh=lang == 'zh', preview=preview)
         return zh_punct(t) if lang == 'zh' else t
 
     def whisper_start(self, a, lang='en'):
@@ -669,7 +675,10 @@ class Engine:
         th = threading.Thread(target=run, daemon=True); th.start()
         def wait():
             th.join(max(0.0, WHISPER_TIMEOUT - (time.time() - t)))
-            if not got: log(f'Whisper 没出结果（{time.time() - t:.1f}s），用预览的', gpu_note()); return ''
+            if not got:
+                log(f'Whisper 没出结果（{time.time() - t:.1f}s），用预览的', gpu_note())
+                if self.wh: self.wh.abort()  # 卡住的那次一直占着锁，之后每句都要等满超时 → 杀掉重开
+                return ''
             dt = time.time() - t; log(f'Whisper {dt:.1f}s', gpu_note() if dt > 3 else ''); return got[0]
         return wait
 
@@ -686,14 +695,15 @@ class Engine:
         if time.time() - last_llm[0] > min(1200, keep_secs() - 10): threading.Thread(target=llm_warm, daemon=True).start()  # 闲到快被卸掉（或已卸掉）：边说边把模型载回来；释放显存设 2 分钟时原来要闲 20 分钟才预热，2~20 分钟之间松开后要现载模型（多 2~5 秒）
 
     def live(self, job):
-        """说话时的预览：每隔 PREVIEW_EVERY 秒把目前为止的整段给 Whisper 认一遍（显卡上一次零点几秒）。"""
-        t = time.time()
+        """说话时的预览：每隔 PREVIEW_EVERY 秒把目前为止的整段给 Whisper 认一遍（显卡上一次零点几秒）。
+        说得长、一次认得比间隔还久时，间隔拉到上次耗时的两倍：预览最多占一半显卡，松开后的整段识别不用排长队。"""
+        t, gap = time.time(), PREVIEW_EVERY
         while True:
-            time.sleep(max(0.05, t + PREVIEW_EVERY - time.time()))
+            time.sleep(max(0.05, t + gap - time.time()))
             if not self.rec or self.job is not job: return
             t = time.time(); a = self.audio()
             if not self.wh or not has_speech(a) or len(a) < RATE * PREVIEW_MIN: continue
-            try: text = self.recognize(a, job.lang)
+            try: text = self.recognize(a, job.lang, preview=True); gap = max(PREVIEW_EVERY, 2 * (time.time() - t))
             except Exception: log('预览识别出错', traceback.format_exc()); continue
             if PHANTOM.search(text) or not re.search(r'\w', text): continue
             if self.rec and self.job is job: job.heard = text; post('live', text, '')
@@ -773,7 +783,9 @@ class Engine:
 # （app.pyw --asr-worker），这边只用管道送音频、收文字。父 → 子：4 字节样本数 + float32；子 → 父：4 字节长度 + UTF-8（启动时先回 OK 或出错信息）。
 def asr_worker():
     """Whisper large-v3-turbo（faster-whisper，显卡，约 1GB 显存），带上常用词当提示。"""
-    inp, out = sys.stdin.buffer, sys.stdout.buffer; sys.stdout = None  # log() 别往管道里打印
+    inp = sys.stdin.buffer; sys.stdout = None  # log() 别往管道里打印
+    out = os.fdopen(os.dup(1), 'wb')  # 协议走 fd 1 的副本；fd 1 本身指到 devnull：CUDA / ctranslate2 在 C 层往 stdout 打的字不会混进管道
+    os.dup2(os.open(os.devnull, os.O_WRONLY), 1)
     def send(s): b = s.encode('utf-8'); out.write(len(b).to_bytes(4, 'little') + b); out.flush()
     try:
         if not nvidia_gpu(): return send('NOGPU')
@@ -782,30 +794,37 @@ def asr_worker():
         from faster_whisper import WhisperModel
         m = WhisperModel(str(HERE / 'models' / 'whisper'), device='cuda', compute_type='int8_float16')
         list(m.transcribe(np.random.default_rng(0).normal(0, 0.05, RATE * 2).astype(np.float32), language='en')[0])  # 先真跑一次（transcribe 返回生成器，不取结果就什么都没算）：缺 cuBLAS 在这里就报出来，第一句也不用等编译
-        for lg, bm in (('en', 1), ('zh', 5)):  # 再各用 20 秒的静音跑一次英文 / 中文的解码设置：第一句真话不用再等 CUDA 初始化（结果不要）
+        for lg, bm in (('en', 1), ('zh', 5), ('zh', 1)):  # 再各用 20 秒的静音跑一次英文 / 中文的解码设置：第一句真话不用再等 CUDA 初始化（结果不要）
             try: list(m.transcribe(np.zeros(RATE * 20, np.float32), language=lg, beam_size=bm, condition_on_previous_text=False)[0])
             except Exception: pass
-        def rec(a, zh=False):
+        def rec(a, zh=False, preview=False):
             terms = [t for t in glossary()[0] if zh or t.isascii()]  # 中文提示带中文词，英文提示只带英文词
-            if zh: prompt, kw = '以下是普通话的句子，使用简体中文。' + ('常用词：' + '、'.join(terms) + '。' if terms else ''), dict(language='zh', beam_size=5)
+            if zh: prompt, kw = '以下是普通话的句子，使用简体中文。' + ('常用词：' + '、'.join(terms) + '。' if terms else ''), dict(language='zh', beam_size=1 if preview else 5)  # 预览只给浮窗看，贪心解码就够，松开后的整段才用束搜索
             else: prompt, kw = ('Glossary: ' + ', '.join(terms) + '.') if terms else None, dict(language='en', beam_size=1)
-            segs, _ = m.transcribe(a, condition_on_previous_text=False, initial_prompt=prompt, **kw)
+            # 温度回退默认 0→1.0 六档，置信度低时整段重解码最多 6 次：真实录音（cer_eval auto，147 段）上限改 0.2 后字错率不变，总耗时 77s → 53s、最慢一段 2.4s → 1.2s
+            segs, _ = m.transcribe(a, condition_on_previous_text=False, initial_prompt=prompt, temperature=0.0 if preview else (0.0, 0.2), **kw)
             return ('' if zh else ' ').join(s.text.strip() for s in segs)
     except Exception as e:
         log('识别子进程加载失败', traceback.format_exc())
         return send('NOLIB' if 'cublas' in str(e).lower() else 'models\\whisper 里的文件可能缺了')
     send('OK')
     while len(h := inp.read(4)) == 4:  # 主程序退出、管道关掉就结束
-        n = int.from_bytes(h, 'little'); zh = bool(n >> 31); n &= 0x7FFFFFFF  # 长度最高位 = 这段是中文
+        n = int.from_bytes(h, 'little'); zh, pv = bool(n >> 31), bool(n >> 30 & 1); n &= 0x3FFFFFFF  # 长度最高位 = 这段是中文，次高位 = 预览
         a = np.frombuffer(inp.read(n * 4), np.float32)
-        try: send(rec(a, zh).strip() if len(a) else '')
+        try: send(rec(a, zh, pv).strip() if len(a) else '')
         except Exception: log('识别出错', traceback.format_exc()); send('')
 
 class AsrProc:
     """识别子进程的代理（几个线程都会调，排队）。"""
     def __init__(self):
-        self.lock = threading.Lock()
+        self.lock, self.aborted = threading.Lock(), False
         self.spawn()
+
+    def abort(self):
+        """超时了：杀掉子进程。正在等结果的那次调用读到 EOF，会重开子进程、不再重试这段。"""
+        self.aborted = True
+        try: self.p.kill()
+        except Exception: pass
 
     def spawn(self):
         exe = Path(sys.executable).with_name('pythonw.exe')
@@ -819,13 +838,14 @@ class AsrProc:
         if len(h) < 4: raise RuntimeError('识别子进程退出了')
         return self.p.stdout.read(int.from_bytes(h, 'little')).decode('utf-8')
 
-    def recognize(self, a, zh=False):
-        a = np.ascontiguousarray(a, np.float32); msg = (len(a) | zh << 31).to_bytes(4, 'little') + a.tobytes()  # 最高位 = 说中文（见 asr_worker）
+    def recognize(self, a, zh=False, preview=False):
+        a = np.ascontiguousarray(a, np.float32); msg = (len(a) | zh << 31 | preview << 30).to_bytes(4, 'little') + a.tobytes()  # 最高位 = 说中文，次高位 = 预览（见 asr_worker）
         with self.lock:
             try:
                 self.p.stdin.write(msg); self.p.stdin.flush(); return self._recv()
             except (OSError, RuntimeError):  # 子进程没了（被杀 / 崩了）：重开一个再试一次，不然之后每句都识别不了
                 log('识别子进程断了，重开'); self.p.kill(); self.spawn()
+                if self.aborted: self.aborted = False; return ''  # 是超时杀掉的：这段已经用了预览的字，不再认
                 self.p.stdin.write(msg); self.p.stdin.flush(); return self._recv()
 
 eng = Engine()
@@ -858,7 +878,8 @@ for _f, _a, _r in ((user32.OpenClipboard, [_W.HWND], _W.BOOL), (user32.CloseClip
                    (user32.EnumClipboardFormats, [_W.UINT], _W.UINT), (user32.GetClipboardData, [_W.UINT], _W.HANDLE),
                    (user32.SetClipboardData, [_W.UINT, _W.HANDLE], _W.HANDLE), (kernel32.GlobalSize, [_W.HGLOBAL], ctypes.c_size_t),
                    (kernel32.GlobalLock, [_W.HGLOBAL], ctypes.c_void_p), (kernel32.GlobalUnlock, [_W.HGLOBAL], _W.BOOL),
-                   (kernel32.GlobalAlloc, [_W.UINT, ctypes.c_size_t], _W.HGLOBAL), (kernel32.GlobalFree, [_W.HGLOBAL], _W.HGLOBAL)):
+                   (kernel32.GlobalAlloc, [_W.UINT, ctypes.c_size_t], _W.HGLOBAL), (kernel32.GlobalFree, [_W.HGLOBAL], _W.HGLOBAL),
+                   (user32.GetClipboardOwner, [], _W.HWND), (user32.GetWindowThreadProcessId, [_W.HWND, ctypes.POINTER(_W.DWORD)], _W.DWORD)):
     _f.argtypes, _f.restype = _a, _r
 
 def _clip_open():
@@ -2734,14 +2755,20 @@ def quit_app():
         if eng.stream: eng.stream.close()
     except Exception: pass
     stop_ollama()  # 自己拉起的改错服务跟着关，别一直占着显存
+    try:  # 剪贴板是 Quill 写的（只复制 / 记录里点复制）：tk 是等别人来读才给数据，进程一退字就没了 → 退出前换成真数据
+        pid = ctypes.wintypes.DWORD(); user32.GetWindowThreadProcessId(user32.GetClipboardOwner(), ctypes.byref(pid))
+        if pid.value == os.getpid() and (saved := clip_save()): clip_restore(saved)
+    except Exception: pass
     log('退出（quit_app）')
     os._exit(0)
 
 
 if __name__ == '__main__':
     if '--asr-worker' in sys.argv: asr_worker(); sys.exit(0)
-    kernel32.CreateMutexW(None, False, 'QuillVoiceInput')
-    if kernel32.GetLastError() == 183:  # 已经开着：把原来的窗口叫到前面
+    k32 = ctypes.WinDLL('kernel32', use_last_error=True)  # windll 的 GetLastError 可能已被 Python 自己的调用覆盖 → 误判时会开出第二个、一句粘两遍
+    k32.CreateMutexW.argtypes, k32.CreateMutexW.restype = [ctypes.c_void_p, ctypes.wintypes.BOOL, ctypes.wintypes.LPCWSTR], ctypes.wintypes.HANDLE
+    k32.CreateMutexW(None, False, 'QuillVoiceInput')
+    if ctypes.get_last_error() == 183:  # 已经开着：把原来的窗口叫到前面
         h = user32.FindWindowW(None, TITLE)
         if h: user32.ShowWindow(h, 9); user32.SetForegroundWindow(h)
         sys.exit(0)
