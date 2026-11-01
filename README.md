@@ -31,7 +31,7 @@ all of that verbatim, or send my voice to the cloud. Quill does the cleanup loca
 
 - **Push-to-talk anywhere** — hold Right Ctrl (configurable) in any app; the text is pasted at the cursor and your clipboard is restored.
 - **Cleans up speech, not just grammar** — removes fillers, stutters, false starts and self-corrections ("no, I mean…"); fixes tense, articles and plurals.
-- **Speak Chinese, get English** — tap **EN / 中** on the home screen; mixed Chinese-English works too. Or get clean Chinese instead (Settings → *When speaking Chinese* / 说中文时 → 出中文).
+- **Speak Chinese, get English** — tap **EN / CN** on the home screen; mixed Chinese-English works too. Or get clean Chinese instead (Settings → *When speaking Chinese* / 说中文时 → 出中文).
 - **Fast** — English appears about 1 s after you let go, clean Chinese in about half a second.
 - **See what changed** — an overlay at the bottom of the screen shows the live text, the words that were fixed and a Chinese translation. With several monitors it appears on the one you're working on.
 - **Learns your words** — names, projects, tools. Write `Claude: cloud` and Quill decides from context whether "cloud" meant Claude. Once a day it suggests words it probably misheard.
@@ -81,9 +81,10 @@ Then start **Quill** from the desktop. The first start loads the Whisper model o
 
 ## Usage tips
 
-- **EN / 中** (top right of the status card) chooses the language you speak. Output is English, unless you set *When speaking Chinese* → 出中文 in Settings.
+- **EN / CN** (top right of the status card) chooses the language you speak. Output is English, unless you set *When speaking Chinese* → 出中文 in Settings.
 - Below the status card are **HISTORY** and **WORDS** buttons and a settings gear. Settings: microphone, hotkey (click *Record* (录制) and press any key), output mode; the three round icons at the top right are Setup (准备情况), Self-test (自检, checks every part) and Close. The app's interface is in Chinese.
 - The shrink button (two arrows, top right) turns Quill to a floating ball at the edge of the screen; click it to come back.
+- The moon / sun button (top right) switches between dark and light. Quill follows Windows by default; switching back to the system theme makes it follow again.
 - **HISTORY** keeps the last 20 sentences (the icon in its title row opens the file): the original speech, the English, and the Chinese meaning. You can turn saving off, keep only the last 7 / 30 days, or clear it.
 - **WORDS**: add, edit or delete entries; the icon in its title row opens `words.txt` in a text editor. One entry per line: `Correct spelling: misheard, another misheard` (the part after the colon is optional).
 - Ollama is started with Quill and stopped when Quill quits; the model leaves GPU memory after it sits idle (2 / 10 / 30 minutes, or never — in Settings).
