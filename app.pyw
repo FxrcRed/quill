@@ -1,6 +1,6 @@
 """本地英文语音输入（图形界面版）：按住快捷键或界面按钮说英文 → Whisper 识别 → Qwen 改语病 + 中文翻译 → 粘贴到光标处。
 双击桌面「Quill」图标启动（pythonw，无黑框）。--selftest：无人值守自检，结果写 run.log 后退出。"""
-import math, ctypes, ctypes.wintypes, difflib, json, os, queue, re, shutil, socket, subprocess, sys, threading, time, traceback, urllib.error, urllib.request, wave
+import math, ctypes, ctypes.wintypes, difflib, itertools, json, os, queue, re, shutil, socket, subprocess, sys, threading, time, traceback, urllib.error, urllib.request, wave
 from datetime import datetime, timedelta
 from pathlib import Path
 import tkinter as tk
@@ -404,6 +404,7 @@ def word_sugs():
 
 ui = queue.Queue()  # 后台线程 → 界面线程
 def post(*m): ui.put(m)
+SEG_NO = itertools.count()  # 每句一个编号：英文和中文翻译按它配对（按原话配，连说两句一样的话会配错）
 def notify(text, level='warn', toast=False): post('notice', text, level, toast)
 
 
@@ -801,9 +802,9 @@ class Engine:
         if not job.by_key: mark('paste')
         r0 = lat.get('rel', t)  # 分段计时（松开后第几秒）：Whisper / 改错首字 / 英文写完 / 粘贴
         log('计时 ' + ' '.join(f'{n}={lat[k] - r0:.2f}' for n, k in (('Whisper', 'wh'), ('首字', 'llm_first'), ('英文', 'llm_en'), ('粘贴', 'paste')) if k in lat))
-        post('fixed', raw, fixed, job.by_key, seg.failed)
+        n = next(SEG_NO); post('fixed', n, raw, fixed, job.by_key, seg.failed)
         if self.busy is job: self.busy = False; post('state', 'ready')  # 中文翻译还在后台出，不耽误说下一句
-        post('zh', raw, seg.get('zh'))
+        post('zh', n, seg.get('zh'))
 
     def probe_record(self, secs):
         self.probe = []; time.sleep(secs); p, self.probe = self.probe, None
@@ -939,7 +940,7 @@ for _f, _a, _r in ((user32.OpenClipboard, [_W.HWND], _W.BOOL), (user32.CloseClip
                    (user32.SetClipboardData, [_W.UINT, _W.HANDLE], _W.HANDLE), (kernel32.GlobalSize, [_W.HGLOBAL], ctypes.c_size_t),
                    (kernel32.GlobalLock, [_W.HGLOBAL], ctypes.c_void_p), (kernel32.GlobalUnlock, [_W.HGLOBAL], _W.BOOL),
                    (kernel32.GlobalAlloc, [_W.UINT, ctypes.c_size_t], _W.HGLOBAL), (kernel32.GlobalFree, [_W.HGLOBAL], _W.HGLOBAL),
-                   (user32.GetClipboardOwner, [], _W.HWND), (user32.GetWindowThreadProcessId, [_W.HWND, ctypes.POINTER(_W.DWORD)], _W.DWORD)):
+                   (user32.GetClipboardOwner, [], _W.HWND), (user32.GetClipboardSequenceNumber, [], _W.DWORD), (user32.GetWindowThreadProcessId, [_W.HWND, ctypes.POINTER(_W.DWORD)], _W.DWORD)):
     _f.argtypes, _f.restype = _a, _r
 
 def _clip_open():
@@ -991,7 +992,7 @@ def paste(text):
     ev, box = threading.Event(), {}
     def put():
         box['old'] = clip_save()
-        set_clip(text); ev.set()
+        set_clip(text); box['seq'] = user32.GetClipboardSequenceNumber(); ev.set()
     root.after(0, put)
     if not ev.wait(2):  # 界面线程卡住：这时按 Ctrl+V 粘出去的是原剪贴板 → 不粘，这句等界面缓过来放进剪贴板
         log('粘贴：界面 2 秒没响应，没按 Ctrl+V'); return notify('这句已复制，按 Ctrl+V 粘贴。', 'warn', True)
@@ -999,8 +1000,11 @@ def paste(text):
     for vk, fl in ((0x11, 0), (0x56, 0), (0x56, 2), (0x11, 2)): user32.keybd_event(vk, 0, fl, 0)
     mark('paste')
     def restore():  # 等目标程序读完剪贴板再还原；放后台，不拖着浮窗出结果 / 回到 ready
-        time.sleep(0.5)
-        if box.get('old'): root.after(0, lambda: clip_restore(box['old']))
+        time.sleep(1.0)  # 0.5 秒时卡顿的程序（Electron、远程桌面）会粘出旧内容
+        def back():  # 这期间剪贴板又被写过（用户复制了东西）就不还原，免得盖掉
+            if user32.GetClipboardSequenceNumber() != box['seq']: return log('粘贴：剪贴板被改过，不还原')
+            clip_restore(box['old'])
+        if box.get('old'): root.after(0, back)
     threading.Thread(target=restore, daemon=True).start()
 
 
@@ -2181,7 +2185,7 @@ class App:
         self.first_shown = False
         self.settings = self.check_win = self.ready_win = self.history = self.words = self.pop = None
         self.cur = None  # 当前这句 [原话, 输入的英文, 中文]
-        self.waiting = {}  # 英文出了、中文还没出就开始说下一句的那些：原话 → [原话, 英文, None]，中文到了再记
+        self.waiting = {}  # 英文出了、中文还没出就开始说下一句的那些：编号 → [原话, 英文, None]，中文到了再记
         self.next_look = 0.0  # 下次看系统深浅色 / 主窗口在哪块屏的时间
         self.dpi_new = None  # 主窗口跨到的那块屏的缩放（hook_dpi 记，poll 里 rescale）
         self.proxy, self._mons = None, None  # 拖动跨屏时顶替主窗口的替身（Proxy）；这次拖动的屏幕列表（monitors，拖动中缓存）
@@ -2520,7 +2524,7 @@ class App:
 
     def park(self):
         """新的一句要占 cur 了：上一句英文已经输入、中文还在出，先挂起来，中文到了照样记进记录（以前直接被盖掉，记录里少一句）。"""
-        if self.cur and self.cur[1] is not None and self.cur[2] is None: self.waiting[self.cur[0]] = self.cur
+        if self.cur and self.cur[1] is not None and self.cur[2] is None: self.waiting[self.cur_no] = self.cur
 
     def record(self, raw, fixed, zh):
         save_history(raw, fixed, zh)
@@ -2591,12 +2595,12 @@ class App:
         elif kind == 'live': self.overlay.live(*a)
         elif kind == 'thinking': self.overlay.think(a[0])
         elif kind == 'fixed':
-            raw, fixed, by_key, unfixed = a; self.park(); self.cur = [raw, fixed, None]; self.overlay.result(raw, fixed, None, by_key, unfixed)
+            self.cur_no, raw, fixed, by_key, unfixed = a; self.park(); self.cur = [raw, fixed, None]; self.overlay.result(raw, fixed, None, by_key, unfixed)
             if not by_key: self.show_notice('已复制到剪贴板，去要输入的地方按 Ctrl+V。', 'ok')
         elif kind == 'zh':
-            raw, zh = a
-            if self.cur and self.cur[0] == raw: self.cur[2] = zh; self.overlay.set_zh(zh); self.finish()
-            elif raw in self.waiting: w = self.waiting.pop(raw); self.record(w[0], w[1], zh)
+            n, zh = a
+            if self.cur and self.cur_no == n: self.cur[2] = zh; self.overlay.set_zh(zh); self.finish()
+            elif n in self.waiting: w = self.waiting.pop(n); self.record(w[0], w[1], zh)
         elif kind == 'ollama':
             st = a[0]
             if st != self.ol_last:
