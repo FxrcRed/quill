@@ -10,7 +10,7 @@
 
 [English](README.md) · MIT · Windows 10/11
 
-<img src="docs/demo.gif" width="760" alt="Quill 演示：一句结巴的英文和一句中文都变成通顺的英文">
+<img src="docs/demo.webp" width="760" alt="Quill 演示：一句结巴的英文和一句中文都变成通顺的英文">
 
 </div>
 

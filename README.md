@@ -10,7 +10,7 @@ Nothing leaves your computer.
 
 [中文说明](README.zh.md) · MIT · Windows 10/11
 
-<img src="docs/demo.gif" width="760" alt="Quill demo: a stuttered English sentence and a Chinese sentence become clean English">
+<img src="docs/demo.webp" width="760" alt="Quill demo: a stuttered English sentence and a Chinese sentence become clean English">
 
 </div>
 
