@@ -14,13 +14,13 @@ HERE = Path(__file__).parent
 TITLE = 'Quill'
 LLM_URL = 'http://127.0.0.1:11434'
 LLM_MODEL = 'qwen3:4b'  # 设置「改错模型」里选（cfg['llm']）：4B 约 2.9GB 显存、快约 35%；8B 约 4.5GB，很乱的话（重说、改口）改得更准
-LLM_MODELS = (('qwen3:4b', '标准 4B'), ('qwen3:8b', '高质量 8B'))
+LLM_MODELS = (('qwen3:4b', ('标准 4B', 'Fast 4B')), ('qwen3:8b', ('高质量 8B', 'Best 8B')))
 WHISPER_TIMEOUT = 8   # 松开后 Whisper 整段识别最多等几秒，超时 / 出错就用说话时最后一次预览的结果
 PREVIEW_MIN = 1.5     # 说话不到这么久不出预览：Whisper 对刚开口的半个字常编出「请订阅点赞」「优优独播剧场」这类训练数据里的片尾字幕
 PHANTOM = re.compile(r'订阅|点赞|打赏|明镜|独播剧场|字幕志愿|字幕由|Amara|谢谢观看|感谢观看|请不吝|Subtitles by|Thanks for watching', re.I)
 PREVIEW_EVERY = 1.0  # 说话时每隔几秒用 Whisper 把目前为止的整段认一遍，给浮窗看
 LLM_GPU_LAYERS = -1   # （启动时按有没有 NVIDIA 显卡重新定，见 nvidia_gpu）-1 = 放显卡（Ollama 自动，一句约 1.5 秒）；0 = 全用 CPU（约 5~8 秒）。显卡被别的程序占着变慢时会自动临时改用 CPU
-KEEPS = (('2m', '2 分钟'), ('10m', '10 分钟'), ('30m', '30 分钟'), (-1, '不释放'))  # 不用多久后把模型从显存卸掉（约 5~6GB），设置里选；一直说话时每次都续上，不会卸
+KEEPS = (('2m', ('2 分钟', '2 min')), ('10m', ('10 分钟', '10 min')), ('30m', ('30 分钟', '30 min')), (-1, ('不释放', 'Never')))  # 不用多久后把模型从显存卸掉（约 5~6GB），设置里选；一直说话时每次都续上，不会卸
 SHOW_SECONDS = 3      # 底部浮窗的结果自动消失；点一下固定，再点关闭
 RATE = 16000
 SELFTEST = '--selftest' in sys.argv
@@ -75,7 +75,8 @@ Examples:
 Reply JSON only: {"fixed": "<cleaned-up Chinese>"}""",
 }
 
-MIC_HINT = '麦克风没有声音：先按笔记本的麦克风静音键（常见 F4 或 Fn+F4，灯亮=静音），或在设置里换一个麦克风。'
+MIC_HINT = ('麦克风没有声音：先按笔记本的麦克风静音键（常见 F4 或 Fn+F4，灯亮=静音），或在设置里换一个麦克风。',
+            'No sound from the microphone. Try the laptop mic mute key (often F4 or Fn+F4; light on = muted), or pick another microphone in Settings.')
 # 软 UI（neumorphism）配色，浅 / 深两套，跟随 Windows「应用模式」（apply_theme 把一套写进下面这些全局名字）。
 # 浅色：同一种浅灰底，凸起 / 凹陷全靠左上白光、右下灰影。深色（参考 macOS 深色）：不是纯黑，层次靠明度——
 # 窗口底最暗，卡片亮一档，卡片上的按钮再亮一档；凸起靠一圈很淡的上亮边 + 下面的黑影。
@@ -179,11 +180,14 @@ NAMES = {0xA5: '右 Alt', 0xA4: '左 Alt', 0xA3: '右 Ctrl', 0xA2: '左 Ctrl', 0
          0x2D: 'Insert', 0x13: 'Pause', 0x91: 'ScrollLock', 0x0D: '回车'}
 SCAN = [v for v in range(0x08, 0xFF) if v not in (0x10, 0x11, 0x12, 0xE7, 0xE8)]  # 0x10~0x12 是不分左右的重复项
 
+NAMES_EN = {0xA5: 'Right Alt', 0xA4: 'Left Alt', 0xA3: 'Right Ctrl', 0xA2: 'Left Ctrl', 0xA1: 'Right Shift', 0xA0: 'Left Shift',
+            0x5B: 'Left Win', 0x5C: 'Right Win', 0x5D: 'Menu', 0x14: 'Caps Lock', 0x20: 'Space', 0x0D: 'Enter'}
+
 def key_name(vk):
-    if vk in NAMES: return NAMES[vk]
+    if vk in NAMES: return L(NAMES[vk], NAMES_EN.get(vk, NAMES[vk]))
     if 0x70 <= vk <= 0x87: return f'F{vk - 0x6F}'
     if 0x30 <= vk <= 0x5A: return chr(vk)
-    return f'按键 {vk:#04x}'
+    return L(f'按键 {vk:#04x}', f'Key {vk:#04x}')
 
 def key_down(vk): return bool(user32.GetAsyncKeyState(vk) & 0x8000)
 
@@ -196,6 +200,10 @@ def log(*a):
     line = f'{datetime.now():%H:%M:%S} ' + ' '.join(map(str, a))
     if sys.stdout: print(line, flush=True)
     with open(HERE / 'run.log', 'a', encoding='utf-8') as f: f.write(line + '\n')
+
+_SYS_UI = 'zh' if ctypes.windll.kernel32.GetUserDefaultUILanguage() & 0x3FF == 0x04 else 'en'  # Windows 显示语言是中文就用中文界面
+def ui_lang(): return cfg.get('ui') or _SYS_UI  # 界面语言：设置里选过就用选的，没选跟随系统
+def L(zh, en): return en if ui_lang() == 'en' else zh  # 界面上的字：中英写在一起
 
 cfg = {'hotkey': 0xA3, 'device': None, 'lang': 'auto', 'zh_out': 'en', 'keep': '2m', 'hist': True, 'hist_days': 0}  # hist：存不存记录；hist_days：只留最近几天（0 = 永久）；keep：不用多久释放显存（见 KEEPS）；lang：auto 自动 / en 说英文 / zh 说中文；zh_out：说中文时出英文 / 出中文
 try: cfg.update(json.loads((HERE / 'settings.json').read_text(encoding='utf-8')))
@@ -477,7 +485,7 @@ def watch_gpu(st, on_gpu, secs):
     gpu['slow'] += 1; log(f'显卡改错偏慢：{tps:.1f} 字/秒，{secs:.1f} 秒')
     if gpu['slow'] >= 2:
         gpu['off_until'], gpu['slow'] = time.time() + 900, 0
-        log('显卡太慢，15 分钟内改用 CPU'); notify('显卡被别的程序占着，改错先换成 CPU（慢一点），15 分钟后再试显卡。', 'warn')
+        log('显卡太慢，15 分钟内改用 CPU'); notify(L('显卡被别的程序占着，改错先换成 CPU（慢一点），15 分钟后再试显卡。', 'Another program is using the GPU, so cleanup runs on the CPU for now (slower). The GPU is tried again in 15 minutes.'), 'warn')
 
 def keep_secs():
     k = cfg.get('keep', '2m')
@@ -512,10 +520,10 @@ def set_llm(name):
     threading.Thread(target=go, daemon=True).start()
 
 def llm_error(e):
-    if isinstance(e, (socket.timeout, TimeoutError)) or 'timed out' in str(e): return '改错太慢超时了，已直接用原话。'
-    if isinstance(e, urllib.error.HTTPError) and e.code == 404: return f'改错服务里没有 {LLM_MODEL} 模型，已直接用原话。'
-    if isinstance(e, (urllib.error.URLError, ConnectionError)): return '改错服务没开（去设置里点「启动」），已直接用原话。'
-    return '改错出错了，已直接用原话。'
+    if isinstance(e, (socket.timeout, TimeoutError)) or 'timed out' in str(e): return L('改错太慢超时了，已直接用原话。', 'Cleanup timed out; your words were typed as is.')
+    if isinstance(e, urllib.error.HTTPError) and e.code == 404: return L(f'改错服务里没有 {LLM_MODEL} 模型，已直接用原话。', f'Model {LLM_MODEL} is missing from the cleanup service; your words were typed as is.')
+    if isinstance(e, (urllib.error.URLError, ConnectionError)): return L('改错服务没开（去设置里点「启动」），已直接用原话。', 'The cleanup service is off (click Start in Settings); your words were typed as is.')
+    return L('改错出错了，已直接用原话。', 'Cleanup failed; your words were typed as is.')
 
 def ollama_status():
     try:
@@ -534,7 +542,7 @@ def start_ollama(quiet=False):
     try: ollama_proc[0] = subprocess.Popen([exe, 'serve'], creationflags=0x08000000, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); return True
     except Exception:
         log('启动 Ollama 失败', traceback.format_exc())
-        if not quiet: notify('找不到改错服务 Ollama，可能没装好。', 'err')
+        if not quiet: notify(L('找不到改错服务 Ollama，可能没装好。', 'Cannot find the cleanup service Ollama. It may not be installed.'), 'err')
         return False
 
 def stop_ollama():
@@ -690,8 +698,10 @@ class Job:
         return Seg(text, self.seg_lang)
 
 
-WH_ERRORS = {'nogpu': '没有 NVIDIA 显卡：Quill 用 Whisper 识别，要 NVIDIA 显卡。', 'nolib': '缺显卡运行库（cuBLAS）：设置 → 准备情况里点「修复」。',
-             'nomodel': '没有识别模型（models\\whisper）：设置 → 准备情况里点「下载」。', 'error': '识别模型加载失败，详情见 run.log。'}
+WH_ERRORS = {'nogpu': ('没有 NVIDIA 显卡：Quill 用 Whisper 识别，要 NVIDIA 显卡。', 'No NVIDIA GPU: Quill recognizes speech with Whisper, which needs one.'),
+             'nolib': ('缺显卡运行库（cuBLAS）：设置 → 准备情况里点「修复」。', 'Missing GPU runtime (cuBLAS): Settings → Setup → Fix.'),
+             'nomodel': ('没有识别模型（models\\whisper）：设置 → 准备情况里点「下载」。', 'No speech model (models\\whisper): Settings → Setup → Download.'),
+             'error': ('识别模型加载失败，详情见 run.log。', 'The speech model failed to load. See run.log.')}
 
 class Engine:
     def __init__(self):
@@ -726,7 +736,7 @@ class Engine:
             self.stream.start(); log('麦克风：', name or '系统默认'); return True
         except Exception:
             log('麦克风打不开', name, traceback.format_exc()); self.stream = None
-            notify('这个麦克风打不开：换一个试试，或检查 Windows 设置 → 隐私和安全性 → 麦克风。', 'err'); return False
+            notify(L('这个麦克风打不开：换一个试试，或检查 Windows 设置 → 隐私和安全性 → 麦克风。', "Can't open this microphone. Try another one, or check Windows Settings → Privacy & security → Microphone."), 'err'); return False
 
     def load(self):
         """Whisper large-v3-turbo（显卡）：说话时的预览和松开后的结果都是它认的。"""
@@ -737,7 +747,7 @@ class Engine:
             else:
                 try: self.wh = AsrProc(); self.wh_state = 'ok'; log(f'识别模型已加载 {time.time() - t:.1f}s')
                 except Exception as e: self.wh_state = {'NOGPU': 'nogpu', 'NOLIB': 'nolib'}.get(str(e), 'error')
-            if not self.wh: self.load_error = WH_ERRORS[self.wh_state]; log('识别模型没加载：', self.wh_state)
+            if not self.wh: self.load_error = L(*WH_ERRORS[self.wh_state]); log('识别模型没加载：', self.wh_state)
         finally:
             self.loaded.set()
         post('state', self.idle_state()); post('mode')
@@ -802,21 +812,21 @@ class Engine:
         try: self._work(audio, job)
         except Exception:
             log('出错：', traceback.format_exc())
-            notify('出了点问题，已记到 run.log。再试一次；还不行就把 run.log 发给 Claude 看。', 'err', True)
+            notify(L('出了点问题，已记到 run.log。再试一次；还不行就把 run.log 发给 Claude 看。', 'Something went wrong (saved to run.log). Try again; if it keeps happening, send run.log to Claude.'), 'err', True)
         finally:
             if self.busy is job: self.busy = False; post('state', self.idle_state())
 
     def _work(self, audio, job):
         peak = float(np.abs(audio).max()) if len(audio) else 0.0
         log(f'录到 {len(audio) / RATE:.1f}s，音量峰值 {peak:.4f}')
-        if len(audio) < RATE * 0.3: return notify('按得太短了：按住说完一整句再松开。', 'warn', True)
-        if peak < 0.003: post('mic_bad'); return notify(MIC_HINT, 'err', True)
+        if len(audio) < RATE * 0.3: return notify(L('按得太短了：按住说完一整句再松开。', 'Too short: hold the key until you finish the sentence.'), 'warn', True)
+        if peak < 0.003: post('mic_bad'); return notify(L(*MIC_HINT), 'err', True)
         rec = save_rec(audio) if cfg.get('save_audio') else None
         post('state', 'busy', job.by_key)
         self.loaded.wait()
         if not self.wh: return notify(self.load_error, 'err', True)
         t = time.time(); seg = job.finish(audio)
-        if not seg: return notify('没听清，再说一次（靠近麦克风、说慢一点）。', 'warn', True)
+        if not seg: return notify(L('没听清，再说一次（靠近麦克风、说慢一点）。', "Didn't catch that. Try again, a bit closer and slower."), 'warn', True)
         raw = seg.raw; post('thinking', raw)
         if rec: REC_OF[raw] = rec
         fixed = seg.get('fixed')
@@ -940,13 +950,13 @@ eng = Engine()
 def mode_summary():
     """当前是哪种模式，对速度 / 质量有什么影响（自检和准备情况用）：返回 (ok|warn, 一句人话)。"""
     g, st = nvidia_gpu(), eng.wh_state
-    ai = 'AI 改错用显卡' if g and LLM_GPU_LAYERS else 'AI 改错用 CPU，每句约 5~8 秒' if not g else 'AI 改错暂时用 CPU'
-    if st == 'ok': return 'ok', f'Whisper 识别（{g}），{ai}'
-    if st == 'loading': return 'ok', '识别模型（Whisper）载入中…'
+    ai = L('AI 改错用显卡', 'cleanup on the GPU') if g and LLM_GPU_LAYERS else L('AI 改错用 CPU，每句约 5~8 秒', 'cleanup on the CPU, about 5–8 s per sentence') if not g else L('AI 改错暂时用 CPU', 'cleanup on the CPU for now')
+    if st == 'ok': return 'ok', L(f'Whisper 识别（{g}），{ai}', f'Whisper on {g}; {ai}')
+    if st == 'loading': return 'ok', L('识别模型（Whisper）载入中…', 'Loading the speech model (Whisper)…')
     return 'warn', eng.load_error
 
 HIST = HERE / 'history.txt'
-HIST_DAYS = ((7, '7 天'), (30, '30 天'), (0, '永久'))
+HIST_DAYS = ((7, ('7 天', '7 days')), (30, ('30 天', '30 days')), (0, ('永久', 'Forever')))
 
 def save_history(raw, fixed, zh):
     if not cfg.get('hist', True): return  # 用户关了记录：什么都不写
@@ -1021,7 +1031,7 @@ def paste(text):
         set_clip(text); box['seq'] = user32.GetClipboardSequenceNumber(); ev.set()
     root.after(0, put)
     if not ev.wait(2):  # 界面线程卡住：这时按 Ctrl+V 粘出去的是原剪贴板 → 不粘，这句等界面缓过来放进剪贴板
-        log('粘贴：界面 2 秒没响应，没按 Ctrl+V'); return notify('这句已复制，按 Ctrl+V 粘贴。', 'warn', True)
+        log('粘贴：界面 2 秒没响应，没按 Ctrl+V'); return notify(L('这句已复制，按 Ctrl+V 粘贴。', 'Copied. Press Ctrl+V to paste.'), 'warn', True)
     time.sleep(0.05)
     for vk, fl in ((0x11, 0), (0x56, 0), (0x56, 2), (0x11, 2)): user32.keybd_event(vk, 0, fl, 0)
     mark('paste')
@@ -1035,51 +1045,51 @@ def paste(text):
 
 
 # ---- 自检 ----
-CHECKS = ['识别模型', '麦克风', '快捷键', '语音识别', '改错服务']
+CHECKS = [('识别模型', 'Speech model'), ('麦克风', 'Microphone'), ('快捷键', 'Hotkey'), ('语音识别', 'Recognition'), ('改错服务', 'Cleanup service')]
 
 def run_checks(report, interactive):
     """report(序号, 'run'|'ok'|'fail'|'warn', 说明, 附加按钮)；返回是否全部通过。"""
     ok = True
-    report(0, 'run', '加载中…'); eng.loaded.wait(180)
+    report(0, 'run', L('加载中…', 'Loading…')); eng.loaded.wait(180)
     if eng.wh:
-        lv, msg = mode_summary(); report(0, lv, '已加载 · ' + msg)
-    else: report(0, 'fail', eng.load_error or '还没加载完'); ok = False
+        lv, msg = mode_summary(); report(0, lv, L('已加载 · ', 'Loaded · ') + msg)
+    else: report(0, 'fail', eng.load_error or L('还没加载完', 'Not loaded yet')); ok = False
 
     secs = 3 if interactive else 1
-    report(1, 'run', '请对着麦克风说一句话（3 秒）…' if interactive else '录 1 秒…')
+    report(1, 'run', L('请对着麦克风说一句话（3 秒）…', 'Say something into the microphone (3 s)…') if interactive else L('录 1 秒…', 'Recording 1 s…'))
     peak, n = eng.probe_record(secs) if eng.stream else (0.0, 0)
-    if n == 0: report(1, 'fail', '麦克风打不开：在设置里换一个，或检查 Windows 设置 → 隐私和安全性 → 麦克风。'); ok = False
-    elif peak < 0.003: report(1, 'fail', f'几乎没声音（{peak:.4f}）。' + MIC_HINT); ok = False
-    elif peak < 0.02: report(1, 'warn', f'有声音但偏小（{peak:.3f}），靠近一点说。')
-    else: report(1, 'ok', f'有声音（{peak:.2f}）')
+    if n == 0: report(1, 'fail', L('麦克风打不开：在设置里换一个，或检查 Windows 设置 → 隐私和安全性 → 麦克风。', "Can't open the microphone. Pick another one in Settings, or check Windows Settings → Privacy & security → Microphone.")); ok = False
+    elif peak < 0.003: report(1, 'fail', L(f'几乎没声音（{peak:.4f}）。', f'Almost no sound ({peak:.4f}). ') + L(*MIC_HINT)); ok = False
+    elif peak < 0.02: report(1, 'warn', L(f'有声音但偏小（{peak:.3f}），靠近一点说。', f'Sound is quiet ({peak:.3f}). Move a bit closer.'))
+    else: report(1, 'ok', L(f'有声音（{peak:.2f}）', f'Sound OK ({peak:.2f})'))
 
     vk = cfg['hotkey']; name = key_name(vk)
-    report(2, 'run', f'请按一下「{name}」（8 秒内）…' if interactive else f'模拟按「{name}」…')
+    report(2, 'run', L(f'请按一下「{name}」（8 秒内）…', f'Press {name} once (within 8 s)…') if interactive else L(f'模拟按「{name}」…', f'Simulating {name}…'))
     eng.key_paused = True
     if not interactive: threading.Timer(0.5, lambda: (user32.keybd_event(vk, 0, 0, 0), time.sleep(0.2), user32.keybd_event(vk, 0, 2, 0))).start()
     got = eng.wait_any_key(8); time.sleep(0.4); eng.key_paused = False
-    if got == vk: report(2, 'ok', f'收到「{name}」')
-    elif got is None: report(2, 'fail', f'8 秒内没收到按键。如果按了「{name}」还是这样：在设置里点「录制」换一个键（比如 F8）。'); ok = False
-    else: report(2, 'fail', f'收到的是「{key_name(got)}」，不是「{name}」。', got); ok = False
+    if got == vk: report(2, 'ok', L(f'收到「{name}」', f'Got {name}'))
+    elif got is None: report(2, 'fail', L(f'8 秒内没收到按键。如果按了「{name}」还是这样：在设置里点「录制」换一个键（比如 F8）。', f'No key within 8 s. If you did press {name}, click Record in Settings and pick another key (e.g. F8).')); ok = False
+    else: report(2, 'fail', L(f'收到的是「{key_name(got)}」，不是「{name}」。', f'Got {key_name(got)}, not {name}.'), got); ok = False
 
-    report(3, 'run', '识别测试录音…')
+    report(3, 'run', L('识别测试录音…', 'Recognizing a test recording…'))
     try:
         with wave.open(str(HERE / 'test.wav')) as w:
             a = np.frombuffer(w.readframes(w.getnframes()), np.int16).astype(np.float32) / 32768
         t = time.time(); raw = eng.recognize(a)
-        if raw: report(3, 'ok', f'{time.time() - t:.1f} 秒：{raw}')
-        else: report(3, 'fail', '没识别出文字'); ok = False
+        if raw: report(3, 'ok', f'{time.time() - t:.1f} ' + L(f'秒：{raw}', f's: {raw}'))
+        else: report(3, 'fail', L('没识别出文字', 'No text recognized')); ok = False
     except Exception:
         log(traceback.format_exc()); report(3, 'fail', '识别出错（test.wav 可能不见了），详情见 run.log'); ok = False
 
-    report(4, 'run', '让 Qwen 改一句话（第一次要十几秒）…')
+    report(4, 'run', L('让 Qwen 改一句话（第一次要十几秒）…', 'Asking Qwen to clean up a sentence (10+ s the first time)…'))
     st = ollama_status()
-    if st == 'down': report(4, 'fail', '改错服务没开：点设置里的「启动」，等几秒再自检。'); ok = False
-    elif st == 'no_model': report(4, 'fail', f'改错服务里没有 {LLM_MODEL} 模型，请让 Claude 重新导入。'); ok = False
+    if st == 'down': report(4, 'fail', L('改错服务没开：点设置里的「启动」，等几秒再自检。', 'The cleanup service is off. Click Start in Settings, wait a few seconds and run the self-test again.')); ok = False
+    elif st == 'no_model': report(4, 'fail', L(f'改错服务里没有 {LLM_MODEL} 模型，请让 Claude 重新导入。', f'Model {LLM_MODEL} is missing from the cleanup service. Ask Claude to import it again.')); ok = False
     else:
         try:
             t = time.time(); r = llm('i has a apple yesterday', timeout=120); fixed, zh = r['fixed'], r['zh']
-            report(4, 'ok', f'{time.time() - t:.1f} 秒：{fixed} / {zh}')
+            report(4, 'ok', f'{time.time() - t:.1f} ' + L(f'秒：{fixed} / {zh}', f's: {fixed} / {zh}'))
         except Exception as e:
             log('自检改错失败', repr(e)); report(4, 'fail', llm_error(e)); ok = False
     return ok
@@ -1827,13 +1837,13 @@ class Overlay:
         blocks = []  # (行, 字号)
         if m == 'rec':
             runs = [(d['done'] + ' ', ink, False)] * bool(d['done']) + [(d['part'], sub, False)] * bool(d['part'])
-            blocks.append((flow(runs or [({'zh': '请说中文…', 'en': '请说英文…'}.get(cfg['lang'], '请说话…'), sub, False)], pfont(14), TW, 3, 'last'), 14))
+            blocks.append((flow(runs or [({'zh': L('请说中文…', 'Speak Chinese…'), 'en': L('请说英文…', 'Speak English…')}.get(cfg['lang'], L('请说话…', 'Speak…')), sub, False)], pfont(14), TW, 3, 'last'), 14))
         elif m == 'busy':
-            text, col = (d['raw'], sub) if d['raw'] else ('…仍在识别', ORANGE) if d.get('slow') else ('识别中…', sub)
+            text, col = (d['raw'], sub) if d['raw'] else (L('…仍在识别', '…still recognizing'), ORANGE) if d.get('slow') else (L('识别中…', 'Recognizing…'), sub)
             blocks.append((flow([(text, col, False)], pfont(14), TW, 3), 14))
         elif m == 'result':
             blocks.append((flow(changed_words(d['raw'], d['fixed'], ink), pfont(14), TW, 3), 14))
-            if d['zh'] != '': blocks.append((flow([(d['zh'] if d['zh'] is not None else '翻译中…', sub, False)], pfont(12), TW, 2), 12))  # 出中文：没有翻译那行
+            if d['zh'] != '': blocks.append((flow([(d['zh'] if d['zh'] is not None else L('翻译中…', 'Translating…'), sub, False)], pfont(12), TW, 2), 12))  # 出中文：没有翻译那行
         else:
             blocks.append((flow([(d['text'], ink, False)], pfont(14), TW, 3), 14))
         th = sum(len(ls) * lh(sz) for ls, sz in blocks) + 2 * (len(blocks) - 1)  # 文字块总高
@@ -2457,13 +2467,13 @@ class App:
         for nx, nw in NAV: wn.raised(nx, 472 - self.H, nw, 30, 15, d=ELEV, fill=FACE)  # 上面三个导航按钮的阴影伸过来
         if not show: wn.commit(); return
         down = wn.img.copy()  # 试验：候选词不要卡片框，直接放在窗口底色上（点这一块仍打开常用词窗口，按下时没有凹陷效果）；想要框回来：inset(down, x, y, w, h, 28, 5) + wn.raised(x, y, w, h, 28, d=7)
-        wn.text(x, y + h - 30, f'说过 {show[0][2]} 次', 11, SUB)  # 最下面一行：左次数、右「还有 N 条」
-        if extra > 0: wn.text(x + w, y + h - 30, f'还有 {extra} 条', 11, SUB, anchor='ne')
+        wn.text(x, y + h - 30, L(f'说过 {show[0][2]} 次', f'Heard {show[0][2]} times'), 11, SUB)  # 最下面一行：左次数、右「还有 N 条」
+        if extra > 0: wn.text(x + w, y + h - 30, L(f'还有 {extra} 条', f'{extra} more'), 11, SUB, anchor='ne')
         ry = y  # 按钮顶边离导航一排 20（主画布到 508 + y 14 = 522 = 502 + 20），和卡片之间的间距一样
         for i, ((hd, c, k, src), (a, b), r, m) in enumerate(zip(show, rows, rh, mm)):
             if i: wn.c.create_line(px(x), px(ry - 8), px(x + w), px(ry - 8), fill=RULE, width=1)
             ty = ry + (m - lh12) / 2; wn.text(x, ty, a[0], 12, SUB); wn.text(x + f12.measure(a[0] + ' ') / S, ty, a[1], 12, TEXT)
-            for bx, bw, t, fn in ((BH + 112, 50, '加入', self.add_word), (BH + 56, 50, '修改', self.fix_word)):  # 两列等宽 50、间距 6
+            for bx, bw, t, fn in ((BH + 112, 50, L('加入', 'Add'), self.add_word), (BH + 56, 50, L('修改', 'Edit'), self.fix_word)):  # 两列等宽 50、间距 6
                 wn.button(x + w - bx, ry + (m - BH) / 2, bw, BH, text=t, size=11, d=ELEV, color=ICON_C, cmd=lambda fn=fn, hd=hd, c=c: fn(hd, c))
             wn.button(x + w - BH, ry + (m - BH) / 2, BH, BH, icon=I_CLOSE, size=8, d=ELEV, color=ICON_C, cmd=lambda hd=hd, c=c: self.ignore_word(hd, c))  # 忽略 = 一个叉（圆），右边缘 = 卡片内边 20
             wn.text(x, ry + m + 12, '\n'.join(b), 11, SUB)  # 灰字和上面的文字同一左边缘
@@ -2512,8 +2522,8 @@ class App:
         if self.state in ('loading', 'ready', 'error'): self.set_state(eng.idle_state())
 
     def sub_text(self):
-        return {'loading': 'Initializing...', 'ready': f'按住「{key_name(cfg["hotkey"])}」或按住中间这一圈',
-                'rec': '说完松开', 'busy': '改语病 + 翻译，几秒钟', 'error': eng.load_error}[self.state]
+        return {'loading': 'Initializing...', 'ready': L(f'按住「{key_name(cfg["hotkey"])}」或按住中间这一圈', f'Hold {key_name(cfg["hotkey"])} or press and hold the dial'),
+                'rec': L('说完松开', 'Let go when you finish'), 'busy': L('改语病 + 翻译，几秒钟', 'Cleaning up + translating, a few seconds'), 'error': eng.load_error}[self.state]
 
     def refresh_sub(self):
         if time.time() < self.notice_until: return
@@ -2623,7 +2633,7 @@ class App:
         elif kind == 'thinking': self.overlay.think(a[0])
         elif kind == 'fixed':
             self.cur_no, raw, fixed, by_key, unfixed = a; self.park(); self.cur = [raw, fixed, None]; self.overlay.result(raw, fixed, None, by_key, unfixed)
-            if not by_key: self.show_notice('已复制到剪贴板，去要输入的地方按 Ctrl+V。', 'ok')
+            if not by_key: self.show_notice(L('已复制到剪贴板，去要输入的地方按 Ctrl+V。', 'Copied. Click where you want the text and press Ctrl+V.'), 'ok')
         elif kind == 'zh':
             n, zh = a
             if self.cur and self.cur_no == n: self.cur[2] = zh; self.overlay.set_zh(zh); self.finish()
@@ -2632,7 +2642,7 @@ class App:
             st = a[0]
             if st != self.ol_last:
                 log('改错服务：', st)
-                if st == 'down' and time.time() - self.ol_starting > 30: self.show_notice('改错服务没开：去设置里点「启动」。', 'warn')
+                if st == 'down' and time.time() - self.ol_starting > 30: self.show_notice(L('改错服务没开：去设置里点「启动」。', 'The cleanup service is off: click Start in Settings.'), 'warn')
             changed, self.ol_last = st != self.ol_last, st
             if changed: self.refresh_settings(); self.update_dot()
         elif kind == 'key_recorded':
@@ -2645,9 +2655,9 @@ class App:
 
 
 class Settings:
-    """设置窗口：麦克风 / 快捷键 / 说中文时 / 改错服务 四块卡片。"""
+    """设置窗口：麦克风 / 快捷键 / 说中文时 / 改错服务 / 界面语言 五块卡片。"""
     W = 400
-    ZH_OUTS = (('en', '出英文', ''), ('zh', '出中文', ''))  # 出中文：删掉口头禅 / 重复 / 改口，不翻译
+    ZH_OUTS = (('en', ('出英文', 'English'), ''), ('zh', ('出中文', 'Chinese'), ''))  # 出中文：删掉口头禅 / 重复 / 改口，不翻译
 
     def __init__(self, app):
         self.app, self.recording = app, False
@@ -2659,16 +2669,16 @@ class Settings:
 
     # 每一块：先算高度（要先画卡片底再画内容），返回 (高度, 画法)
     def sec_mic(self, n, x, y, w, draw):
-        devs = ['系统默认'] + eng.devices(); cur = cfg['device'] if cfg['device'] in devs else '系统默认'
+        devs = [L('系统默认', 'System default')] + eng.devices(); cur = cfg['device'] if cfg['device'] in devs else devs[0]
         dev_y = y + 56; h = dev_y + len(devs) * 44 + 10 - y  # 音量条放在标题那行右边，设置一页放得下不用滚
         if not draw: return h
-        self.label(n, x, y, w, h, '麦克风')
+        self.label(n, x, y, w, h, L('麦克风', 'Microphone'))
         for i, name in enumerate(devs):
             on = name == cur
             n.button(x + 20, dev_y + i * 44, w - 40, BTN_H, r=BTN_H / 2, text=name, icon=I_OK if on else '', size=12, on=on, align='left', cmd=lambda name=name: self.pick_dev(name))
         self.bar = None
         if self.tip_state != 'ok':  # 出问题时标题行右边换成一句橙 / 红字（不画音量条）；正常时不放字，黑条会跳就是好的
-            text, color = {'silent': ('10 秒没声音 · 静音键常是 F4', ORANGE), 'off': ('打不开：换一个设备', RED)}[self.tip_state]
+            text, color = {'silent': (L('10 秒没声音 · 静音键常是 F4', 'No sound for 10 s · mute key is often F4'), ORANGE), 'off': (L('打不开：换一个设备', "Can't open: pick another device"), RED)}[self.tip_state]
             n.text(x + w - 20, y + 25, text, 11, color, anchor='ne', width=w - 110, lines=1)
             return h
         track_y = y + 28; n.inset(x + 100, track_y, w - 120, 10, 5, d=2.5)
@@ -2683,10 +2693,10 @@ class Settings:
         cy = chips[-1][2]
         chip_y = y + 56; h = chip_y + cy + BTN_H + 20 - y  # 提示字放在标题那行右边
         if not draw: return h
-        self.label(n, x, y, w, h, '快捷键')
+        self.label(n, x, y, w, h, L('快捷键', 'Hotkey'))
         for vk, cx, dy, cw in chips:
             if vk is None:
-                self.rec_btn = n.button(cx, chip_y + dy, cw, BTN_H, text='请按键…' if self.recording else '录制', size=12,
+                self.rec_btn = n.button(cx, chip_y + dy, cw, BTN_H, text=L('请按键…', 'Press…') if self.recording else L('录制', 'Record'), size=12,
                                         color=ORANGE if self.recording else TEXT, cmd=self.record)
             else:
                 on = vk == cfg['hotkey']
@@ -2697,9 +2707,9 @@ class Settings:
     def sec_mode(self, n, x, y, w, draw):
         h = 62  # 一排按钮，上下各留 14
         if not draw: return h
-        self.label(n, x, y, w, h, '说中文时')
+        self.label(n, x, y, w, h, L('说中文时', 'When speaking Chinese'))
         for i, (m, name, _) in enumerate(self.ZH_OUTS):
-            n.button(btn_x(x, w, i, 2), y + 14, BTN_W, BTN_H, text=name, size=12, on=m == cfg.get('zh_out', 'en'), cmd=lambda m=m: self.set_zh_out(m))
+            n.button(btn_x(x, w, i, 2), y + 14, BTN_W, BTN_H, text=L(*name), size=12, on=m == cfg.get('zh_out', 'en'), cmd=lambda m=m: self.set_zh_out(m))
         return h
 
     def sec_ol(self, n, x, y, w, draw):
@@ -2707,28 +2717,36 @@ class Settings:
         if not draw: return h
         app = self.app; st = app.ol_last
         if st == 'down' and time.time() - app.ol_starting < 30: st = 'starting'
-        self.label(n, x, y, w, h, '改错服务')
-        text, color = {'ok': ('正常', GREEN), 'no_model': (f'缺少 {LLM_MODEL}', RED), 'down': ('没有运行', ORANGE),
-                       'starting': ('启动中…', ORANGE), None: ('检查中…', SUB)}[st]
+        self.label(n, x, y, w, h, L('改错服务', 'Cleanup'))
+        text, color = {'ok': (L('正常', 'Running'), GREEN), 'no_model': (L(f'缺少 {LLM_MODEL}', f'Missing {LLM_MODEL}'), RED), 'down': (L('没有运行', 'Not running'), ORANGE),
+                       'starting': (L('启动中…', 'Starting…'), ORANGE), None: (L('检查中…', 'Checking…'), SUB)}[st]
         n.text(x + w - 20, y + 22, '● ' + text, 12, color, anchor='ne')
         on_gpu = llm_opts()[1]  # 说明只留一行：在哪跑 + 上一句用了几秒
-        info = f'Ollama · {LLM_MODEL} · ' + ('显卡' if on_gpu else 'CPU' + ('（显卡慢，暂时换）' if LLM_GPU_LAYERS else ''))
-        if llm_stat: info += f' · 上一句 {llm_stat["secs"]:.1f} 秒'
+        info = f'Ollama · {LLM_MODEL} · ' + (L('显卡', 'GPU') if on_gpu else 'CPU' + (L('（显卡慢，暂时换）', ' (GPU slow, for now)') if LLM_GPU_LAYERS else ''))
+        if llm_stat: info += L(f' · 上一句 {llm_stat["secs"]:.1f} 秒', f' · last {llm_stat["secs"]:.1f} s')
         n.text(x + 20, y + 56, info, 11, SUB, width=w - (130 if st == 'down' else 40), lines=1)
-        if st == 'down': n.button(btn_x(x, w, 0, 1), y + 46, BTN_W, BTN_H, text='启动', size=12, cmd=self.start_ol)
-        n.text(x + 20, y + 96, '改错模型', 12, TEXT)
+        if st == 'down': n.button(btn_x(x, w, 0, 1), y + 46, BTN_W, BTN_H, text=L('启动', 'Start'), size=12, cmd=self.start_ol)
+        n.text(x + 20, y + 96, L('改错模型', 'Model'), 12, TEXT)
         for i, (k, name) in enumerate(LLM_MODELS):
-            n.button(btn_x(x, w, i, 2), y + 86, BTN_W, BTN_H, text=name, size=12, on=k == LLM_MODEL, cmd=lambda k=k: self.set_llm(k))
-        n.text(x + 20, y + 138, '不用时释放显存', 12, TEXT)
+            n.button(btn_x(x, w, i, 2), y + 86, BTN_W, BTN_H, text=L(*name), size=12, on=k == LLM_MODEL, cmd=lambda k=k: self.set_llm(k))
+        n.text(x + 20, y + 138, L('不用时释放显存', 'Free GPU memory when idle'), 12, TEXT)
         cols, gap = len(KEEPS), 10; cw = (w - 40 - gap * (cols - 1)) / cols  # 和快捷键那排一样：等宽、等间距
         for i, (k, name) in enumerate(KEEPS):
-            n.button(x + 20 + i * (cw + gap), y + 166, cw, BTN_H, text=name, size=12, on=k == cfg.get('keep', '2m'), cmd=lambda k=k: self.set_keep(k))
+            n.button(x + 20 + i * (cw + gap), y + 166, cw, BTN_H, text=L(*name), size=12, on=k == cfg.get('keep', '2m'), cmd=lambda k=k: self.set_keep(k))
+        return h
+
+    def sec_ui(self, n, x, y, w, draw):
+        h = 62  # 和「说中文时」一样：一排两个按钮；很少改，放最下面。按钮字各用自己的语言，哪种界面下都认得出
+        if not draw: return h
+        self.label(n, x, y, w, h, L('界面语言', 'Interface'))
+        for i, (v, name) in enumerate((('zh', '中文'), ('en', 'English'))):
+            n.button(btn_x(x, w, i, 2), y + 14, BTN_W, BTN_H, text=name, size=12, on=v == ui_lang(), cmd=lambda v=v: self.set_ui(v))
         return h
 
     @classmethod
     def full_height(cls):
         """完整设置窗口的高度（记录窗口也用它，两个窗口一样高）。各块不画只量高度时用不到 self。"""
-        secs = (cls.sec_mic, cls.sec_key, cls.sec_mode, cls.sec_ol)
+        secs = (cls.sec_mic, cls.sec_key, cls.sec_mode, cls.sec_ol, cls.sec_ui)
         return 92 + sum(f(None, None, 20, 0, 360, False) for f in secs) + 20 * (len(secs) - 1) + 20  # 最后一张卡片离底边 20 = 卡片圆角和窗口圆角同心
 
     @classmethod
@@ -2746,7 +2764,7 @@ class Settings:
 
     def build(self):
         n, app = self.n, self.app
-        secs = [getattr(self, 'sec_' + s) for s in ('mic', 'key', 'mode', 'ol')]
+        secs = [getattr(self, 'sec_' + s) for s in ('mic', 'key', 'mode', 'ol', 'ui')]
         x, w, y0, gap = 20, 360, 92, 20
         H = self.full_height()
         V, oy = self.view_height(), n.c.canvasy(0) / S  # 改了设置重画时停在原来滚到的位置
@@ -2769,7 +2787,7 @@ class Settings:
         c.coords(self.bar, px(self.bar_x), y0, px(self.bar_x) + level * px(self.bar_w), y1)
 
     def pick_dev(self, name):
-        cfg['device'] = None if name == '系统默认' else name; save_cfg()
+        cfg['device'] = None if name == L('系统默认', 'System default') else name; save_cfg()
         self.app.sil_since = time.time(); eng.open(cfg['device']); self.app.refresh_settings()
 
     def set_hot(self, vk):
@@ -2787,11 +2805,19 @@ class Settings:
         cfg['zh_out'] = o; save_cfg(); log('说中文时输出', o); self.app.refresh_settings()
         if cfg['lang'] != 'en': threading.Thread(target=llm_hello, daemon=True).start()  # 换了提示词，同上
 
+    def set_ui(self, v):
+        """切界面语言：和系统一样时清掉，回到跟随系统（同 toggle_theme）；所有窗口按新语言重建。说话 / 改错时不切。"""
+        if v == ui_lang() or self.app.state not in ('ready', 'loading', 'error'): return
+        cfg.pop('ui', None)
+        if v != _SYS_UI: cfg['ui'] = v
+        save_cfg(); log('界面语言', v)
+        self.app.root.after(10, lambda: self.app.rebuild(THEME))  # 等这次点击处理完再拆按钮
+
 
     def record(self):
         if self.recording: return
-        self.recording = True; self.rec_btn.set(text='请按键…', color=ORANGE)
-        self.n.c.itemconfigure(self.ktip, text='现在按一下你想用的键（10 秒内）', fill=ORANGE)
+        self.recording = True; self.rec_btn.set(text=L('请按键…', 'Press…'), color=ORANGE)
+        self.n.c.itemconfigure(self.ktip, text=L('现在按一下你想用的键（10 秒内）', 'Press the key you want (within 10 s)'), fill=ORANGE)
         def run():
             eng.key_paused = True; vk = eng.wait_any_key(10); time.sleep(0.3); eng.key_paused = False
             post('key_recorded', vk)
@@ -2799,8 +2825,8 @@ class Settings:
 
     def key_recorded(self, vk):
         self.recording = False
-        if vk is None: self.key_tip = ('没收到按键，再点一次「录制」。', ORANGE)
-        else: self.app.set_key(vk); self.key_tip = (f'已改成「{key_name(vk)}」', GREEN)
+        if vk is None: self.key_tip = (L('没收到按键，再点一次「录制」。', 'No key received. Click Record again.'), ORANGE)
+        else: self.app.set_key(vk); self.key_tip = (L(f'已改成「{key_name(vk)}」', f'Changed to {key_name(vk)}'), GREEN)
         self.build()
 
     def start_ol(self):
@@ -2849,7 +2875,7 @@ class History:
         for raw, fixed, zh, when in recs:  # 卡片上面灰字：时间 · 原话（一行放不下时右边有展开钮）；卡片里只有改后的英文 + 中文，复制按钮 28 对着各自那段字上下居中
             en, cn = wrap(fixed, fe, px(280)), wrap(zh, fz, px(280))
             he, hz = len(en) * fe.metrics('linespace') / S, len(cn) * fz.metrics('linespace') / S
-            meta = f'{when}  ·  说：{raw}'; key = (when, raw); full = wrap(meta, fm, px(280))
+            meta = f'{when}  ·  ' + L('说：', 'Said: ') + raw; key = (when, raw); full = wrap(meta, fm, px(280))
             lines = full if key in self.opened else [fit(meta, fm, px(280))]
             top = y + len(lines) * fm.metrics('linespace') / S + 10  # 灰字下面隔一点就是卡片
             ey = top + max(14, 24 - he / 2)                  # 字离卡片边 14，按钮离卡片边至少 10
@@ -2858,7 +2884,7 @@ class History:
             cards.append((y, top, h, ey, he, zy, hz, lines, key if len(full) > 1 else None, fixed, zh, en, cn)); y = top + h + 20
         H = max(lv, y - 20 + self.FADE_B)  # 拉到底时最后一张卡片露在下面的渐隐带上面
         n.reset(H); n.c.configure(scrollregion=(0, 0, px(self.W), px(H)), yscrollincrement=px(20))
-        if not recs: n.text(200, y + 10, '还没有记录' if on else '记录已关闭：说的话不会存到电脑上', 11, SUB, anchor='center')
+        if not recs: n.text(200, y + 10, L('还没有记录', 'No history yet') if on else L('记录已关闭：说的话不会存到电脑上', 'History is off: nothing you say is saved'), 11, SUB, anchor='center')
         for y, top, h, ey, he, zy, hz, lines, key, fixed, zh, en, cn in cards:
             n.text(40, y, '\n'.join(lines), 11, SUB)
             if key:  # 原话一行放不下：小圆钮（和复制按钮同一竖列，对着第一行灰字居中），点一下展开全文，再点收起
@@ -2883,15 +2909,15 @@ class History:
         """记录设置卡片：右边是 3 列网格（BTN_W 宽、BTN_GAP 间隔，右对齐），开 / 关占后两列，清空跨后两列，上下对齐。"""
         x, w = 20, 360; col = lambda i: btn_x(x, w, i, 3)
         n.raised(x, y, w, h, 28, d=ELEV)
-        n.text(x + 20, y + 24, '保存记录', 12, TEXT)
-        for i, (v, name) in enumerate(((True, '开'), (False, '关'))):
+        n.text(x + 20, y + 24, L('保存记录', 'Save history'), 12, TEXT)
+        for i, (v, name) in enumerate(((True, L('开', 'On')), (False, L('关', 'Off')))):
             n.button(col(i + 1), y + 14, BTN_W, BTN_H, text=name, size=12, on=v == on, cmd=lambda v=v: self.set_hist(v))
         if not on: return
-        n.text(x + 20, y + 70, '只留最近', 12, TEXT)
+        n.text(x + 20, y + 70, L('只留最近', 'Keep'), 12, TEXT)
         for i, (d, name) in enumerate(HIST_DAYS):
-            n.button(col(i), y + 60, BTN_W, BTN_H, text=name, size=12, on=d == cfg.get('hist_days', 0), cmd=lambda d=d: self.set_days(d))
-        n.text(x + 20, y + 116, f'共 {len(hist_blocks())} 条', 11, SUB)
-        self.clear_btn = n.button(col(1), y + 106, 2 * BTN_W + BTN_GAP, BTN_H, text='再点一下确认' if self.arm_clear else '清空记录', size=12,
+            n.button(col(i), y + 60, BTN_W, BTN_H, text=L(*name), size=12, on=d == cfg.get('hist_days', 0), cmd=lambda d=d: self.set_days(d))
+        n.text(x + 20, y + 116, L(f'共 {len(hist_blocks())} 条', f'{len(hist_blocks())} entries'), 11, SUB)
+        self.clear_btn = n.button(col(1), y + 106, 2 * BTN_W + BTN_GAP, BTN_H, text=L('再点一下确认', 'Click again to confirm') if self.arm_clear else L('清空记录', 'Clear history'), size=12,
                                   color=RED if self.arm_clear else TEXT, cmd=self.clear)
 
     def set_hist(self, v):
@@ -2961,20 +2987,20 @@ class Words:
         h.raised(20, y, 360, ch, 28, d=ELEV)
         h.inset(40, y + 20, btn_x(20, 360, 0, 1) - 20 - 40, 40, 20, d=ELEV * INSET_K)  # 输入框凹下去，按钮和它上下居中、右对齐卡片内边
         h.c.create_window(px(56), px(y + 40), window=self.ent, anchor='w', width=px(btn_x(20, 360, 0, 1) - 20 - 56 - 16))
-        h.button(btn_x(20, 360, 0, 1), y + 23, BTN_W, BTN_H, text='保存' if self.editing else '加入', size=12, cmd=self.submit)
-        tip = (f'正在改「{parse_word(self.editing)[0]}」 · Enter 保存 · Esc 取消' if self.editing
-               else '例：Claude: cloud, 克劳德（冒号后面是听错的写法，可不写）')
+        h.button(btn_x(20, 360, 0, 1), y + 23, BTN_W, BTN_H, text=L('保存', 'Save') if self.editing else L('加入', 'Add'), size=12, cmd=self.submit)
+        tip = (L(f'正在改「{parse_word(self.editing)[0]}」 · Enter 保存 · Esc 取消', f'Editing "{parse_word(self.editing)[0]}" · Enter to save · Esc to cancel') if self.editing
+               else L('例：Claude: cloud, 克劳德（冒号后面是听错的写法，可不写）', 'e.g. Claude: cloud (misheard forms after the colon)'))
         h.text(40, y + 72, tip, 11, SUB, width=320, lines=1)
         h.commit()
         n.c.configure(height=px(lv))
         cards, y = [], 14 + lz + 10  # 最上面一行灰字（几条），下面隔一点是卡片
         for ln, (term, alts) in rows:
-            al = wrap('听错：' + '、'.join(alts), fz, px(240)) if alts else []
+            al = wrap(L('听错：', 'Misheard: ') + L('、', ', ').join(alts), fz, px(240)) if alts else []
             ch = max(48, 28 + le + (4 + len(al) * lz if al else 0))
             cards.append((y, ch, ln, term, al)); y += ch + 20
         H = max(lv, y - 20 + self.FADE_B)  # 拉到底时最后一张卡片露在下面的渐隐带上面
         n.reset(H); n.c.configure(scrollregion=(0, 0, px(self.W), px(H)), yscrollincrement=px(20))
-        n.text(40, 14, f'{len(rows)} 条' if rows else '还没有常用词：在上面输入，Enter 加入', 11, SUB)
+        n.text(40, 14, L(f'{len(rows)} 条', f'{len(rows)} words') if rows else L('还没有常用词：在上面输入，Enter 加入', 'No words yet: type above and press Enter'), 11, SUB)
         for y, ch, ln, term, al in cards:  # 卡片里正确写法一行，听错的写法灰字；改 / 删两个 28 的圆钮对着卡片上下居中
             n.raised(20, y, 360, ch, 24, d=ELEV)
             ty = y + 14 if al else y + (ch - le) / 2
@@ -3117,24 +3143,24 @@ class Checks:
         n.text(33, 23.5, 'CHECK', 22, INK, family=DISPLAY)
         n.raised(20, top, 360, 5 * self.ROW + 16, 28, d=ELEV)
         self.rows = []
-        for i, name in enumerate(CHECKS):
+        for i, name in enumerate(L(*c) for c in CHECKS):
             y = top + 8 + i * self.ROW
             n.inset(36, y + 10, 32, 32, 16, d=ELEV * INSET_K)
             ic = n.text(52, y + 26, '', 13, SUB, anchor='center')
             n.text(84, y + 10, name, 12, TEXT)
             self.rows.append((ic, n.text(84, y + 34, '', 11, SUB), y))
-        self.btn = n.button(20, by, 360, 52, r=26, text='开始自检', size=12, cmd=self.start)
+        self.btn = n.button(20, by, 360, 52, r=26, text=L('开始自检', 'Run self-test'), size=12, cmd=self.start)
         n.commit()
         if SELFTEST: self.start()
 
     def start(self):
         if self.running: return
-        self.running = True; self.btn.set(text='检查中…', color=SUB)
+        self.running = True; self.btn.set(text=L('检查中…', 'Checking…'), color=SUB)
         for ic, d, _ in self.rows: self.n.c.itemconfigure(ic, text=''); self.n.c.itemconfigure(d, text='')
         if self.extra: self.n.remove(self.extra); self.extra = None
         def report(i, st, text, extra=None):
             post('check', i, st, text, extra)
-            if st != 'run': log(f'[自检] {CHECKS[i]}：', {'ok': '通过', 'fail': '失败', 'warn': '注意'}[st], text)
+            if st != 'run': log(f'[自检] {CHECKS[i][0]}：', {'ok': '通过', 'fail': '失败', 'warn': '注意'}[st], text)
         threading.Thread(target=lambda: post('checks_done', run_checks(report, not SELFTEST)), daemon=True).start()
 
     def update(self, i, st, text, extra):
@@ -3143,10 +3169,10 @@ class Checks:
         self.n.c.itemconfigure(d, text=fit(text, fnt(11), px(276), 3), fill=RED if st == 'fail' else SUB)
         if extra is not None:
             def use(): self.app.set_key(extra); self.n.remove(self.extra); self.extra = None
-            self.extra = self.n.button(254, y + 2, 110, BTN_H, text=f'改用「{key_name(extra)}」', size=12, cmd=use)
+            self.extra = self.n.button(254, y + 2, 110, BTN_H, text=L(f'改用「{key_name(extra)}」', f'Use {key_name(extra)}'), size=12, cmd=use)
 
     def done(self, ok):
-        self.running = False; self.btn.set(text='全部通过 · 再测一次' if ok else '再测一次', color=INK)
+        self.running = False; self.btn.set(text=L('全部通过 · 再测一次', 'All passed · run again') if ok else L('再测一次', 'Run again'), color=INK)
         log('自检结果：', '全部通过' if ok else '有失败项')
         if SELFTEST: self.w.after(1500, quit_app)
 
@@ -3155,24 +3181,24 @@ SETUP_PS1 = HERE / 'setup.ps1'
 
 def readiness(ol):
     """准备情况两行：[(lv, 一句人话, 按钮字 或 None)]，lv = ok / warn / fail / info。ol：改错服务状态（App.ol_last）。按钮都是运行 setup.ps1。"""
-    rows = [{'ok': ('ok', 'Whisper 已载入。', None),
-             'loading': ('info', '载入中…', None),
-             'nogpu': ('fail', '没有 NVIDIA 显卡：Whisper 识别要用显卡，现在说不了话。', None),
-             'nolib': ('fail', '缺显卡运行库（cuBLAS，约 0.5GB）。', '修复'),
-             'nomodel': ('fail', 'Whisper 模型（约 1.6GB）还没下载。', '下载')}.get(eng.wh_state, ('fail', '没载入成功，详情见 run.log。', '修复'))]
+    rows = [{'ok': ('ok', L('Whisper 已载入。', 'Whisper is loaded.'), None),
+             'loading': ('info', L('载入中…', 'Loading…'), None),
+             'nogpu': ('fail', L('没有 NVIDIA 显卡：Whisper 识别要用显卡，现在说不了话。', 'No NVIDIA GPU: Whisper needs one, so voice input is unavailable.'), None),
+             'nolib': ('fail', L('缺显卡运行库（cuBLAS，约 0.5GB）。', 'Missing GPU runtime (cuBLAS, about 0.5 GB).'), L('修复', 'Fix')),
+             'nomodel': ('fail', L('Whisper 模型（约 1.6GB）还没下载。', 'Whisper model (about 1.6 GB) not downloaded yet.'), L('下载', 'Download'))}.get(eng.wh_state, ('fail', L('没载入成功，详情见 run.log。', 'Failed to load. See run.log.'), L('修复', 'Fix')))]
 
     if not shutil.which('ollama') and not os.path.exists(os.path.expandvars(r'%LOCALAPPDATA%\Programs\Ollama\ollama.exe')):
-        rows.append(('fail', '没装 Ollama：它负责改语病和翻译，没有它只能原样输出。', '安装'))
-    elif ol == 'no_model': rows.append(('fail', f'还没下载改错模型 {LLM_MODEL}（约 2.6GB）。', '下载'))
-    elif ol == 'down': rows.append(('warn', '改错服务没在运行，Quill 会自动启动它。', None))
-    elif ol is None: rows.append(('info', '检查中…', None))
-    else: rows.append(('ok', f'Ollama 正常，改错模型 {LLM_MODEL} 在。' + ('' if nvidia_gpu() and LLM_GPU_LAYERS else '现在用 CPU 改错，每句约 5~8 秒。'), None))
+        rows.append(('fail', L('没装 Ollama：它负责改语病和翻译，没有它只能原样输出。', 'Ollama is not installed. It does the cleanup and translation; without it your words are typed as is.'), L('安装', 'Install')))
+    elif ol == 'no_model': rows.append(('fail', L(f'还没下载改错模型 {LLM_MODEL}（约 2.6GB）。', f'Cleanup model {LLM_MODEL} (about 2.6 GB) not downloaded yet.'), L('下载', 'Download')))
+    elif ol == 'down': rows.append(('warn', L('改错服务没在运行，Quill 会自动启动它。', 'The cleanup service is not running; Quill starts it automatically.'), None))
+    elif ol is None: rows.append(('info', L('检查中…', 'Checking…'), None))
+    else: rows.append(('ok', L(f'Ollama 正常，改错模型 {LLM_MODEL} 在。', f'Ollama is running and cleanup model {LLM_MODEL} is ready.') + ('' if nvidia_gpu() and LLM_GPU_LAYERS else L('现在用 CPU 改错，每句约 5~8 秒。', ' Cleanup runs on the CPU, about 5–8 s per sentence.')), None))
     return rows
 
 
 class Ready:
     """准备情况窗口：缺 Ollama / 模型 / 显卡库时说清楚缺什么，按钮在黑框 PowerShell 里运行 setup.ps1（装完自动重新检查）。"""
-    NAMES = ['识别模型（Whisper）', '改错服务']
+    NAMES = [('识别模型（Whisper）', 'Speech model (Whisper)'), ('改错服务', 'Cleanup service')]
     W, ROW = 400, 88
 
     def __init__(self, app):
@@ -3187,8 +3213,8 @@ class Ready:
         for i, name in enumerate(self.NAMES):
             y = top + 8 + i * self.ROW
             n.inset(36, y + 10, 32, 32, 16, d=ELEV * INSET_K)
-            self.rows.append((n.text(52, y + 26, '', 13, SUB, anchor='center'), n.text(84, y + 10, name, 12, TEXT), n.text(84, y + 34, '', 11, SUB), y))
-        n.button(20, by, 360, 52, r=26, text='重新检查', size=12, cmd=lambda: self.refresh(True))
+            self.rows.append((n.text(52, y + 26, '', 13, SUB, anchor='center'), n.text(84, y + 10, L(*name), 12, TEXT), n.text(84, y + 34, '', 11, SUB), y))
+        n.button(20, by, 360, 52, r=26, text=L('重新检查', 'Check again'), size=12, cmd=lambda: self.refresh(True))
         n.commit(); self.refresh(); self.w.after(1500, self.tick)
 
     def build(self): self.refresh(True)
@@ -3209,10 +3235,10 @@ class Ready:
             sym, color = Checks.icon(lv)
             self.n.c.itemconfigure(ic, text=sym, fill=color)
             self.n.c.itemconfigure(d, text=fit(text, fnt(11), px(190 if act else 276), 3), fill=RED if lv == 'fail' else SUB)
-            if act: self.btns.append(self.n.button(364 - BTN_W, y + 18, BTN_W, BTN_H, text='进行中' if self.proc else act, size=12, color=SUB if self.proc else INK, cmd=self.run_setup))
+            if act: self.btns.append(self.n.button(364 - BTN_W, y + 18, BTN_W, BTN_H, text=L('进行中', 'Running…') if self.proc else act, size=12, color=SUB if self.proc else INK, cmd=self.run_setup))
 
     def run_setup(self):
-        if self.proc or not SETUP_PS1.exists(): return notify('找不到 setup.ps1，请重新下载 Quill。', 'err')
+        if self.proc or not SETUP_PS1.exists(): return notify(L('找不到 setup.ps1，请重新下载 Quill。', 'setup.ps1 not found. Please download Quill again.'), 'err')
         cmd = f"& '{SETUP_PS1}'; Read-Host 'Finished. Press Enter to close this window'"
         self.proc = subprocess.Popen(['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', cmd], cwd=HERE, creationflags=0x10)  # 新黑框
         log('运行 setup.ps1'); self.refresh(True)
@@ -3308,7 +3334,7 @@ if __name__ == '__main__':
     apply_theme(system_theme())
     setup_fonts(root)
     root.report_callback_exception = lambda *e: (log('界面出错', ''.join(traceback.format_exception(*e))),
-                                                 notify('出了点问题，已记到 run.log。', 'err'))
+                                                 notify(L('出了点问题，已记到 run.log。', 'Something went wrong (saved to run.log).'), 'err'))
     threading.excepthook = lambda a: log('后台出错', ''.join(traceback.format_exception(a.exc_type, a.exc_value, a.exc_traceback)))
     app = App(root)
     root.geometry(f'+{wa.right - px(App.W) - px(20)}+{wa.top + px(12)}')  # 离右边 20：四个窗口全开时排得下，不用挪

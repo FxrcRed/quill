@@ -82,7 +82,7 @@ Then start **Quill** from the desktop. The first start loads the Whisper model o
 ## Usage tips
 
 - **AUTO / EN / CN** (top right of the status card): AUTO (default) detects Chinese or English for each sentence; EN / CN fix the language you speak. Output is English, unless you set *When speaking Chinese* → 出中文 in Settings.
-- Below the status card are **HISTORY** and **WORDS** buttons and a settings gear. Settings: microphone, hotkey (click *Record* (录制) and press any key), output mode; the three round icons at the top right are Setup (准备情况), Self-test (自检, checks every part) and Close. The app's interface is in Chinese.
+- Below the status card are **HISTORY** and **WORDS** buttons and a settings gear. Settings: microphone, hotkey (click *Record* and press any key), output mode, interface language (English or Chinese; follows Windows by default); the three round icons at the top right are Setup, Self-test (checks every part) and Close.
 - The shrink button (two arrows, top right) turns Quill to a floating ball at the edge of the screen; click it to come back.
 - The moon / sun button (top right) switches between dark and light. Quill follows Windows by default; switching back to the system theme makes it follow again.
 - **HISTORY** keeps the last 20 sentences (the icon in its title row opens the file): the original speech, the English, and the Chinese meaning. You can turn saving off, keep only the last 7 / 30 days, or clear it.
