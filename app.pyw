@@ -197,7 +197,7 @@ def log(*a):
     if sys.stdout: print(line, flush=True)
     with open(HERE / 'run.log', 'a', encoding='utf-8') as f: f.write(line + '\n')
 
-cfg = {'hotkey': 0xA3, 'device': None, 'lang': 'en', 'zh_out': 'en', 'keep': '2m', 'hist': True, 'hist_days': 0}  # hist：存不存记录；hist_days：只留最近几天（0 = 永久）；keep：不用多久释放显存（见 KEEPS）；lang：en 说英文 / zh 说中文；zh_out：说中文时出英文 / 出中文
+cfg = {'hotkey': 0xA3, 'device': None, 'lang': 'auto', 'zh_out': 'en', 'keep': '2m', 'hist': True, 'hist_days': 0}  # hist：存不存记录；hist_days：只留最近几天（0 = 永久）；keep：不用多久释放显存（见 KEEPS）；lang：auto 自动 / en 说英文 / zh 说中文；zh_out：说中文时出英文 / 出中文
 try: cfg.update(json.loads((HERE / 'settings.json').read_text(encoding='utf-8')))
 except Exception: pass
 if cfg.get('llm') in dict(LLM_MODELS): LLM_MODEL = cfg['llm']
@@ -463,7 +463,8 @@ def llm(text, on_field=None, timeout=60, watch=True, lang='en'):  # watch=False�
 def llm_hello():
     """预热：用下一句真会用的那套提示词（语言 + 输出，和 Job 一样算）跑一次；Ollama 只缓存一份提示词，用错了第一句照样慢。"""
     if ollama_status() != 'ok': return
-    sl = 'zhzh' if cfg['lang'] == 'zh' and cfg.get('zh_out', 'en') == 'zh' else cfg['lang']
+    lang = 'zh' if cfg['lang'] == 'auto' else cfg['lang']  # 自动：多半说中文，按中文的提示词预热
+    sl = 'zhzh' if lang == 'zh' and cfg.get('zh_out', 'en') == 'zh' else lang
     try: llm('hello', watch=False, lang=sl); return True
     except Exception as e: log('预热改错失败：', e)
 
@@ -580,17 +581,37 @@ ZH_HMM = re.compile(r'[嗯呃]+[，,、]?')
 ZH_STUTTER = re.compile(r'([一-鿿])(?:[，,、]?\1){2,}|([一-鿿])[，,、]\2')  # 我我我 / 我，我
 ZH_REPEAT = re.compile(r'([一-鿿][^。？！?!]{1,15}?)(?:[，,、]?\1)+')  # 我想我想 / 但是，但是 / 整句重说
 ZH_KEEP = set('研究 讨论 休息 考虑 商量 学习 了解 介绍 检查 收拾 打听 活动 锻炼 整理 准备 尝试 体验 熟悉 打扫 认识 比较 练习 哈哈 呵呵 嘿嘿 嘻嘻'.split())  # 本来就叠着说的词（还有「一步一步」这种「一」开头的）
-ZH_FIX = re.compile(r'不对|我是说|我的意思是|说错|重说|哦不|噢不|算了|(?:^|[，,。？！?!])\s*(?:不是|应该是)')
-ZH_RESTART = re.compile(r'([一-鿿]{1,2})[^，,。？！?!]{0,5}[，,]\s*\1')  # 「去那个，去超市」：说一半从头再来
+ZH_FIX = re.compile(r'不对(?=[，,、])|我是说|我的意思是|说错|重说|哦不|噢不|算了|(?:^|[，,。？！?!])\s*(?:不是|应该是)')  # 「大小不对。」是原话，后面跟逗号才是改口
+ZH_RESTART = re.compile(r'([一-鿿]{1,2})[^，,。？！?!]{0,5}(?<![了的吗呢吧])[，,]\s*\1')  # 「去那个，去超市」：说一半从头再来；「就放不下了，就不行」前半句说完了，不算
 
 def zh_tidy(t):
     t = re.sub(r'(?<=[一-鿿，。？！、])\s+(?=[一-鿿])', '', t.strip())  # 中文段之间不要空格
     t = ZH_FILLER.sub(lambda m: m.group(1), t)
     t = ZH_HMM.sub('', t)
-    t = ZH_REPEAT.sub(lambda m: m.group(0) if m.group(1) in ZH_KEEP or m.group(1)[0] == '一' else m.group(1), t)  # 先合重复的词，「谢谢谢谢」才不会被当成口吃
+    t = ZH_REPEAT.sub(lambda m: m.group(0) if m.group(1) in ZH_KEEP or m.group(1)[0] == '一'
+                      or m.group(1) in ('这个', '那个') and m.group(0) != m.group(1) * 2 else m.group(1), t)  # 先合重复的词，「谢谢谢谢」才不会被当成口吃；「做这个，这个是开源的」可能是两个意思，交给模型看
+
     t = ZH_STUTTER.sub(lambda m: m.group(1) or m.group(2), t)
     t = re.sub(r'[，,、]\s*(?=[，,、。？！?!])', '', t)  # 删完剩下的空逗号
-    return t.lstrip('，,、。 ') or t
+    return zh_num(t.lstrip('，,、。 ') or t)
+
+_ZD = dict(zip('零〇一二两三四五六七八九', '001223456789'))
+def _zh_int(s):
+    """「十二」→ 12、「五」→ 5（只管 1~99）。"""
+    a, _, b = s.partition('十')
+    return (int(_ZD[a]) if a else 1) * 10 + (int(_ZD[b]) if b else 0) if '十' in s else int(_ZD[s])
+
+def zh_num(t):
+    """Whisper 把日期、整百的数写成汉字（二六年五月、一百五），换成阿拉伯数字。「三四年」「七十块」「一下」这种不动。"""
+    t = re.sub(r'(?:([二〇零一][〇零一二三四五六七八九]{3})|([〇零一二三四五六七八九]{2}))年(?=[一二三四五六七八九十]{1,2}月)|([二〇零一][〇零一二三四五六七八九]{3})年',
+               lambda m: ''.join(_ZD[c] for c in (m[1] or m[2] or m[3])) + '年', t)  # 四位年份，或后面跟着月份的两位年份
+    t = re.sub(r'(?<=\d年)([一二三四五六七八九十]{1,3})(?=月)', lambda m: str(_zh_int(m[1])), t)
+    t = re.sub(r'(?<=\d月)([一二三四五六七八九十]{1,3})(?=[号日])', lambda m: str(_zh_int(m[1])), t)
+    def hundred(m):
+        r = m[2] or ''
+        return str(int(_ZD[m[1]]) * 100 + (int(_ZD[r[1]]) if r[:1] == '零' else _zh_int(r) if '十' in r else int(_ZD[r]) * 10 if r else 0))
+    return re.sub(r'([一二两三四五六七八九])百(零[一二三四五六七八九]|[一二三四五六七八九]十[一二三四五六七八九]?|[一二三四五六七八九](?!十))?(?![分万千亿十零一二三四五六七八九])',
+                  hundred, t)  # 一百五 → 150、两百 → 200、一百零五 → 105、一百五十三 → 153；百分之、一百万不动
 
 def zh_needs_llm(t):
     """出中文这段要不要送模型：只送带改口的。每句都送改错字反而更差（cer_eval：CER 2.37% → 6.19%，会删原话、改出错字）。"""
@@ -656,14 +677,17 @@ REC_OF = {}  # 识别原文 → 录音名，写记录时带上（harvest.py 靠�
 class Job:
     """一次录音。说话时每隔约 1 秒用 Whisper 把目前为止的整段认一遍给浮窗看（heard）；松开后整段再认一次，结果当一句去改。"""
     def __init__(self, by_key, lang='en', out='en'):
-        self.by_key, self.lang, self.heard = by_key, lang, ''
-        self.seg_lang = 'zhzh' if lang == 'zh' and out == 'zh' else lang  # 改错用哪套提示词
+        self.by_key, self.auto, self.out, self.heard = by_key, lang == 'auto', out, ''
+        self.lang = 'zh' if self.auto else lang  # 自动：先按中文认。说的是英文时，按中文认出来的照样是英文（715 段真实录音 + 40 段英文只判错 1 段），不用再认一遍
+        self.seg_lang = 'zhzh' if self.lang == 'zh' and out == 'zh' else self.lang  # 改错用哪套提示词
 
     def finish(self, a):
         """松开后整段给 Whisper（最多等 WHISPER_TIMEOUT 秒），出错 / 超时就用最后一次预览的字。没声音不送（Whisper 对着静音会编一句）。"""
         text = (eng.whisper_start(a, self.lang)() if has_speech(a) else '') or self.heard
         mark('wh')
-        return Seg(text, self.seg_lang) if text else None
+        if not re.search(r'\w', text): return None  # 只有标点（「。 。 。」）：当没听清，别粘出去
+        if self.auto and not re.search(r'[一-鿿]', text): self.lang = self.seg_lang = 'en'
+        return Seg(text, self.seg_lang)
 
 
 WH_ERRORS = {'nogpu': '没有 NVIDIA 显卡：Quill 用 Whisper 识别，要 NVIDIA 显卡。', 'nolib': '缺显卡运行库（cuBLAS）：设置 → 准备情况里点「修复」。',
@@ -864,7 +888,9 @@ def asr_worker():
             else: prompt, kw = ('Glossary: ' + ', '.join(terms) + '.') if terms else None, dict(language='en', beam_size=1)
             # 温度回退默认 0→1.0 六档，置信度低时整段重解码最多 6 次：真实录音（cer_eval auto，147 段）上限改 0.2 后字错率不变，总耗时 77s → 53s、最慢一段 2.4s → 1.2s
             segs, _ = m.transcribe(a, condition_on_previous_text=False, initial_prompt=prompt, temperature=0.0 if preview else (0.0, 0.2), **kw)
-            return ('' if zh else ' ').join(s.text.strip() for s in segs)
+            parts = [t for s in segs if (t := s.text.strip())]
+            if not zh: return ' '.join(parts)
+            return ''.join(' ' + p if i and parts[i - 1][-1].isascii() and p[0].isascii() else p for i, p in enumerate(parts))  # 中文段之间不加空格；自动模式按中文认英文时，两段英文之间要空格（「wantsYesterday」）
     except Exception as e:
         log('识别子进程加载失败', traceback.format_exc())
         return send('NOLIB' if 'cublas' in str(e).lower() else 'models\\whisper 里的文件可能缺了')
@@ -1323,17 +1349,18 @@ class Btn:
 
 class Switch:
     """一排挨着的小胶囊（主页 EN / 中）：选中的凹下去、文字黑；其他凸起、文字灰。几个胶囊画在同一张贴图里，挨得近也不会互相盖住阴影。
-    opts = ((值, 文字), ...)，点了调 cmd(值)。"""
+    opts = ((值, 文字), ...)，点了调 cmd(值)；w 是一个数（都一样宽）或每个胶囊一个宽度。"""
     def __init__(self, n, x, y, w, h, gap, opts, value, cmd):
-        self.n, self.x, self.y, self.w, self.h, self.gap, self.opts, self.value, self.on_pick = n, x, y, w, h, gap, opts, value, cmd
+        self.ws = list(w) if isinstance(w, (tuple, list)) else [w] * len(opts)
+        self.n, self.x, self.y, self.h, self.gap, self.opts, self.value, self.on_pick = n, x, y, h, gap, opts, value, cmd
         self.visible, self.hold, self.hit, self.pressed, self.down, self.tile, self.lab = True, None, None, None, None, None, []
         self.cmd = lambda: self.hit and self.hit == self.pressed and self.on_pick(self.hit)  # 在哪个上按下就得在哪个上松开
 
-    def box(self, i): return self.x + i * (self.w + self.gap), self.y, self.w, self.h
+    def box(self, i): return self.x + sum(self.ws[:i]) + i * self.gap, self.y, self.ws[i], self.h
 
     def make(self):
         pad = 12; X0, Y0 = math.floor((self.x - pad) * S), math.floor((self.y - pad) * S)
-        W = len(self.opts) * (self.w + self.gap) - self.gap
+        W = sum(self.ws) + (len(self.opts) - 1) * self.gap
         self.base = self.n.img.crop((X0, Y0, math.ceil((self.x + W + pad) * S), math.ceil((self.y + self.h + pad) * S)))
         self.ox, self.oy = self.x - X0 / S, self.y - Y0 / S
         self.tile = self.n.c.create_image(X0, Y0, anchor='nw'); self.render()
@@ -1351,7 +1378,7 @@ class Switch:
         self.ph = ImageTk.PhotoImage(im); c.itemconfigure(self.tile, image=self.ph)
 
     def contains(self, x, y):
-        self.hit = next((v for i, (v, _) in enumerate(self.opts) if self.box(i)[0] <= x <= self.box(i)[0] + self.w and self.y <= y <= self.y + self.h), None)
+        self.hit = next((v for i, (v, _) in enumerate(self.opts) if self.box(i)[0] <= x <= self.box(i)[0] + self.ws[i] and self.y <= y <= self.y + self.h), None)
         return self.hit is not None
 
     def set_down(self, d):
@@ -1800,7 +1827,7 @@ class Overlay:
         blocks = []  # (行, 字号)
         if m == 'rec':
             runs = [(d['done'] + ' ', ink, False)] * bool(d['done']) + [(d['part'], sub, False)] * bool(d['part'])
-            blocks.append((flow(runs or [('请说中文…' if cfg['lang'] == 'zh' else '请说英文…', sub, False)], pfont(14), TW, 3, 'last'), 14))
+            blocks.append((flow(runs or [({'zh': '请说中文…', 'en': '请说英文…'}.get(cfg['lang'], '请说话…'), sub, False)], pfont(14), TW, 3, 'last'), 14))
         elif m == 'busy':
             text, col = (d['raw'], sub) if d['raw'] else ('…仍在识别', ORANGE) if d.get('slow') else ('识别中…', sub)
             blocks.append((flow([(text, col, False)], pfont(14), TW, 3), 14))
@@ -2216,8 +2243,8 @@ class App:
         self.sub = n.text(200, 416, '', 11, SUB, anchor='n'); n.c.itemconfigure(self.sub, justify='center')  # 提示放圆盘下面居中
         n.raised(200 - 124, 148, 248, 248, 124, d=ELEV, fill=FACE)  # 圆盘本身是凸起的大圆（能点 = 凸起），整页的视觉主角；按住时凹下去
         self.dial = Dial(n, 200, 272, 124, (lambda: eng.start('mouse'), eng.stop))
-        # 说哪种语言（出来的都是英文）：两个小胶囊和 READY 同一行、右边对齐卡片内边；选中的凹下去
-        self.lang_sw = Switch(n, 299, 105, 30, 30, 8, (('en', 'EN'), ('zh', 'CN')), cfg['lang'], self.set_lang); n.btns.append(self.lang_sw)
+        # 说哪种语言：三个小胶囊（自动 / 英 / 中）和 READY 同一行、右边对齐卡片内边（367）；选中的凹下去
+        self.lang_sw = Switch(n, 245, 105, (46, 30, 30), 30, 8, (('auto', 'AUTO'), ('en', 'EN'), ('zh', 'CN')), cfg['lang'], self.set_lang); n.btns.append(self.lang_sw)
         (hx, hw), (wx, ww), (sx, sw) = NAV
         n.button(hx, 472, hw, 30, r=15, d=ELEV, cmd=self.open_history)
         n.button(wx, 472, ww, 30, r=15, d=ELEV, cmd=self.edit_words)
@@ -2477,7 +2504,7 @@ class App:
         cfg['hotkey'] = vk; save_cfg(); log('快捷键改为', key_name(vk)); self.refresh_sub()
 
     def set_lang(self, lang):
-        """主页 EN / 中：切换说哪种语言（Whisper 按 language=en / zh 认）。"""
+        """主页 AUTO / EN / CN：切换说哪种语言（Whisper 按 language=en / zh 认；auto 先按中文认，认出来没有汉字就当英文）。"""
         if cfg['lang'] == lang: return
         cfg['lang'] = lang; save_cfg(); log('说话语言：', lang)
         self.lang_sw.select(lang)
@@ -2758,7 +2785,7 @@ class Settings:
 
     def set_zh_out(self, o):
         cfg['zh_out'] = o; save_cfg(); log('说中文时输出', o); self.app.refresh_settings()
-        if cfg['lang'] == 'zh': threading.Thread(target=llm_hello, daemon=True).start()  # 换了提示词，同上
+        if cfg['lang'] != 'en': threading.Thread(target=llm_hello, daemon=True).start()  # 换了提示词，同上
 
 
     def record(self):

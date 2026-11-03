@@ -20,7 +20,7 @@ def ulw(h, img, x, y): orig(h, img, x, y); latest[0] = img
 m.ulw = ulw
 try: clip = root.clipboard_get()
 except Exception: clip = None
-LANG = 'zh' if {'zh', 'zhzh'} & set(sys.argv) else 'en'; m.cfg['lang'] = LANG  # e2e_test.py zh：说中文（test_zh.wav）
+LANG = 'zh' if {'zh', 'zhzh'} & set(sys.argv) else 'en'; m.cfg['lang'] = 'auto' if 'auto' in sys.argv else LANG  # e2e_test.py zh：说中文（test_zh.wav）；加 auto：主页选自动
 ZHZH = 'zhzh' in sys.argv; m.cfg['zh_out'] = 'zh' if ZHZH else 'en'  # e2e_test.py zhzh：说中文 → 出中文
 app = m.App(root); root.deiconify()
 threading.Thread(target=m.fix_worker, daemon=True).start(); threading.Thread(target=m.eng.load, daemon=True).start()

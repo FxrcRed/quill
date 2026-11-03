@@ -31,7 +31,7 @@ all of that verbatim, or send my voice to the cloud. Quill does the cleanup loca
 
 - **Push-to-talk anywhere** — hold Right Ctrl (configurable) in any app; the text is pasted at the cursor and your clipboard is restored.
 - **Cleans up speech, not just grammar** — removes fillers, stutters, false starts and self-corrections ("no, I mean…"); fixes tense, articles and plurals.
-- **Speak Chinese, get English** — tap **EN / CN** on the home screen; mixed Chinese-English works too. Or get clean Chinese instead (Settings → *When speaking Chinese* / 说中文时 → 出中文).
+- **Speak Chinese, get English** — with **AUTO** on the home screen Quill tells Chinese from English on its own, no switching; mixed Chinese-English works too. Or get clean Chinese instead (Settings → *When speaking Chinese* / 说中文时 → 出中文).
 - **Fast** — English appears about 1 s after you let go, clean Chinese in about half a second.
 - **See what changed** — an overlay at the bottom of the screen shows the live text, the words that were fixed and a Chinese translation. With several monitors it appears on the one you're working on.
 - **Learns your words** — names, projects, tools. Write `Claude: cloud` and Quill decides from context whether "cloud" meant Claude. Once a day it suggests words it probably misheard.
@@ -81,7 +81,7 @@ Then start **Quill** from the desktop. The first start loads the Whisper model o
 
 ## Usage tips
 
-- **EN / CN** (top right of the status card) chooses the language you speak. Output is English, unless you set *When speaking Chinese* → 出中文 in Settings.
+- **AUTO / EN / CN** (top right of the status card): AUTO (default) detects Chinese or English for each sentence; EN / CN fix the language you speak. Output is English, unless you set *When speaking Chinese* → 出中文 in Settings.
 - Below the status card are **HISTORY** and **WORDS** buttons and a settings gear. Settings: microphone, hotkey (click *Record* (录制) and press any key), output mode; the three round icons at the top right are Setup (准备情况), Self-test (自检, checks every part) and Close. The app's interface is in Chinese.
 - The shrink button (two arrows, top right) turns Quill to a floating ball at the edge of the screen; click it to come back.
 - The moon / sun button (top right) switches between dark and light. Quill follows Windows by default; switching back to the system theme makes it follow again.
