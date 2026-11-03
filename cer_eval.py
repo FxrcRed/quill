@@ -1,6 +1,6 @@
 """中文识别字错率（CER）：eval_zh\*.wav 用 Whisper 认一遍，和 eval_zh\labels.txt（用户校对过的正确文字）比。
 .venv\Scripts\python.exe cer_eval.py [ctx]   （ctx：把上一句的正确文字也放进提示，模拟「带上文」）
-解码参数开关：temp0 / temp02 / beam1 / vad / nots；后处理默认和 app 一致（apply_glossary + zh_tidy），nopy / notidy 关掉。
+解码参数开关：temp0 / temp02 / beam1 / vad / nots；noprompt 不带提示；后处理默认和 app 一致（apply_glossary + zh_tidy），nopy / notidy 关掉。
 比较时去掉标点、空格，英文转小写。结果存 eval_out\cer_<时间>.txt，并和上一次比。"""
 import os, re, sys, time, wave
 from pathlib import Path
@@ -57,7 +57,7 @@ errs = chars = 0; lines = []; prev = ''; secs = []
 for name, ref in labels:
     prompt = base + (prev if ctx else '')
     a = load(D / f'{name}.wav'); t0 = time.time()
-    segs, _ = wh.transcribe(a, initial_prompt=prompt, **kw)
+    segs, _ = wh.transcribe(a, initial_prompt=None if 'noprompt' in sys.argv else prompt, **kw)  # noprompt：不带句子 + 词表提示
     hyp = ''.join(s.text for s in segs).strip(); secs.append(time.time() - t0)  # segs 是生成器，取完才算完
     if 'nopy' in sys.argv: pass  # nopy：不换词
     elif 'half1' in sys.argv or 'half2' in sys.argv: hyp = ft.m.pinyin_fix(hyp, [t for t in _t if re.fullmatch(r'[一-鿿]{2,}', t)])
