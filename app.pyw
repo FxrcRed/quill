@@ -178,7 +178,6 @@ def active_monitor():
 
 
 # ---- 快捷键名字 ----
-KEYS = {'右 Ctrl': 0xA3, 'F8': 0x77, 'F9': 0x78}  # 不放 Alt：Claude 桌面版等程序单按 Alt 松开会弹菜单、抢焦点，Ctrl+V 粘不进去（还能「录制」成 Alt）
 NAMES = {0xA5: '右 Alt', 0xA4: '左 Alt', 0xA3: '右 Ctrl', 0xA2: '左 Ctrl', 0xA1: '右 Shift', 0xA0: '左 Shift',
          0x5B: '左 Win', 0x5C: '右 Win', 0x5D: '菜单键', 0x14: '大写锁定', 0x20: '空格', 0x09: 'Tab', 0x1B: 'Esc',
          0x2D: 'Insert', 0x13: 'Pause', 0x91: 'ScrollLock', 0x0D: '回车'}
@@ -505,6 +504,11 @@ def llm_warm():
         last_llm[0] = time.time()
     except Exception as e: log('预热改错失败：', repr(e))
 
+def keep_minutes():
+    """设置里时间按钮上显示几分钟：cfg['keep'] 是 'Nm'（Ollama 的 keep_alive 写法）；不释放（-1）时显示默认 2。"""
+    k = cfg.get('keep', '2m')
+    return int(k[:-1]) if isinstance(k, str) and k.endswith('m') and k[:-1].isdigit() else 2
+
 def apply_keep():
     """释放显存的时间改了：模型正在显存里就用新时间重新计时（没载着就不去载）。"""
     try:
@@ -537,6 +541,13 @@ def ollama_status():
         return 'ok' if any(n.split(':latest')[0] == LLM_MODEL for n in names) else 'no_model'
     except Exception:
         return 'down'
+
+def llm_vram():
+    """改错模型现在占多少显存（GB）；没载着（释放了）返回 0，查不到返回 None。设置里改错服务那行说明用。"""
+    try:
+        with urllib.request.urlopen(LLM_URL + '/api/ps', timeout=2) as r:
+            return next((round(m.get('size_vram', 0) / 2**30, 1) for m in json.loads(r.read()).get('models', []) if m['name'].split(':latest')[0] == LLM_MODEL), 0)
+    except Exception: return None
 
 ollama_proc = [None]  # Quill 自己拉起的 Ollama 进程；退出时只关它，不动用户本来开着的
 ollama_owned = [False]  # 这台机器上 Ollama 只给 Quill 用：启动时已经在跑的也算 Quill 的，退出一起关
@@ -1768,9 +1779,12 @@ class Overlay:
         return im.resize((w, h), Image.BICUBIC).convert('RGBA')
 
     def backdrop_rect(self):
-        """浮窗底边往上 TALL 那么高、和浮窗一样宽的一块（屏幕物理像素）。"""
+        """浮窗底边往上（放顶部时顶边往下）TALL 那么高、和浮窗一样宽的一块（屏幕物理像素）。"""
         wa, p = self.wa, lambda v: round(v * self.s)  # 不用 px：接着说下一句时在后台线程里调，不能动全局 S
-        w = p(self.W + 2 * self.M); x = wa.left + (wa.right - wa.left - w) // 2; bottom = wa.bottom + p(self.M) - p(18)
+        w = p(self.W + 2 * self.M); x = wa.left + (wa.right - wa.left - w) // 2
+        if cfg.get('ov_pos') == 'top':
+            top = wa.top - p(self.M) + p(18); return (x, top, x + w, top + p(self.TALL))
+        bottom = wa.bottom + p(self.M) - p(18)
         return (x, bottom - p(self.TALL), x + w, bottom)
 
     def refresh_backdrop(self, hide_self=False):
@@ -1787,8 +1801,9 @@ class Overlay:
         except Exception: self.backdrop = (r, None)  # 截不了（锁屏 / UAC 那种安全桌面）：退回半透明纯色
         im = self.backdrop[1]
         if im is None: self.tone = 'dark' if THEME == 'light' else 'light'
-        else:  # 只看最底下浮窗会盖住的那一段（最矮的样子）
-            low = im.crop((0, im.height - round((self.ROW_H + 2 * self.M) * self.s), im.width, im.height)).convert('L')
+        else:  # 只看浮窗最矮时会盖住的那一段（底部放最下面，顶部放最上面）
+            k = round((self.ROW_H + 2 * self.M) * self.s)
+            low = im.crop((0, 0, im.width, k) if cfg.get('ov_pos') == 'top' else (0, im.height - k, im.width, im.height)).convert('L')
             self.tone = 'dark' if np.asarray(low).mean() > 150 else 'light'
 
     def glass(self, box):
@@ -1883,7 +1898,8 @@ class Overlay:
     def blit(self, level=0.0):
         c = self.cards[self.ck]; img = c['under'].copy()
         wa = self.wa
-        x, y = wa.left + (wa.right - wa.left - img.width) // 2, wa.bottom - img.height + px(self.M) - px(18)
+        x = wa.left + (wa.right - wa.left - img.width) // 2
+        y = wa.top - px(self.M) + px(18) if cfg.get('ov_pos') == 'top' else wa.bottom - img.height + px(self.M) - px(18)
         geo = (img.width, img.height, x, y)
         g = self.glass((x, y, x + img.width, y + img.height)); g.putalpha(ImageChops.multiply(g.getchannel('A'), c['face']))
         img.alpha_composite(g)  # 不能用 paste(玻璃, 蒙版)：会把投影层的深色 RGB 混进圆角边缘，一圈黑边
@@ -2257,7 +2273,7 @@ class App:
         self.chrome = Chrome(root, taskbar=True, R=48)  # 卡片 r28 + 离边 20
         root.protocol('WM_DELETE_WINDOW', quit_app)
         self.state, self.sil_since, self.shown, self.mic = 'loading', time.time(), 0.0, 'ok'
-        self.notice_until, self.ol_last, self.ol_starting = 0.0, None, 0.0
+        self.notice_until, self.ol_last, self.ol_starting, self.vram = 0.0, None, 0.0, None
         self.first_shown = False
         self.setup_proc = None  # 正在跑的 setup.ps1（设置里「下载 / 安装 / 修复」）
         self.settings = self.check_win = self.history = self.words = self.pop = None
@@ -2665,6 +2681,8 @@ class App:
         while True:
             st = ollama_status()
             if st == 'down': st = ensure_ollama()  # 没开就自己拉起，不用用户管
+            v = llm_vram() if st == 'ok' else None
+            if v != self.vram: self.vram = v; post('vram')
             post('ollama', st); time.sleep(8)
 
     def idle(self):
@@ -2736,6 +2754,7 @@ class App:
                 if st == 'down' and time.time() - self.ol_starting > 30: self.show_notice(L('改错服务没开：去设置里点「启动」。', 'The cleanup service is off: click Start in Settings.'), 'warn')
             changed, self.ol_last = st != self.ol_last, st
             if changed: self.refresh_settings(); self.update_dot()
+        elif kind == 'vram': self.refresh_settings()
         elif kind == 'key_recorded':
             if self.alive('settings'): self.settings.key_recorded(a[0])
         elif kind == 'mode':  # Whisper 载完 / 载不了：第一次启动有缺的东西就自己打开设置
@@ -2752,14 +2771,18 @@ class Settings:
 
     def __init__(self, app):
         self.app, self.recording = app, False
-        self.key_tip, self.tip_state = ('', SUB), 'ok'
+        self.tip_state, self.editing_keep = 'ok', False
         self.Wd = self.W
         self.w = sub_window(app, '设置', self.Wd)
-        self.n = Neu(self.w, self.Wd, 600); self.n.c.pack(); self.build()
+        self.n = Neu(self.w, self.Wd, 600); self.n.c.pack()
+        self.keep_ent = e = tk.Entry(self.n.c, bd=0, relief='flat', highlightthickness=0, bg=INSET, fg=TEXT, insertbackground=TEXT, font=fnt(12), justify='center')
+        e.bind('<Return>', lambda _: self.save_keep()); e.bind('<Escape>', lambda _: (setattr(self, 'editing_keep', False), self.build()))
+        self.build()
         self.w.bind('<MouseWheel>', lambda e: self.scroll(-int(e.delta / 120) * 3))
 
     # 每一块：先算高度（要先画卡片底再画内容），返回 (高度, 画法)
     def sec_asr(self, n, x, y, w, draw):
+        if eng.wh_state == 'ok': return 0  # 正常时不显示，出问题才出来
         h = 101  # 写法和改错服务那张一样：标题行右边状态点，下面一行说明；缺东西时右边一个按钮跑 setup.ps1。100 时 150% 缩放（S=1.4985）下面「标准 4B」字偏 1.5px，ui_test 报没对齐
         if not draw: return h
         st = eng.wh_state; lv, _, act = readiness(self.app.ol_last)[0]
@@ -2795,34 +2818,8 @@ class Settings:
         self.bar = n.c.create_line(px(self.bar_x), px(track_y + 5), px(self.bar_x), px(track_y + 5), width=px(4), fill=INK, capstyle='round')
         return h
 
-    def sec_key(self, n, x, y, w, draw):
-        keys = list(KEYS.values()) + ([cfg['hotkey']] if cfg['hotkey'] not in KEYS.values() else [])
-        cols, gap = 4, 10; cw = (w - 40 - gap * (cols - 1)) / cols  # 4 列网格：每个一样宽、间距一样
-        chips = [(vk, x + 20 + (i % cols) * (cw + gap), (i // cols) * 46, cw) for i, vk in enumerate(keys + [None])]
-        cy = chips[-1][2]
-        chip_y = y + 56; h = chip_y + cy + BTN_H + 20 - y  # 提示字放在标题那行右边
-        if not draw: return h
-        self.label(n, x, y, w, h, L('快捷键', 'Hotkey'))
-        for vk, cx, dy, cw in chips:
-            if vk is None:
-                self.rec_btn = n.button(cx, chip_y + dy, cw, BTN_H, text=L('请按键…', 'PRESS…') if self.recording else L('录制', 'RECORD'), size=12,
-                                        color=ORANGE if self.recording else TEXT, cmd=self.record)
-            else:
-                on = vk == cfg['hotkey']
-                n.button(cx, chip_y + dy, cw, BTN_H, text=key_name(vk), size=12, on=on, cmd=lambda vk=vk: self.set_hot(vk))
-        self.ktip = n.text(x + w - 20, y + 25, self.key_tip[0], 11, self.key_tip[1], anchor='ne', width=w - 110, lines=1)
-        return h
-
-    def sec_mode(self, n, x, y, w, draw):
-        h = 62  # 一排按钮，上下各留 14
-        if not draw: return h
-        self.label(n, x, y, w, h, L('说中文时', 'When speaking Chinese'), mid=True)
-        for i, (m, name, _) in enumerate(self.ZH_OUTS):
-            n.button(btn_x(x, w, i, 2), y + 14, BTN_W, BTN_H, text=L(*name), size=12, on=m == cfg.get('zh_out', 'en'), cmd=lambda m=m: self.set_zh_out(m))
-        return h
-
     def sec_ol(self, n, x, y, w, draw):
-        h = 220  # 常用词在主页；改错模型一排（和「说中文时」那排一样右对齐）+ 释放显存一排
+        h = 192  # 标题行（右边状态点；缺东西 / 没运行时状态字左移，右边一个按钮）+ 一行说明（模型 · 在哪跑 · 占多少显存）+ 改错模型一排 + 释放显存时间一排
         if not draw: return h
         app = self.app; st = app.ol_last
         if st == 'down' and time.time() - app.ol_starting < 30: st = 'starting'
@@ -2831,35 +2828,59 @@ class Settings:
         if not ollama_installed(): st = 'none'
         text, color = {'none': (L('没装 Ollama', 'No Ollama'), RED), 'ok': (L('正常', 'Running'), GREEN), 'no_model': (L(f'缺少 {LLM_MODEL}', f'Missing {LLM_MODEL}'), RED), 'down': (L('没有运行', 'Not running'), ORANGE),
                        'starting': (L('启动中…', 'Starting…'), ORANGE), None: (L('检查中…', 'Checking…'), SUB)}[st]
-        n.text(x + w - 20, y + 22, '● ' + text, 12, color, anchor='ne')
-        on_gpu = llm_opts()[1]  # 说明只留一行：在哪跑 + 上一句用了几秒
-        info = f'Ollama · {LLM_MODEL} · ' + (L('显卡', 'GPU') if on_gpu else 'CPU' + (L('（显卡慢，暂时换）', ' (GPU slow, for now)') if LLM_GPU_LAYERS else ''))
+        bx = btn_x(x, w, 0, 1)
+        if act or st == 'down':
+            n.button(bx, y + 14, BTN_W, BTN_H, text=L('进行中', 'RUNNING…') if act and app.setup_proc else act or L('启动', 'START'), size=12,
+                     color=SUB if act and app.setup_proc else TEXT, cmd=app.run_setup if act else self.start_ol)
+            n.text(bx - 12, y + 14 + BTN_H / 2 - ink_up(text, 12), '● ' + text, 12, color, anchor='e')
+        else: n.text(x + w - 20, y + 22, '● ' + text, 12, color, anchor='ne')
+        on_gpu, v = llm_opts()[1], app.vram
+        info = f'{LLM_MODEL} · ' + (L('显卡', 'GPU') if on_gpu else 'CPU' + (L('（显卡慢，暂时换）', ' (GPU slow, for now)') if LLM_GPU_LAYERS else ''))
+        if v is not None: info += L(f' · 占显存 {v} GB', f' · {v} GB VRAM') if v else L(' · 已释放显存', ' · unloaded')
         if llm_stat: info += L(f' · 上一句 {llm_stat["secs"]:.1f} 秒', f' · last {llm_stat["secs"]:.1f} s')
-        n.text(x + 20, y + 56, info, 11, SUB, width=w - (130 if act or st == 'down' else 40), lines=1)
-        if act: self.setup_btn(n, x, w, y, act)
-        elif st == 'down': n.button(btn_x(x, w, 0, 1), y + 46, BTN_W, BTN_H, text=L('启动', 'START'), size=12, cmd=self.start_ol)
-        t = L('改错模型', 'Model'); n.text(x + 20, y + 86 + BTN_H / 2 - ink_up(t, 12), t, 12, TEXT, anchor='w')  # 和右边那排按钮对着中线
+        n.text(x + 20, y + 56, info, 11, SUB, width=w - 40, lines=1)
+        self.row_label(n, x, y + 86, L('改错模型', 'Model'))
         for i, (k, name) in enumerate(LLM_MODELS):
             n.button(btn_x(x, w, i, 2), y + 86, BTN_W, BTN_H, text=L(*name), size=12, on=k == LLM_MODEL, cmd=lambda k=k: self.set_llm(k))
-        n.text(x + 20, y + 138, L('不用时释放显存', 'Free GPU memory when idle'), 12, TEXT)
-        cols, gap = len(KEEPS), 10; cw = (w - 40 - gap * (cols - 1)) / cols  # 和快捷键那排一样：等宽、等间距
-        for i, (k, name) in enumerate(KEEPS):
-            n.button(x + 20 + i * (cw + gap), y + 166, cw, BTN_H, text=L(*name), size=12, on=k == cfg.get('keep', '2m'), cmd=lambda k=k: self.set_keep(k))
+        self.row_label(n, x, y + 138, L('释放显存时间', 'Free GPU after'))
+        keep, mins = cfg.get('keep', '2m'), keep_minutes()
+        if self.editing_keep:  # 点了时间按钮：原地换成凹下去的输入框，打分钟数回车
+            n.inset(btn_x(x, w, 0, 2), y + 138, BTN_W, BTN_H, BTN_H / 2, d=ELEV * INSET_K)
+            n.c.create_window(px(btn_x(x, w, 0, 2) + BTN_W / 2), px(y + 138 + BTN_H / 2), window=self.keep_ent, width=px(BTN_W - 24))
+        else: n.button(btn_x(x, w, 0, 2), y + 138, BTN_W, BTN_H, text=L(f'{mins} 分钟', f'{mins} MIN'), size=12, on=keep != -1, cmd=self.edit_keep)
+        n.button(btn_x(x, w, 1, 2), y + 138, BTN_W, BTN_H, text=L('不释放', 'NEVER'), size=12, on=keep == -1, cmd=lambda: self.set_keep(-1))
         return h
 
-    def sec_ui(self, n, x, y, w, draw):
-        h = 62  # 和「说中文时」一样：一排两个按钮；很少改，放最下面。按钮字各用自己的语言，哪种界面下都认得出
+    ROWS = 4  # 合起来那张卡片：快捷键 / 说中文时 / 浮窗位置 / 界面语言，每排一个标题 + 右对齐的按钮
+
+    def sec_misc(self, n, x, y, w, draw):
+        h = 14 + Settings.ROWS * BTN_H + (Settings.ROWS - 1) * 18 + 14
         if not draw: return h
-        self.label(n, x, y, w, h, L('界面语言', 'Interface'), mid=True)
+        n.raised(x, y, w, h, 28, d=ELEV)
+        ry = lambda i: y + 14 + i * (BTN_H + 18)
+        self.row_label(n, x, ry(0), L('快捷键', 'Hotkey'))  # 一个按钮：显示现在的键，点了就录新键
+        self.rec_btn = n.button(btn_x(x, w, 1, 2), ry(0), BTN_W, BTN_H, text=L('请按键…', 'PRESS…') if self.recording else key_name(cfg['hotkey']), size=12,
+                                color=ORANGE if self.recording else TEXT, cmd=self.record)
+        self.row_label(n, x, ry(1), L('说中文时', 'When speaking Chinese'))
+        for i, (m, name, _) in enumerate(self.ZH_OUTS):
+            n.button(btn_x(x, w, i, 2), ry(1), BTN_W, BTN_H, text=L(*name), size=12, on=m == cfg.get('zh_out', 'en'), cmd=lambda m=m: self.set_zh_out(m))
+        self.row_label(n, x, ry(2), L('浮窗位置', 'Overlay'))  # 底部浮窗挡输入框时换到顶部
+        for i, (v, name) in enumerate((('bottom', ('底部', 'BOTTOM')), ('top', ('顶部', 'TOP')))):
+            n.button(btn_x(x, w, i, 2), ry(2), BTN_W, BTN_H, text=L(*name), size=12, on=v == cfg.get('ov_pos', 'bottom'), cmd=lambda v=v: self.set_pos(v))
+        self.row_label(n, x, ry(3), L('界面语言', 'Interface'))  # 按钮字各用自己的语言，哪种界面下都认得出
         for i, (v, name) in enumerate((('zh', '中文'), ('en', 'ENGLISH'))):
-            n.button(btn_x(x, w, i, 2), y + 14, BTN_W, BTN_H, text=name, size=12, on=v == ui_lang(), cmd=lambda v=v: self.set_ui(v))
+            n.button(btn_x(x, w, i, 2), ry(3), BTN_W, BTN_H, text=name, size=12, on=v == ui_lang(), cmd=lambda v=v: self.set_ui(v))
         return h
+
+    def row_label(self, n, x, by, t):
+        """卡片里一排的标题：和同排按钮（顶边 by）对着中线。"""
+        n.text(x + 20, by + BTN_H / 2 - ink_up(t, 12), t, 12, TEXT, anchor='w')
 
     @classmethod
     def full_height(cls):
         """完整设置窗口的高度（记录窗口也用它，两个窗口一样高）。各块不画只量高度时用不到 self。"""
-        secs = (cls.sec_asr, cls.sec_mic, cls.sec_key, cls.sec_mode, cls.sec_ol, cls.sec_ui)
-        return 92 + sum(f(None, None, 20, 0, 360, False) for f in secs) + 20 * (len(secs) - 1) + 20  # 最后一张卡片离底边 20 = 卡片圆角和窗口圆角同心
+        hs = [h for f in (cls.sec_asr, cls.sec_mic, cls.sec_ol, cls.sec_misc) if (h := f(None, None, 20, 0, 360, False))]  # 0 = 这一块不显示
+        return 92 + sum(hs) + 20 * (len(hs) - 1) + 20  # 最后一张卡片离底边 20 = 卡片圆角和窗口圆角同心
 
     @classmethod
     def view_height(cls):
@@ -2870,15 +2891,14 @@ class Settings:
     def scroll(self, k):
         self.n.c.yview('scroll', k, 'units'); self.sbar.update()
 
-    def label(self, n, x, y, w, h, name, mid=False):
-        """卡片底 + 标题。mid：只有一排按钮的卡片（说中文时 / 界面语言），标题和按钮对着卡片中线居中。"""
+    def label(self, n, x, y, w, h, name):
+        """卡片底 + 标题。"""
         n.raised(x, y, w, h, 28, d=ELEV)
-        if mid: n.text(x + 20, y + h / 2 - ink_up(name, 12), name, 12, TEXT, anchor='w')
-        else: n.text(x + 20, y + 24, name, 12, TEXT)
+        n.text(x + 20, y + 24, name, 12, TEXT)
 
     def build(self):
         n, app = self.n, self.app
-        secs = [getattr(self, 'sec_' + s) for s in ('asr', 'mic', 'key', 'mode', 'ol', 'ui')]
+        secs = [getattr(self, 'sec_' + s) for s in ('asr', 'mic', 'ol', 'misc')]
         x, w, y0, gap = 20, 360, 92, 20
         H = self.full_height()
         V, oy = self.view_height(), n.c.canvasy(0) / S  # 改了设置重画时停在原来滚到的位置
@@ -2887,7 +2907,8 @@ class Settings:
         n.button(299, 33, 30, 30, icon=I_CHECK, size=9, color=ICON_C, cmd=app.open_checks)  # 自检
         close_btn(n, self.Wd, self.w.withdraw)
         y = y0
-        for s in secs: y += s(n, x, y, w, True) + gap
+        for s in secs:
+            if (h := s(n, x, y, w, True)): y += h + gap
         self.sbar = ScrollBar(n, H, V)
         n.commit()
         n.c.tag_raise(self.sbar.thumb); n.c.yview_moveto(oy / H); self.sbar.update()
@@ -2903,10 +2924,18 @@ class Settings:
         cfg['device'] = None if name == L('系统默认', 'System default') else name; save_cfg()
         self.app.sil_since = time.time(); eng.open(cfg['device']); self.app.refresh_settings()
 
-    def set_hot(self, vk):
-        self.app.set_key(vk); self.key_tip = ('', SUB); self.build()
+    def edit_keep(self):
+        self.editing_keep = True; self.build()
+        e = self.keep_ent; e.delete(0, 'end'); e.insert(0, str(keep_minutes())); e.select_range(0, 'end'); e.focus_set()
+
+    def save_keep(self):
+        t = self.keep_ent.get().strip()
+        self.editing_keep = False
+        if t.isdigit() and int(t) > 0: self.set_keep(f'{int(t)}m')
+        else: self.build()
 
     def set_keep(self, k):
+        self.editing_keep = False
         cfg['keep'] = k; save_cfg(); log('释放显存：', k); self.app.refresh_settings()
         threading.Thread(target=apply_keep, daemon=True).start()
 
@@ -2917,6 +2946,9 @@ class Settings:
     def set_zh_out(self, o):
         cfg['zh_out'] = o; save_cfg(); log('说中文时输出', o); self.app.refresh_settings()
         if cfg['lang'] != 'en': threading.Thread(target=llm_hello, daemon=True).start()  # 换了提示词，同上
+
+    def set_pos(self, v):
+        cfg['ov_pos'] = v; save_cfg(); log('浮窗位置：', v); self.app.overlay.hide(); self.app.refresh_settings()
 
     def set_ui(self, v):
         """切界面语言：和系统一样时清掉，回到跟随系统（同 toggle_theme）；所有窗口按新语言重建。说话 / 改错时不切。"""
@@ -2930,8 +2962,7 @@ class Settings:
 
     def record(self):
         if self.recording: return
-        self.recording = True; self.rec_btn.set(text=L('请按键…', 'PRESS…'), color=ORANGE)
-        self.n.c.itemconfigure(self.ktip, text=L('现在按一下你想用的键（10 秒内）', 'Press the key you want (within 10 s)'), fill=ORANGE)
+        self.recording = True; self.rec_btn.set(text=L('请按键…', 'PRESS…'), color=ORANGE)  # 10 秒内没按就变回原来的键
         def run():
             eng.key_paused = True; vk = eng.wait_any_key(10); time.sleep(0.3); eng.key_paused = False
             post('key_recorded', vk)
@@ -2939,8 +2970,7 @@ class Settings:
 
     def key_recorded(self, vk):
         self.recording = False
-        if vk is None: self.key_tip = (L('没收到按键，再点一次「录制」。', 'No key received. Click Record again.'), ORANGE)
-        else: self.app.set_key(vk); self.key_tip = (L(f'已改成「{key_name(vk)}」', f'Changed to {key_name(vk)}'), GREEN)
+        if vk is not None: self.app.set_key(vk)
         self.build()
 
     def start_ol(self):
