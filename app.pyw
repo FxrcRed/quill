@@ -14,13 +14,13 @@ HERE = Path(__file__).parent
 TITLE = 'Quill'
 LLM_URL = 'http://127.0.0.1:11434'
 LLM_MODEL = 'qwen3:4b'  # 设置「改错模型」里选（cfg['llm']）：4B 约 2.9GB 显存、快约 35%；8B 约 4.5GB，很乱的话（重说、改口）改得更准
-LLM_MODELS = (('qwen3:4b', ('标准 4B', 'Fast 4B')), ('qwen3:8b', ('高质量 8B', 'Best 8B')))
+LLM_MODELS = (('qwen3:4b', ('标准 4B', 'FAST 4B')), ('qwen3:8b', ('高质量 8B', 'BEST 8B')))
 WHISPER_TIMEOUT = 8   # 松开后 Whisper 整段识别最多等几秒，超时 / 出错就用说话时最后一次预览的结果
 PREVIEW_MIN = 1.5     # 说话不到这么久不出预览：Whisper 对刚开口的半个字常编出「请订阅点赞」「优优独播剧场」这类训练数据里的片尾字幕
 PHANTOM = re.compile(r'订阅|点赞|打赏|明镜|独播剧场|字幕志愿|字幕由|Amara|谢谢观看|感谢观看|请不吝|Subtitles by|Thanks for watching', re.I)
 PREVIEW_EVERY = 1.0  # 说话时每隔几秒用 Whisper 把目前为止的整段认一遍，给浮窗看
 LLM_GPU_LAYERS = -1   # （启动时按有没有 NVIDIA 显卡重新定，见 nvidia_gpu）-1 = 放显卡（Ollama 自动，一句约 1.5 秒）；0 = 全用 CPU（约 5~8 秒）。显卡被别的程序占着变慢时会自动临时改用 CPU
-KEEPS = (('2m', ('2 分钟', '2 min')), ('10m', ('10 分钟', '10 min')), ('30m', ('30 分钟', '30 min')), (-1, ('不释放', 'Never')))  # 不用多久后把模型从显存卸掉（约 5~6GB），设置里选；一直说话时每次都续上，不会卸
+KEEPS = (('2m', ('2 分钟', '2 MIN')), ('10m', ('10 分钟', '10 MIN')), ('30m', ('30 分钟', '30 MIN')), (-1, ('不释放', 'NEVER')))  # 不用多久后把模型从显存卸掉（约 5~6GB），设置里选；一直说话时每次都续上，不会卸
 SHOW_SECONDS = 3      # 底部浮窗的结果自动消失；点一下固定，再点关闭
 RATE = 16000
 SELFTEST = '--selftest' in sys.argv
@@ -87,7 +87,7 @@ THEMES = {
                   GREEN='#2F9E5B', ORANGE='#D9822B', RED='#D64541', YELLOW='#E5B93C',
                   PRESSED='#D8D8D8', RULE='#DCDCDC', THUMB='#9A9A9E', BALL='#EEEEF0', SHADOW=(40, 40, 48),
                   BARS=('#4A4A50', '#0E0E10'), BAR_ERR=('#FF9186', '#D64541'), GLASS=(247, 247, 249)),
-    'dark': dict(BG='#1C1C1E', CARD='#262628', FACE='#303033', INSET='#18181A', LIGHT='#3C3C40', DARK='#000000',
+    'dark': dict(BG='#1C1C1E', CARD='#262628', FACE='#303033', INSET='#18181A', LIGHT='#38383B', DARK='#070708',  # 纯黑 + #3C3C40 用户嫌凹凸太强，#0E0E10 又嫌阴影浅，取中间（2026-11-03）
                  INK='#F2F2F7', TEXT='#D1D1D6', SUB='#8E8E93', TICK='#3A3A3C', TICK_MAJ='#7C7C80', ICON_C='#AEAEB2',
                  GREEN='#30D158', ORANGE='#FF9F0A', RED='#FF453A', YELLOW='#FFD60A',
                  PRESSED='#3A3A3C', RULE='#3A3A3C', THUMB='#636366', BALL='#2C2C2E', SHADOW=(0, 0, 0),
@@ -204,6 +204,7 @@ def log(*a):
 _SYS_UI = 'zh' if ctypes.windll.kernel32.GetUserDefaultUILanguage() & 0x3FF == 0x04 else 'en'  # Windows 显示语言是中文就用中文界面
 def ui_lang(): return cfg.get('ui') or _SYS_UI  # 界面语言：设置里选过就用选的，没选跟随系统
 def L(zh, en): return en if ui_lang() == 'en' else zh  # 界面上的字：中英写在一起
+LANGS = {'auto': 'AUTO', 'en': 'EN', 'zh': 'CN'}  # 说哪种语言，主页按钮按这个顺序循环
 
 cfg = {'hotkey': 0xA3, 'device': None, 'lang': 'auto', 'zh_out': 'en', 'keep': '2m', 'hist': True, 'hist_days': 0}  # hist：存不存记录；hist_days：只留最近几天（0 = 永久）；keep：不用多久释放显存（见 KEEPS）；lang：auto 自动 / en 说英文 / zh 说中文；zh_out：说中文时出英文 / 出中文
 try: cfg.update(json.loads((HERE / 'settings.json').read_text(encoding='utf-8')))
@@ -956,7 +957,7 @@ def mode_summary():
     return 'warn', eng.load_error
 
 HIST = HERE / 'history.txt'
-HIST_DAYS = ((7, ('7 天', '7 days')), (30, ('30 天', '30 days')), (0, ('永久', 'Forever')))
+HIST_DAYS = ((7, ('7 天', '7 DAYS')), (30, ('30 天', '30 DAYS')), (0, ('永久', 'FOREVER')))
 
 def save_history(raw, fixed, zh):
     if not cfg.get('hist', True): return  # 用户关了记录：什么都不写
@@ -1276,6 +1277,11 @@ class CardBtn:
     def set_down(self, v): self.n.c.itemconfigure(self.n.bg, image=self.ph[v])
 
 
+def ink_up(text, size):
+    """思源黑体里汉字、大写字母、数字的墨迹比行框中心低（150% 下实测：12 号 +1~1.5px，11 号 0~1px），竖直居中时往上挪这么多（逻辑像素）。
+    带小写的（Run self-test）不挪。按钮里的字、和按钮同一行的标签都用它。"""
+    return 0 if not text or any(ch.islower() for ch in text) else 0.7 if size >= 12 else 0.35
+
 class Btn:
     """软 UI 按钮。kind：raised 凸起 / inset 凹槽（底栏「设置」）/ ring 描边小圆章。
     on=True 是选中（画成凹下去）。live=True 的按钮整张是贴图，可以隐藏、换颜色。"""
@@ -1317,9 +1323,11 @@ class Btn:
         c = self.n.c
         for it in self.lab: c.delete(it)
         x, y, w, h = self.box; cy = px(y + h / 2)
+        up = ink_up(self.text, self.size)
+        ty = (y + h / 2 - up) * S if up else cy  # 按小数算，别先取整
         fi, ft = fnt(self.size + 1, family=ICON), fnt(self.size, self.weight, self.family)
         if self.align == 'left':
-            self.lab = [c.create_text(px(x + 18), cy, text=fit(self.text, ft, px(w - 60)), font=ft, fill=self.color, anchor='w', tags='txt')]
+            self.lab = [c.create_text(px(x + 18), ty, text=fit(self.text, ft, px(w - 60)), font=ft, fill=self.color, anchor='w', tags='txt')]
             if self.icon: self.lab.append(c.create_text(px(x + w - 32), cy, text=self.icon, font=fi, fill=self.color, anchor='center', tags='txt'))
         else:
             wi, wt = fi.measure(self.icon) if self.icon else 0, ft.measure(self.text) if self.text else 0
@@ -1327,7 +1335,7 @@ class Btn:
             self.lab = []
             nx, ny = ICON_NUDGE.get(self.icon, (0, 0))
             if self.icon: self.lab.append(c.create_text(left + wi / 2 + px(nx), cy + px(ny), text=self.icon, font=fi, fill=self.color, anchor='center', tags='txt'))
-            if self.text: self.lab.append(c.create_text(left + wi + gap + wt / 2, cy, text=self.text, font=ft, fill=self.color, anchor='center', tags='txt'))
+            if self.text: self.lab.append(c.create_text(left + wi + gap + wt / 2, ty, text=self.text, font=ft, fill=self.color, anchor='center', tags='txt'))
         self.sync()
 
     def sync(self):
@@ -1355,46 +1363,6 @@ class Btn:
     def destroy(self):
         for it in [self.tile, *self.lab]:
             if it is not None: self.n.c.delete(it)
-
-
-class Switch:
-    """一排挨着的小胶囊（主页 EN / 中）：选中的凹下去、文字黑；其他凸起、文字灰。几个胶囊画在同一张贴图里，挨得近也不会互相盖住阴影。
-    opts = ((值, 文字), ...)，点了调 cmd(值)；w 是一个数（都一样宽）或每个胶囊一个宽度。"""
-    def __init__(self, n, x, y, w, h, gap, opts, value, cmd):
-        self.ws = list(w) if isinstance(w, (tuple, list)) else [w] * len(opts)
-        self.n, self.x, self.y, self.h, self.gap, self.opts, self.value, self.on_pick = n, x, y, h, gap, opts, value, cmd
-        self.visible, self.hold, self.hit, self.pressed, self.down, self.tile, self.lab = True, None, None, None, None, None, []
-        self.cmd = lambda: self.hit and self.hit == self.pressed and self.on_pick(self.hit)  # 在哪个上按下就得在哪个上松开
-
-    def box(self, i): return self.x + sum(self.ws[:i]) + i * self.gap, self.y, self.ws[i], self.h
-
-    def make(self):
-        pad = 12; X0, Y0 = math.floor((self.x - pad) * S), math.floor((self.y - pad) * S)
-        W = sum(self.ws) + (len(self.opts) - 1) * self.gap
-        self.base = self.n.img.crop((X0, Y0, math.ceil((self.x + W + pad) * S), math.ceil((self.y + self.h + pad) * S)))
-        self.ox, self.oy = self.x - X0 / S, self.y - Y0 / S
-        self.tile = self.n.c.create_image(X0, Y0, anchor='nw'); self.render()
-
-    def render(self):
-        im = self.base.copy(); c = self.n.c
-        for it in self.lab: c.delete(it)
-        self.lab = []
-        for i, (v, t) in enumerate(self.opts):
-            x, y, w, h = self.box(i); lx, ly = x - self.x + self.ox, y - self.y + self.oy
-            if v == self.value or v == self.down:  # 和按钮按下去同一个逻辑（Btn.draw）：先画凸起的边，再在里面压出凹面，所以外沿还留着一圈凸边
-                raised(im, lx, ly, w, h, h / 2, ELEV, FACE); inset(im, lx, ly, w, h, h / 2, ELEV * INSET_K)
-            else: raised(im, lx, ly, w, h, h / 2, ELEV, FACE)
-            self.lab.append(c.create_text(px(x + w / 2), px(y + h / 2 - 1), text=t, font=fnt(11), fill=ICON_C, tags='txt'))  # -1：思源黑体的大写字母墨迹比字框中心低约 1 像素（PIL 量的）
-        self.ph = ImageTk.PhotoImage(im); c.itemconfigure(self.tile, image=self.ph)
-
-    def contains(self, x, y):
-        self.hit = next((v for i, (v, _) in enumerate(self.opts) if self.box(i)[0] <= x <= self.box(i)[0] + self.ws[i] and self.y <= y <= self.y + self.h), None)
-        return self.hit is not None
-
-    def set_down(self, d):
-        if d: self.pressed = self.hit
-        self.down = self.hit if d else None; self.render()
-    def select(self, v): self.value = v; self.render()
 
 
 CHROMES = []
@@ -2253,8 +2221,8 @@ class App:
         self.sub = n.text(200, 416, '', 11, SUB, anchor='n'); n.c.itemconfigure(self.sub, justify='center')  # 提示放圆盘下面居中
         n.raised(200 - 124, 148, 248, 248, 124, d=ELEV, fill=FACE)  # 圆盘本身是凸起的大圆（能点 = 凸起），整页的视觉主角；按住时凹下去
         self.dial = Dial(n, 200, 272, 124, (lambda: eng.start('mouse'), eng.stop))
-        # 说哪种语言：三个小胶囊（自动 / 英 / 中）和 READY 同一行、右边对齐卡片内边（367）；选中的凹下去
-        self.lang_sw = Switch(n, 245, 105, (46, 30, 30), 30, 8, (('auto', 'AUTO'), ('en', 'EN'), ('zh', 'CN')), cfg['lang'], self.set_lang); n.btns.append(self.lang_sw)
+        # 说哪种语言：一个按钮显示现在的，按一下换下一个（AUTO → EN → CN 循环）；和 READY 同一行、右边对齐卡片内边（367）；50×30 和词卡的加入 / 修改一样大
+        self.lang_btn = n.button(317, 105, 50, 30, text=LANGS[cfg['lang']], size=11, color=ICON_C, cmd=self.next_lang)
         (hx, hw), (wx, ww), (sx, sw) = NAV
         n.button(hx, 472, hw, 30, r=15, d=ELEV, cmd=self.open_history)
         n.button(wx, 472, ww, 30, r=15, d=ELEV, cmd=self.edit_words)
@@ -2265,11 +2233,11 @@ class App:
         self.overlay = Overlay(self); self.ball = Ball(self)
         self.set_state(self.state)
 
-    def rebuild(self, theme, center=None, pos=None):
+    def rebuild(self, theme, center=None, pos=None, cover=False):
         """换了深浅色或缩放：所有窗口按新的配色 / S 重画，开着的子窗口重新打开。
         换主题时先用 Wipe 把旧画面盖住，重建完它再退场（center 见 Wipe），不闪；换缩放不盖，pos 见 on_drop。"""
         hw = [c.hwnd for c in CHROMES if user32.IsWindowVisible(c.hwnd) and not user32.IsIconic(c.hwnd)]
-        try: wipe = Wipe(self, hw, center) if hw and theme != THEME else None
+        try: wipe = Wipe(self, hw, center) if hw and (theme != THEME or cover) else None  # cover：没换主题也盖（切界面语言）
         except Exception: wipe = None; log('换主题动画出错', traceback.format_exc())
         r = ctypes.wintypes.RECT(); user32.GetWindowRect(self.chrome.hwnd, ctypes.byref(r))
         log(f'界面重建：{THEME} → {theme}，主窗口 {rect(r)}')
@@ -2473,7 +2441,7 @@ class App:
         for i, ((hd, c, k, src), (a, b), r, m) in enumerate(zip(show, rows, rh, mm)):
             if i: wn.c.create_line(px(x), px(ry - 8), px(x + w), px(ry - 8), fill=RULE, width=1)
             ty = ry + (m - lh12) / 2; wn.text(x, ty, a[0], 12, SUB); wn.text(x + f12.measure(a[0] + ' ') / S, ty, a[1], 12, TEXT)
-            for bx, bw, t, fn in ((BH + 112, 50, L('加入', 'Add'), self.add_word), (BH + 56, 50, L('修改', 'Edit'), self.fix_word)):  # 两列等宽 50、间距 6
+            for bx, bw, t, fn in ((BH + 112, 50, L('加入', 'ADD'), self.add_word), (BH + 56, 50, L('修改', 'EDIT'), self.fix_word)):  # 两列等宽 50、间距 6
                 wn.button(x + w - bx, ry + (m - BH) / 2, bw, BH, text=t, size=11, d=ELEV, color=ICON_C, cmd=lambda fn=fn, hd=hd, c=c: fn(hd, c))
             wn.button(x + w - BH, ry + (m - BH) / 2, BH, BH, icon=I_CLOSE, size=8, d=ELEV, color=ICON_C, cmd=lambda hd=hd, c=c: self.ignore_word(hd, c))  # 忽略 = 一个叉（圆），右边缘 = 卡片内边 20
             wn.text(x, ry + m + 12, '\n'.join(b), 11, SUB)  # 灰字和上面的文字同一左边缘
@@ -2513,11 +2481,14 @@ class App:
     def set_key(self, vk):
         cfg['hotkey'] = vk; save_cfg(); log('快捷键改为', key_name(vk)); self.refresh_sub()
 
+    def next_lang(self):
+        order = list(LANGS); self.set_lang(order[(order.index(cfg['lang']) + 1) % len(order)])
+
     def set_lang(self, lang):
         """主页 AUTO / EN / CN：切换说哪种语言（Whisper 按 language=en / zh 认；auto 先按中文认，认出来没有汉字就当英文）。"""
         if cfg['lang'] == lang: return
         cfg['lang'] = lang; save_cfg(); log('说话语言：', lang)
-        self.lang_sw.select(lang)
+        self.lang_btn.set(text=LANGS[lang])
         threading.Thread(target=llm_hello, daemon=True).start()  # 两种语言的提示词不一样：先用新提示词跑一次，切完说的第一句不慢
         if self.state in ('loading', 'ready', 'error'): self.set_state(eng.idle_state())
 
@@ -2657,7 +2628,7 @@ class App:
 class Settings:
     """设置窗口：麦克风 / 快捷键 / 说中文时 / 改错服务 / 界面语言 五块卡片。"""
     W = 400
-    ZH_OUTS = (('en', ('出英文', 'English'), ''), ('zh', ('出中文', 'Chinese'), ''))  # 出中文：删掉口头禅 / 重复 / 改口，不翻译
+    ZH_OUTS = (('en', ('出英文', 'ENGLISH'), ''), ('zh', ('出中文', 'CHINESE'), ''))  # 出中文：删掉口头禅 / 重复 / 改口，不翻译
 
     def __init__(self, app):
         self.app, self.recording = app, False
@@ -2696,7 +2667,7 @@ class Settings:
         self.label(n, x, y, w, h, L('快捷键', 'Hotkey'))
         for vk, cx, dy, cw in chips:
             if vk is None:
-                self.rec_btn = n.button(cx, chip_y + dy, cw, BTN_H, text=L('请按键…', 'Press…') if self.recording else L('录制', 'Record'), size=12,
+                self.rec_btn = n.button(cx, chip_y + dy, cw, BTN_H, text=L('请按键…', 'PRESS…') if self.recording else L('录制', 'RECORD'), size=12,
                                         color=ORANGE if self.recording else TEXT, cmd=self.record)
             else:
                 on = vk == cfg['hotkey']
@@ -2707,7 +2678,7 @@ class Settings:
     def sec_mode(self, n, x, y, w, draw):
         h = 62  # 一排按钮，上下各留 14
         if not draw: return h
-        self.label(n, x, y, w, h, L('说中文时', 'When speaking Chinese'))
+        self.label(n, x, y, w, h, L('说中文时', 'When speaking Chinese'), mid=True)
         for i, (m, name, _) in enumerate(self.ZH_OUTS):
             n.button(btn_x(x, w, i, 2), y + 14, BTN_W, BTN_H, text=L(*name), size=12, on=m == cfg.get('zh_out', 'en'), cmd=lambda m=m: self.set_zh_out(m))
         return h
@@ -2725,8 +2696,8 @@ class Settings:
         info = f'Ollama · {LLM_MODEL} · ' + (L('显卡', 'GPU') if on_gpu else 'CPU' + (L('（显卡慢，暂时换）', ' (GPU slow, for now)') if LLM_GPU_LAYERS else ''))
         if llm_stat: info += L(f' · 上一句 {llm_stat["secs"]:.1f} 秒', f' · last {llm_stat["secs"]:.1f} s')
         n.text(x + 20, y + 56, info, 11, SUB, width=w - (130 if st == 'down' else 40), lines=1)
-        if st == 'down': n.button(btn_x(x, w, 0, 1), y + 46, BTN_W, BTN_H, text=L('启动', 'Start'), size=12, cmd=self.start_ol)
-        n.text(x + 20, y + 96, L('改错模型', 'Model'), 12, TEXT)
+        if st == 'down': n.button(btn_x(x, w, 0, 1), y + 46, BTN_W, BTN_H, text=L('启动', 'START'), size=12, cmd=self.start_ol)
+        t = L('改错模型', 'Model'); n.text(x + 20, y + 86 + BTN_H / 2 - ink_up(t, 12), t, 12, TEXT, anchor='w')  # 和右边那排按钮对着中线
         for i, (k, name) in enumerate(LLM_MODELS):
             n.button(btn_x(x, w, i, 2), y + 86, BTN_W, BTN_H, text=L(*name), size=12, on=k == LLM_MODEL, cmd=lambda k=k: self.set_llm(k))
         n.text(x + 20, y + 138, L('不用时释放显存', 'Free GPU memory when idle'), 12, TEXT)
@@ -2738,8 +2709,8 @@ class Settings:
     def sec_ui(self, n, x, y, w, draw):
         h = 62  # 和「说中文时」一样：一排两个按钮；很少改，放最下面。按钮字各用自己的语言，哪种界面下都认得出
         if not draw: return h
-        self.label(n, x, y, w, h, L('界面语言', 'Interface'))
-        for i, (v, name) in enumerate((('zh', '中文'), ('en', 'English'))):
+        self.label(n, x, y, w, h, L('界面语言', 'Interface'), mid=True)
+        for i, (v, name) in enumerate((('zh', '中文'), ('en', 'ENGLISH'))):
             n.button(btn_x(x, w, i, 2), y + 14, BTN_W, BTN_H, text=name, size=12, on=v == ui_lang(), cmd=lambda v=v: self.set_ui(v))
         return h
 
@@ -2758,9 +2729,11 @@ class Settings:
     def scroll(self, k):
         self.n.c.yview('scroll', k, 'units'); self.sbar.update()
 
-    def label(self, n, x, y, w, h, name):
+    def label(self, n, x, y, w, h, name, mid=False):
+        """卡片底 + 标题。mid：只有一排按钮的卡片（说中文时 / 界面语言），标题和按钮对着卡片中线居中。"""
         n.raised(x, y, w, h, 28, d=ELEV)
-        n.text(x + 20, y + 24, name, 12, TEXT)
+        if mid: n.text(x + 20, y + h / 2 - ink_up(name, 12), name, 12, TEXT, anchor='w')
+        else: n.text(x + 20, y + 24, name, 12, TEXT)
 
     def build(self):
         n, app = self.n, self.app
@@ -2811,12 +2784,13 @@ class Settings:
         cfg.pop('ui', None)
         if v != _SYS_UI: cfg['ui'] = v
         save_cfg(); log('界面语言', v)
-        self.app.root.after(10, lambda: self.app.rebuild(THEME))  # 等这次点击处理完再拆按钮
+        center = self.app.root.winfo_pointerxy()  # 新语言的画面从点的那个按钮扩出去（同换主题）
+        self.app.root.after(10, lambda: self.app.rebuild(THEME, center, cover=True))  # 等这次点击处理完再拆按钮
 
 
     def record(self):
         if self.recording: return
-        self.recording = True; self.rec_btn.set(text=L('请按键…', 'Press…'), color=ORANGE)
+        self.recording = True; self.rec_btn.set(text=L('请按键…', 'PRESS…'), color=ORANGE)
         self.n.c.itemconfigure(self.ktip, text=L('现在按一下你想用的键（10 秒内）', 'Press the key you want (within 10 s)'), fill=ORANGE)
         def run():
             eng.key_paused = True; vk = eng.wait_any_key(10); time.sleep(0.3); eng.key_paused = False
@@ -2910,14 +2884,14 @@ class History:
         x, w = 20, 360; col = lambda i: btn_x(x, w, i, 3)
         n.raised(x, y, w, h, 28, d=ELEV)
         n.text(x + 20, y + 24, L('保存记录', 'Save history'), 12, TEXT)
-        for i, (v, name) in enumerate(((True, L('开', 'On')), (False, L('关', 'Off')))):
+        for i, (v, name) in enumerate(((True, L('开', 'ON')), (False, L('关', 'OFF')))):
             n.button(col(i + 1), y + 14, BTN_W, BTN_H, text=name, size=12, on=v == on, cmd=lambda v=v: self.set_hist(v))
         if not on: return
         n.text(x + 20, y + 70, L('只留最近', 'Keep'), 12, TEXT)
         for i, (d, name) in enumerate(HIST_DAYS):
             n.button(col(i), y + 60, BTN_W, BTN_H, text=L(*name), size=12, on=d == cfg.get('hist_days', 0), cmd=lambda d=d: self.set_days(d))
         n.text(x + 20, y + 116, L(f'共 {len(hist_blocks())} 条', f'{len(hist_blocks())} entries'), 11, SUB)
-        self.clear_btn = n.button(col(1), y + 106, 2 * BTN_W + BTN_GAP, BTN_H, text=L('再点一下确认', 'Click again to confirm') if self.arm_clear else L('清空记录', 'Clear history'), size=12,
+        self.clear_btn = n.button(col(1), y + 106, 2 * BTN_W + BTN_GAP, BTN_H, text=L('再点一下确认', 'CLICK AGAIN') if self.arm_clear else L('清空记录', 'CLEAR HISTORY'), size=12,
                                   color=RED if self.arm_clear else TEXT, cmd=self.clear)
 
     def set_hist(self, v):
@@ -2987,7 +2961,7 @@ class Words:
         h.raised(20, y, 360, ch, 28, d=ELEV)
         h.inset(40, y + 20, btn_x(20, 360, 0, 1) - 20 - 40, 40, 20, d=ELEV * INSET_K)  # 输入框凹下去，按钮和它上下居中、右对齐卡片内边
         h.c.create_window(px(56), px(y + 40), window=self.ent, anchor='w', width=px(btn_x(20, 360, 0, 1) - 20 - 56 - 16))
-        h.button(btn_x(20, 360, 0, 1), y + 23, BTN_W, BTN_H, text=L('保存', 'Save') if self.editing else L('加入', 'Add'), size=12, cmd=self.submit)
+        h.button(btn_x(20, 360, 0, 1), y + 23, BTN_W, BTN_H, text=L('保存', 'SAVE') if self.editing else L('加入', 'ADD'), size=12, cmd=self.submit)
         tip = (L(f'正在改「{parse_word(self.editing)[0]}」 · Enter 保存 · Esc 取消', f'Editing "{parse_word(self.editing)[0]}" · Enter to save · Esc to cancel') if self.editing
                else L('例：Claude: cloud, 克劳德（冒号后面是听错的写法，可不写）', 'e.g. Claude: cloud (misheard forms after the colon)'))
         h.text(40, y + 72, tip, 11, SUB, width=320, lines=1)
@@ -3003,9 +2977,8 @@ class Words:
         n.text(40, 14, L(f'{len(rows)} 条', f'{len(rows)} words') if rows else L('还没有常用词：在上面输入，Enter 加入', 'No words yet: type above and press Enter'), 11, SUB)
         for y, ch, ln, term, al in cards:  # 卡片里正确写法一行，听错的写法灰字；改 / 删两个 28 的圆钮对着卡片上下居中
             n.raised(20, y, 360, ch, 24, d=ELEV)
-            ty = y + 14 if al else y + (ch - le) / 2
-            n.text(40, ty, fit(term, fe, px(240)), 12, TEXT)
-            if al: n.text(40, ty + le + 4, '\n'.join(al), 11, SUB)
+            if al: n.text(40, y + 14, fit(term, fe, px(240)), 12, TEXT); n.text(40, y + 14 + le + 4, '\n'.join(al), 11, SUB)
+            else: n.text(40, y + ch / 2 - ink_up(term, 12), fit(term, fe, px(240)), 12, TEXT, anchor='w')  # 只有一行：和右边的圆钮对着卡片中线
             cy = y + ch / 2  # 删钮圆心 x=356 = 卡片圆角（24）圆心，改钮在它左边隔 8（和主页右上角一样）
             n.button(303, cy - 15, 30, 30, icon=I_EDIT, size=9, color=ICON_C, on=ln == self.editing, cmd=lambda ln=ln: self.edit(ln))
             n.button(341, cy - 15, 30, 30, icon=I_DEL, size=9, color=RED if ln == self.arm_del else ICON_C, cmd=lambda ln=ln: self.delete(ln))
@@ -3149,13 +3122,13 @@ class Checks:
             ic = n.text(52, y + 26, '', 13, SUB, anchor='center')
             n.text(84, y + 10, name, 12, TEXT)
             self.rows.append((ic, n.text(84, y + 34, '', 11, SUB), y))
-        self.btn = n.button(20, by, 360, 52, r=26, text=L('开始自检', 'Run self-test'), size=12, cmd=self.start)
+        self.btn = n.button(20, by, 360, 52, r=26, text=L('开始自检', 'RUN SELF-TEST'), size=12, cmd=self.start)
         n.commit()
         if SELFTEST: self.start()
 
     def start(self):
         if self.running: return
-        self.running = True; self.btn.set(text=L('检查中…', 'Checking…'), color=SUB)
+        self.running = True; self.btn.set(text=L('检查中…', 'CHECKING…'), color=SUB)
         for ic, d, _ in self.rows: self.n.c.itemconfigure(ic, text=''); self.n.c.itemconfigure(d, text='')
         if self.extra: self.n.remove(self.extra); self.extra = None
         def report(i, st, text, extra=None):
@@ -3172,7 +3145,7 @@ class Checks:
             self.extra = self.n.button(254, y + 2, 110, BTN_H, text=L(f'改用「{key_name(extra)}」', f'Use {key_name(extra)}'), size=12, cmd=use)
 
     def done(self, ok):
-        self.running = False; self.btn.set(text=L('全部通过 · 再测一次', 'All passed · run again') if ok else L('再测一次', 'Run again'), color=INK)
+        self.running = False; self.btn.set(text=L('全部通过 · 再测一次', 'ALL PASSED · RUN AGAIN') if ok else L('再测一次', 'RUN AGAIN'), color=INK)
         log('自检结果：', '全部通过' if ok else '有失败项')
         if SELFTEST: self.w.after(1500, quit_app)
 
@@ -3184,12 +3157,12 @@ def readiness(ol):
     rows = [{'ok': ('ok', L('Whisper 已载入。', 'Whisper is loaded.'), None),
              'loading': ('info', L('载入中…', 'Loading…'), None),
              'nogpu': ('fail', L('没有 NVIDIA 显卡：Whisper 识别要用显卡，现在说不了话。', 'No NVIDIA GPU: Whisper needs one, so voice input is unavailable.'), None),
-             'nolib': ('fail', L('缺显卡运行库（cuBLAS，约 0.5GB）。', 'Missing GPU runtime (cuBLAS, about 0.5 GB).'), L('修复', 'Fix')),
-             'nomodel': ('fail', L('Whisper 模型（约 1.6GB）还没下载。', 'Whisper model (about 1.6 GB) not downloaded yet.'), L('下载', 'Download'))}.get(eng.wh_state, ('fail', L('没载入成功，详情见 run.log。', 'Failed to load. See run.log.'), L('修复', 'Fix')))]
+             'nolib': ('fail', L('缺显卡运行库（cuBLAS，约 0.5GB）。', 'Missing GPU runtime (cuBLAS, about 0.5 GB).'), L('修复', 'FIX')),
+             'nomodel': ('fail', L('Whisper 模型（约 1.6GB）还没下载。', 'Whisper model (about 1.6 GB) not downloaded yet.'), L('下载', 'DOWNLOAD'))}.get(eng.wh_state, ('fail', L('没载入成功，详情见 run.log。', 'Failed to load. See run.log.'), L('修复', 'FIX')))]
 
     if not shutil.which('ollama') and not os.path.exists(os.path.expandvars(r'%LOCALAPPDATA%\Programs\Ollama\ollama.exe')):
-        rows.append(('fail', L('没装 Ollama：它负责改语病和翻译，没有它只能原样输出。', 'Ollama is not installed. It does the cleanup and translation; without it your words are typed as is.'), L('安装', 'Install')))
-    elif ol == 'no_model': rows.append(('fail', L(f'还没下载改错模型 {LLM_MODEL}（约 2.6GB）。', f'Cleanup model {LLM_MODEL} (about 2.6 GB) not downloaded yet.'), L('下载', 'Download')))
+        rows.append(('fail', L('没装 Ollama：它负责改语病和翻译，没有它只能原样输出。', 'Ollama is not installed. It does the cleanup and translation; without it your words are typed as is.'), L('安装', 'INSTALL')))
+    elif ol == 'no_model': rows.append(('fail', L(f'还没下载改错模型 {LLM_MODEL}（约 2.6GB）。', f'Cleanup model {LLM_MODEL} (about 2.6 GB) not downloaded yet.'), L('下载', 'DOWNLOAD')))
     elif ol == 'down': rows.append(('warn', L('改错服务没在运行，Quill 会自动启动它。', 'The cleanup service is not running; Quill starts it automatically.'), None))
     elif ol is None: rows.append(('info', L('检查中…', 'Checking…'), None))
     else: rows.append(('ok', L(f'Ollama 正常，改错模型 {LLM_MODEL} 在。', f'Ollama is running and cleanup model {LLM_MODEL} is ready.') + ('' if nvidia_gpu() and LLM_GPU_LAYERS else L('现在用 CPU 改错，每句约 5~8 秒。', ' Cleanup runs on the CPU, about 5–8 s per sentence.')), None))
@@ -3214,7 +3187,7 @@ class Ready:
             y = top + 8 + i * self.ROW
             n.inset(36, y + 10, 32, 32, 16, d=ELEV * INSET_K)
             self.rows.append((n.text(52, y + 26, '', 13, SUB, anchor='center'), n.text(84, y + 10, L(*name), 12, TEXT), n.text(84, y + 34, '', 11, SUB), y))
-        n.button(20, by, 360, 52, r=26, text=L('重新检查', 'Check again'), size=12, cmd=lambda: self.refresh(True))
+        n.button(20, by, 360, 52, r=26, text=L('重新检查', 'CHECK AGAIN'), size=12, cmd=lambda: self.refresh(True))
         n.commit(); self.refresh(); self.w.after(1500, self.tick)
 
     def build(self): self.refresh(True)
@@ -3235,7 +3208,7 @@ class Ready:
             sym, color = Checks.icon(lv)
             self.n.c.itemconfigure(ic, text=sym, fill=color)
             self.n.c.itemconfigure(d, text=fit(text, fnt(11), px(190 if act else 276), 3), fill=RED if lv == 'fail' else SUB)
-            if act: self.btns.append(self.n.button(364 - BTN_W, y + 18, BTN_W, BTN_H, text=L('进行中', 'Running…') if self.proc else act, size=12, color=SUB if self.proc else INK, cmd=self.run_setup))
+            if act: self.btns.append(self.n.button(364 - BTN_W, y + 18, BTN_W, BTN_H, text=L('进行中', 'RUNNING…') if self.proc else act, size=12, color=SUB if self.proc else INK, cmd=self.run_setup))
 
     def run_setup(self):
         if self.proc or not SETUP_PS1.exists(): return notify(L('找不到 setup.ps1，请重新下载 Quill。', 'setup.ps1 not found. Please download Quill again.'), 'err')
