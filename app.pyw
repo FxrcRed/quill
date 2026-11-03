@@ -106,13 +106,17 @@ def system_theme():
     except OSError: return 'light'
 
 def apply_theme(name):
-    """换一套配色：改全局颜色名，清掉按颜色画好的缓存。已经画出来的窗口要 App.rebuild() 重建才会变。"""
+    """换一套配色：改全局颜色名，按颜色画好的缓存换成这套的（每套各存一份，切回来不用重画，重建快 ~1/3）。
+    已经画出来的窗口要 App.rebuild() 重建才会变。"""
     global THEME
+    if name != THEME:
+        caches = {c: globals()[c] for c in ('_sprites', '_grads') if c in globals()}
+        caches.update({a: getattr(globals()[c], a) for c, a in (('History', '_fades'), ('Overlay', '_badges')) if c in globals()})  # 记录 / 常用词的渐隐带、浮窗的小图标
+        for k, c in caches.items():  # 原地换（Words 和 History 共用同一个 _fades）
+            _theme_caches[THEME, k] = dict(c); c.clear(); c.update(_theme_caches.get((name, k), {}))
     THEME = name; globals().update(THEMES[name])
-    for cache in ('_sprites', '_grads'):
-        if cache in globals(): globals()[cache].clear()
-    for cls in ('History', 'Overlay'):  # 记录 / 常用词的渐隐带、浮窗的小图标
-        if cls in globals(): getattr(globals()[cls], '_fades' if cls == 'History' else '_badges').clear()
+
+_theme_caches = {}
 
 (BG, CARD, FACE, INSET, LIGHT, DARK, INK, TEXT, SUB, TICK, TICK_MAJ, ICON_C, GREEN, ORANGE, RED, YELLOW,
  PRESSED, RULE, THUMB, BALL, SHADOW, BARS, BAR_ERR, GLASS) = THEMES['light'].values()  # 先按浅色；启动时 apply_theme(system_theme())
@@ -123,7 +127,7 @@ I_MIN, I_CLOSE, I_MIC, I_BALL = '\uE921', '\uE8BB', '\uE720', '\uE73F'
 I_DOWN, I_UP = '\uE70D', '\uE70E'  # 记录里展开 / 收起原话
 I_EDIT, I_DEL = '\uE70F', '\uE74D'  # 常用词窗口：改 / 删
 I_PIN = '\uE718'  # 浮窗固定后右边的图钉
-I_OPEN, I_SETUP = '', ''  # 记录 / 常用词标题行「用记事本打开」；设置标题行「准备情况」（扳手）
+I_OPEN = ''  # 记录 / 常用词标题行「用记事本打开」
 I_MOON, I_SUN = '', ''  # 主页右上角切深 / 浅色
 ICON_NUDGE = {I_MOON: (-1.1, -0.7)}  # 字形墨迹不在字框中心的图标，按 100% 补回（月牙重心偏右下，PIL 量的）
 HIST_DY = 4
@@ -700,8 +704,8 @@ class Job:
 
 
 WH_ERRORS = {'nogpu': ('没有 NVIDIA 显卡：Quill 用 Whisper 识别，要 NVIDIA 显卡。', 'No NVIDIA GPU: Quill recognizes speech with Whisper, which needs one.'),
-             'nolib': ('缺显卡运行库（cuBLAS）：设置 → 准备情况里点「修复」。', 'Missing GPU runtime (cuBLAS): Settings → Setup → Fix.'),
-             'nomodel': ('没有识别模型（models\\whisper）：设置 → 准备情况里点「下载」。', 'No speech model (models\\whisper): Settings → Setup → Download.'),
+             'nolib': ('缺显卡运行库（cuBLAS）：去设置里识别模型那张卡片点「修复」。', 'Missing GPU runtime (cuBLAS): click Fix on the Speech model card in Settings.'),
+             'nomodel': ('没有识别模型（models\\whisper）：去设置里识别模型那张卡片点「下载」。', 'No speech model (models\\whisper): click Download on the Speech model card in Settings.'),
              'error': ('识别模型加载失败，详情见 run.log。', 'The speech model failed to load. See run.log.')}
 
 class Engine:
@@ -949,7 +953,7 @@ class AsrProc:
 eng = Engine()
 
 def mode_summary():
-    """当前是哪种模式，对速度 / 质量有什么影响（自检和准备情况用）：返回 (ok|warn, 一句人话)。"""
+    """当前是哪种模式，对速度 / 质量有什么影响（自检用）：返回 (ok|warn, 一句人话)。"""
     g, st = nvidia_gpu(), eng.wh_state
     ai = L('AI 改错用显卡', 'cleanup on the GPU') if g and LLM_GPU_LAYERS else L('AI 改错用 CPU，每句约 5~8 秒', 'cleanup on the CPU, about 5–8 s per sentence') if not g else L('AI 改错暂时用 CPU', 'cleanup on the CPU for now')
     if st == 'ok': return 'ok', L(f'Whisper 识别（{g}），{ai}', f'Whisper on {g}; {ai}')
@@ -2021,44 +2025,111 @@ class Proxy:
 
 class Wipe:
     """换深浅色时盖在 Quill 各窗口上的旧画面截图（分层、置顶、鼠标穿透），下面重建完再退场：
-    有 center（屏幕坐标，手动切时点的那个按钮）就从那里扩一个圆露出新配色；没有（跟随系统换的）就整体淡出。"""
-    MS, FEATHER = 450, 80  # 时长；扩散圆边渐变的宽度（逻辑像素）
+    有 center（屏幕坐标，手动切时点的那个按钮）就从那里扩一个圆露出新配色；没有（跟随系统换的）就整体淡出。
+    动画在后台线程画（主线程还在重建）：主窗口好了就开始扩，pending 里还没重建好的窗口圆边先不扩进去，好一个放一个。
+    以前全部重建完才开始，开的窗口越多点下去越久没反应（四窗全开 ~0.5 秒）。"""
+    MS, FEATHER = 450, 80  # 时长（只有主窗口时）；扩散圆边渐变的宽度（逻辑像素）
 
     def __init__(self, app, hwnds, center=None):
+        self.pending, self.done, self.cs = {}, False, center  # pending：key → 旧窗口连阴影的屏幕矩形
         M = px(Chrome.M); rs = []
         for h in hwnds:
             r = ctypes.wintypes.RECT(); user32.GetWindowRect(h, ctypes.byref(r)); rs.append((r.left - M, r.top - M, r.right + M, r.bottom + M))
         box = self.box = (min(r[0] for r in rs), min(r[1] for r in rs), max(r[2] for r in rs), max(r[3] for r in rs))
-        rgb = np.asarray(grab_small(box, 1, 0x40CC0020)); h, w = rgb.shape[:2]  # 加 CAPTUREBLT：分层的阴影窗口也截进来
-        self.bgra = np.concatenate([rgb[..., ::-1], np.full((h, w, 1), 255, np.uint8)], 2).astype(np.float32)
+        w, h = box[2] - box[0], box[3] - box[1]
+        # 每帧只改这一张 DIB 里的像素再 UpdateLayeredWindow（以前每帧整张 float32 乘一遍 + 新建 DIB 拷 15MB，一帧 ~56ms，450ms 只有 8 帧，卡）
+        self.sdc = user32.GetDC(None); self.mdc = gdi32.CreateCompatibleDC(self.sdc); bits = _vp()
+        bi = _BMIH(ctypes.sizeof(_BMIH), w, -h, 1, 32, 0, 0, 0, 0, 0, 0)
+        self.bmp = gdi32.CreateDIBSection(self.mdc, ctypes.byref(bi), 0, ctypes.byref(bits), None, 0); self.old = gdi32.SelectObject(self.mdc, self.bmp)
+        gdi32.StretchBlt(self.mdc, 0, 0, w, h, self.sdc, box[0], box[1], w, h, 0x40CC0020)  # 屏幕直接截进 DIB（不经 PIL，快 ~80ms）；加 CAPTUREBLT：分层的阴影窗口也截进来
+        self.px = np.ctypeslib.as_array((ctypes.c_ubyte * (w * h * 4)).from_address(bits.value)).reshape(h, w, 4)
+        self.px[..., 3] = 255  # 不透明，预乘就是原样
         self.d = None
-        if center:
-            yy, xx = np.ogrid[:h, :w]; self.d = np.hypot(xx - (center[0] - box[0]), yy - (center[1] - box[1])).astype(np.float32)
-            self.rmax = float(self.d.max()) + 2
-        win = self.w = tk.Toplevel(app.root); win.title('Quill wipe'); win.overrideredirect(True); win.geometry('1x1+-300+-300'); win.update()
-        self.hwnd = user32.GetParent(win.winfo_id()) or win.winfo_id()
-        ex = user32.GetWindowLongW(self.hwnd, -20) | 0x08000000 | 0x80 | 0x8 | 0x20  # 不抢焦点 / 不进任务栏 / 置顶 / 鼠标穿透
-        user32.ShowWindow(self.hwnd, 0)
-        user32.SetWindowLongW(self.hwnd, -20, ex & ~0x80000); user32.SetWindowLongW(self.hwnd, -20, ex | 0x80000)  # 分层（先清再设，见 Overlay）
-        self.frame(1.0); user32.ShowWindow(self.hwnd, 8); user32.SetWindowPos(self.hwnd, _vp(-1), 0, 0, 0, 0, 0x13)
+        if center:  # 扩圆：每帧只重算上一帧圆边内沿到这一帧圆边外沿那一圈（外面还是原样，里面已经是 0）；原图 src 在 run 里拷
+            self.d = cx, cy = (center[0] - box[0], center[1] - box[1]); self.lo = -1.0
+            self.rmax = max(math.hypot(x - cx, y - cy) for x in (0, w) for y in (0, h)) + 2
+        self.w, self.hwnd = Wipe.spare or Wipe.make(app.root); Wipe.spare = None
+        self.ulw(); user32.ShowWindow(self.hwnd, 8); user32.SetWindowPos(self.hwnd, _vp(-1), 0, 0, 0, 0, 0x13); self.t_made = time.perf_counter()
+
+    def ulw(self, alpha=255, shape=True):
+        """shape=False：图没变，只改整体透明度（淡出用，不传像素，几乎不花时间）。"""
+        h, w = self.px.shape[:2]
+        pt, sz, src = ctypes.wintypes.POINT(*self.box[:2]), ctypes.wintypes.SIZE(w, h), ctypes.wintypes.POINT(0, 0)
+        if shape: user32.UpdateLayeredWindow(self.hwnd, self.sdc, ctypes.byref(pt), ctypes.byref(sz), self.mdc, ctypes.byref(src), 0, ctypes.byref(_BLEND(0, 0, alpha, 1)), 2)
+        else: user32.UpdateLayeredWindow(self.hwnd, None, None, None, None, None, 0, ctypes.byref(_BLEND(0, 0, alpha, 1)), 2)
 
     def frame(self, k):
         """k = 旧画面还剩多少：1 全盖着，0 全露出新的。圆边是 FEATHER 宽的柔和渐变（smoothstep）。"""
-        if self.d is None: m = np.float32(k)
-        else:
-            F = px(self.FEATHER); m = np.clip((self.d - ((1 - k) * (self.rmax + F) - F)) / F, 0, 1)
-            m = (m * m * (3 - 2 * m))[..., None]
-        h, w = self.bgra.shape[:2]
-        ulw_bytes(self.hwnd, (self.bgra * m).astype(np.uint8).tobytes(), w, h, self.box[0], self.box[1])  # 预乘：四个通道一起乘
+        if self.d is None: return self.ulw(round(255 * k), False)
+        F = px(self.FEATHER); a = (1 - k) * (self.rmax + F) - F; R = a + F  # 圆里（d < a）全透明，d ≥ R 原样
+        if R <= 0: return
+        h, w = self.px.shape[:2]; cx, cy = self.d; lo, B = self.lo, 32
+        for y0 in range(max(0, int(cy - R)) // B * B, min(h, int(cy + R) + 1), B):  # 每 32 行一条：外圆的弦减去上一帧内圆（已经全透明）的弦
+            y1 = min(h, y0 + B); near = 0 if y0 <= cy < y1 else min(abs(y0 - cy), abs(y1 - 1 - cy)); far = max(abs(y0 - cy), abs(y1 - 1 - cy))
+            if near >= R: continue
+            o = math.sqrt(R * R - near * near); xa, xb = max(0, int(cx - o)), min(w, int(cx + o) + 2); segs = [(xa, xb)]
+            if lo > far:
+                i = math.sqrt(lo * lo - far * far) - 1; ia, ib = int(cx - i) + 1, int(cx + i)
+                if ia < ib: segs = [(xa, min(xb, ia)), (max(xa, ib), xb)]
+            for x0, x1 in segs:
+                if x0 >= x1: continue
+                yy, xx = np.ogrid[y0:y1, x0:x1]
+                m = np.clip((np.hypot(xx - cx, yy - cy, dtype=np.float32) - a) * (1 / F), 0, 1); m = m * m * (3 - 2 * m)
+                self.px[y0:y1, x0:x1] = (self.src[y0:y1, x0:x1] * (m * 256).astype(np.uint16)[..., None]) >> 8  # 预乘：四个通道一起乘
+        self.lo = a; self.ulw()
 
-    def play(self):
-        self.t0 = time.perf_counter(); self.n = 0; self.step()
+    spare = None  # 用完藏起来留着的窗口：新建要 update()，现建 ~40ms
 
-    def step(self):
-        t = min(1.0, (time.perf_counter() - self.t0) * 1000 / self.MS)
-        self.frame((1 - t) ** 3); self.n += 1  # 先快后慢
-        if t < 1: self.w.after(10, self.step)
-        else: self.w.destroy(); log(f'换主题动画 {self.n} 帧 / {self.MS}ms，{self.bgra.shape[1]}×{self.bgra.shape[0]}')
+    @staticmethod
+    def make(root):
+        win = tk.Toplevel(root); win.title('Quill wipe'); win.overrideredirect(True); win.geometry('1x1+-300+-300'); win.update()
+        hwnd = user32.GetParent(win.winfo_id()) or win.winfo_id()
+        ex = user32.GetWindowLongW(hwnd, -20) | 0x08000000 | 0x80 | 0x8 | 0x20  # 不抢焦点 / 不进任务栏 / 置顶 / 鼠标穿透
+        user32.ShowWindow(hwnd, 0)
+        user32.SetWindowLongW(hwnd, -20, ex & ~0x80000); user32.SetWindowLongW(hwnd, -20, ex | 0x80000)  # 分层（先清再设，见 Overlay）
+        return win, hwnd
+
+    def wait(self, key, hwnd):
+        """这个窗口要重建：好之前圆边不扩进它（连阴影）。"""
+        r = ctypes.wintypes.RECT(); user32.GetWindowRect(hwnd, ctypes.byref(r)); M = px(Chrome.M)
+        self.pending[key] = (r.left - M, r.top - M, r.right + M, r.bottom + M)
+
+    def ready(self, key): self.pending.pop(key, None)
+
+    def reach(self, r):
+        """圆心到矩形 r 最近的距离（在里面 = 0）。"""
+        x, y = self.cs; return math.hypot(max(r[0] - x, 0, x - r[2]), max(r[1] - y, 0, y - r[3]))
+
+    def play(self, t0):
+        """开始揭开（t0 = 开始重建的时刻，记日志用）。后台线程画，画完主线程拆窗口。"""
+        self.t0, self.stat, self.t_main = t0, None, time.perf_counter(); threading.Thread(target=self.run, daemon=True).start(); self.check()
+
+    def run(self):
+        # 只有主窗口：先快后慢。还有子窗口要建（每个 ~150ms，离按钮由近到远）：时长每个加 120ms、t^1.5 先慢后快，
+        # 圆边刚好在它们建好后才到（实测 12% / 35% / 57% 半径处分别要等 ~190 / 390 / 550ms）；先快后慢会在窗口边上停 70~100ms
+        subs = len(self.pending); MS = self.MS + 120 * subs
+        ease = (lambda t: t ** 1.5) if subs and self.d is not None else (lambda t: 1 - (1 - t) ** 3)
+        if self.d is not None: self.src = self.px.astype(np.uint16)  # 还没开始扩，px 还是原图
+        F = px(self.FEATHER); t, n, first, gaps = 0.0, 0, None, []; last = prev = time.perf_counter()
+        while t < 1:
+            now = time.perf_counter(); t2 = min(1.0, t + (now - last) * 1000 / MS); last = now
+            if self.d is None: t2 = t if self.pending else t2  # 淡出：全部好了才开始
+            else:
+                lim = min((self.reach(r) for r in list(self.pending.values())), default=1e9)
+                while t2 > t and ease(t2) * (self.rmax + F) > lim: t2 = max(t, t2 - 0.005)  # 圆边外沿不进还没好的窗口
+            if t2 > t:
+                t = t2; self.frame(1 - ease(t)); n += 1; first = first or now; gaps.append(now - prev); prev = now
+            time.sleep(max(0.0, 0.012 - (time.perf_counter() - now)))
+        self.stat = (n, (first - self.t0) * 1000, max(gaps[1:], default=0) * 1000); self.done = True
+
+    def check(self):
+        if not self.done: return self.w.after(30, self.check)
+        user32.ShowWindow(self.hwnd, 0)
+        if Wipe.spare: self.w.destroy()
+        else: Wipe.spare = (self.w, self.hwnd)
+        gdi32.SelectObject(self.mdc, self.old); gdi32.DeleteObject(self.bmp); gdi32.DeleteDC(self.mdc); user32.ReleaseDC(None, self.sdc)
+        n, a, g = self.stat; log(f'换主题动画 {n} 帧，点下去 {a:.0f}ms 开始揭开（截图 {(self.t_made - self.t0) * 1000:.0f}、主窗口 {(self.t_main - self.t0) * 1000:.0f}），'
+                                 f'最长帧间隔 {g:.0f}ms，{self.px.shape[1]}×{self.px.shape[0]}')
 
 
 class Ball:
@@ -2188,10 +2259,12 @@ class App:
         self.state, self.sil_since, self.shown, self.mic = 'loading', time.time(), 0.0, 'ok'
         self.notice_until, self.ol_last, self.ol_starting = 0.0, None, 0.0
         self.first_shown = False
-        self.settings = self.check_win = self.ready_win = self.history = self.words = self.pop = None
+        self.setup_proc = None  # 正在跑的 setup.ps1（设置里「下载 / 安装 / 修复」）
+        self.settings = self.check_win = self.history = self.words = self.pop = None
         self.cur = None  # 当前这句 [原话, 输入的英文, 中文]
         self.waiting = {}  # 英文出了、中文还没出就开始说下一句的那些：编号 → [原话, 英文, None]，中文到了再记
         self.next_look = 0.0  # 下次看系统深浅色 / 主窗口在哪块屏的时间
+        self.rebuilding = False
         self.dpi_new = None  # 主窗口跨到的那块屏的缩放（hook_dpi 记，poll 里 rescale）
         self.proxy, self._mons = None, None  # 拖动跨屏时顶替主窗口的替身（Proxy）；这次拖动的屏幕列表（monitors，拖动中缓存）
         root.on_press, root.on_drag, root.on_drop = self.on_press, self.on_drag, self.on_drop  # Neu 拖主窗口时调
@@ -2202,7 +2275,7 @@ class App:
         threading.Thread(target=self.words_loop, daemon=True).start()
         self.poll()
 
-    SUBS = ('settings', 'check_win', 'ready_win', 'history', 'words')
+    SUBS = ('settings', 'check_win', 'history', 'words')
 
     def build_ui(self):
         """主窗口里的东西 + 浮窗 + 悬浮球。换主题 / 换缩放时 rebuild() 拆掉重来。"""
@@ -2236,16 +2309,35 @@ class App:
     def rebuild(self, theme, center=None, pos=None, cover=False):
         """换了深浅色或缩放：所有窗口按新的配色 / S 重画，开着的子窗口重新打开。
         换主题时先用 Wipe 把旧画面盖住，重建完它再退场（center 见 Wipe），不闪；换缩放不盖，pos 见 on_drop。"""
-        hw = [c.hwnd for c in CHROMES if user32.IsWindowVisible(c.hwnd) and not user32.IsIconic(c.hwnd)]
+        self.rebuilding = True  # 重建里会 update()，跑到 poll → look_around；以前那时 THEME 还是旧的，会嵌套再重建一次，子窗口叠在一起
+        t0 = time.perf_counter(); hw = [c.hwnd for c in CHROMES if user32.IsWindowVisible(c.hwnd) and not user32.IsIconic(c.hwnd)]
         try: wipe = Wipe(self, hw, center) if hw and (theme != THEME or cover) else None  # cover：没换主题也盖（切界面语言）
         except Exception: wipe = None; log('换主题动画出错', traceback.format_exc())
+        try: self._rebuild(theme, pos, wipe, t0)
+        finally:
+            self.rebuilding = False
+            if wipe:  # 出错也别让旧画面一直盖着
+                wipe.pending.clear()
+                if not hasattr(wipe, 't0'): wipe.play(t0)
+
+    def _rebuild(self, theme, pos, wipe, t0):
+        if wipe:
+            wipe.wait('root', self.chrome.hwnd)
+            for a in self.SUBS:
+                if self.alive(a) and getattr(self, a).w.winfo_viewable(): wipe.wait(a, getattr(self, a).w.chrome.hwnd)
         r = ctypes.wintypes.RECT(); user32.GetWindowRect(self.chrome.hwnd, ctypes.byref(r))
         log(f'界面重建：{THEME} → {theme}，主窗口 {rect(r)}')
         wa = monitor_of(self.chrome.hwnd)[0]  # 重建前它在哪块屏，重建完还放在那块屏
-        opened = [a for a in self.SUBS if self.alive(a) and getattr(self, a).w.winfo_viewable()]
-        ball = self.ball.visible
+        opened = {}  # 开着的子窗口 → 重建前的位置；缩放没变就原样放回（以前按 SUBS 顺序重新 place_side，顺序变了，用户截图里还叠在一起）
         for a in self.SUBS:
-            if self.alive(a): getattr(self, a).w.destroy()
+            if self.alive(a) and getattr(self, a).w.winfo_viewable():
+                sr = ctypes.wintypes.RECT(); user32.GetWindowRect(getattr(self, a).w.chrome.hwnd, ctypes.byref(sr)); opened[a] = (sr.left, sr.top)
+        s0, ball = S, self.ball.visible
+        olds = {}  # 有 Wipe 盖着：旧子窗口等轮到它重建时再拆（拆也要时间，别挡在主窗口前面）
+        for a in self.SUBS:
+            if self.alive(a):
+                if wipe: olds[a] = getattr(self, a)
+                else: getattr(self, a).w.destroy()
             setattr(self, a, None)
         self.overlay.hide(); self.ball.hide()
         for w in (self.overlay.w, self.ball.w, self.n.c, self.wn.c): w.destroy()
@@ -2260,9 +2352,17 @@ class App:
         root.geometry(f'+{x}+{y}'); root.update_idletasks()
         user32.GetWindowRect(self.chrome.hwnd, ctypes.byref(r)); log(f'重建后主窗口 {rect(r)}')
         self.chrome.sync()
-        for a in opened: self._open(a, {'settings': Settings, 'check_win': Checks, 'ready_win': Ready, 'history': History, 'words': Words}[a])
         if ball: self.ball.show()
-        if wipe: sync_chromes(); self.root.update(); wipe.play()  # 新画面（含子窗口阴影）都画好了再揭开
+        if wipe: sync_chromes(); self.root.update(); wipe.ready('root'); wipe.play(t0)  # 主窗口（含阴影）画好就开始揭开，子窗口边揭边建
+        same = abs(S - s0) < 0.01
+        # 缩放没变：原位放回，离圆心近的先建（圆边先到）；换了缩放：从右往左开，place_side 把新开的放最左边，保持原来的左右顺序
+        order = sorted(opened, key=lambda a: wipe.reach(wipe.pending[a]) if same and wipe and wipe.cs else -opened[a][0])
+        for a in order:
+            if a in olds: olds.pop(a).w.destroy()
+            self._open(a, {'settings': Settings, 'check_win': Checks, 'history': History, 'words': Words}[a], opened[a] if same else None)
+            if wipe: sync_chromes(); self.root.update(); wipe.ready(a)
+        for o in olds.values(): o.w.destroy()  # 藏着的（预建的）
+        log(f'重建用了 {(time.perf_counter() - t0) * 1000:.0f}ms')
         self.root.after(1500, self.prewarm)
 
     def rescale(self, s):
@@ -2347,12 +2447,13 @@ class App:
 
     def toggle_theme(self):
         """手动切深 / 浅色，记进设置；切到和系统一样时清掉，回到跟随系统。说话 / 改错时不切。"""
-        if self.state not in ('ready', 'loading', 'error'): return
+        if self.state not in ('ready', 'loading', 'error') or self.rebuilding: return
         cfg.pop('theme', None)
         want = 'dark' if THEME == 'light' else 'light'
         if want != system_theme(): cfg['theme'] = want
         save_cfg()
         c = self.n.c; center = (c.winfo_rootx() + px(238), c.winfo_rooty() + px(48))  # 新配色从这个按钮的圆心扩出去
+        self.rebuilding = True  # cfg 已经是新主题：别让 look_around 抢先 / 在重建里再嵌套一次重建
         self.root.after(10, lambda: self.rebuild(want, center))  # 等这次点击处理完再拆按钮
 
     def look_around(self):
@@ -2360,7 +2461,7 @@ class App:
         if time.time() < self.next_look: return
         self.next_look = time.time() + 1
         theme = system_theme()
-        if theme == THEME or self.state not in ('ready', 'loading', 'error') or self.overlay.visible or key_down(0x01): return
+        if theme == THEME or self.rebuilding or self.state not in ('ready', 'loading', 'error') or self.overlay.visible or key_down(0x01): return
         self.rebuild(theme)
 
     def nav_label(self, n, cx, icon, label):
@@ -2371,23 +2472,27 @@ class App:
         n.c.create_text(x0 + fi.measure(icon) + gap, px(487) + NAV_DY, text=label, font=ft, fill=INK, anchor='w', tags='txt')  # 宽体字和 READY 同色
 
     # 子窗口
-    def _open(self, attr, cls):
-        """子窗口第一次打开时建好；关掉只是藏起来，再开直接显示（不用重画，不卡）。"""
+    def _open(self, attr, cls, at=None):
+        """子窗口第一次打开时建好；关掉只是藏起来，再开直接显示（不用重画，不卡）。at：放在这个位置（rebuild 放回原处），不排。"""
         w = getattr(self, attr)
         if not (w and w.w.winfo_exists()): w = cls(self); setattr(self, attr, w)
         if getattr(w, 'dirty', False): w.dirty = False; w.build()
-        if not w.w.winfo_viewable(): place_side(self, w.w, w.n.w); w.w.deiconify(); w.w.chrome.sync()
+        if not w.w.winfo_viewable():
+            if at: w.w.geometry('+%d+%d' % at)
+            else: place_side(self, w.w, w.n.w)
+            w.w.deiconify(); w.w.update_idletasks(); w.w.chrome.sync()  # 马上生效：接着开下一个时 place_side 要读到它的位置和宽度
         w.w.lift()
 
     def first_run(self):
-        """启动后看一眼：有缺的东西（红 / 橙）就弹出「准备情况」，每次启动最多一次；没有 N 卡属正常降级，不弹。"""
+        """启动后看一眼：有缺的东西（红 / 橙）就打开设置（最上面两张卡片是识别模型和改错服务），每次启动最多一次。"""
         if self.ol_last is None: return self.root.after(3000, self.first_run)
-        if any(lv in ('fail', 'warn') for lv, _, _ in readiness(self.ol_last)[:3]): log('有缺的东西，打开准备情况'); self.open_ready()
+        if any(lv in ('fail', 'warn') for lv, _, _ in readiness(self.ol_last)): log('有缺的东西，打开设置'); self.open_settings()
 
     def prewarm(self):
         """启动后先把设置、记录窗口在后台建好（藏着），第一次点开也不卡。"""
-        for attr, cls in (('settings', Settings), ('history', History), ('words', Words)):
-            if not self.alive(attr): setattr(self, attr, cls(self))
+        Wipe.spare = Wipe.spare or Wipe.make(self.root)  # 换主题盖的窗口（便宜，先建）
+        for attr, cls in (('settings', Settings), ('history', History), ('words', Words)):  # 一次只建一个（各 ~120ms），三个连着建会卡一下
+            if not self.alive(attr): setattr(self, attr, cls(self)); return self.root.after(300, self.prewarm)
         # 别的缩放的屏：主窗口拖过去时替身（Proxy）要的窗口和阴影图先备好
         Proxy.window(self.root)
         r = ctypes.wintypes.RECT(); user32.GetWindowRect(self.chrome.hwnd, ctypes.byref(r)); w, hh = r.right - r.left, r.bottom - r.top
@@ -2396,7 +2501,6 @@ class App:
 
     def open_settings(self): self._open('settings', Settings)
     def open_checks(self): self._open('check_win', Checks)
-    def open_ready(self): self._open('ready_win', Ready)
     def open_history(self): self._open('history', History)
     def alive(self, attr):
         w = getattr(self, attr)
@@ -2410,6 +2514,22 @@ class App:
 
     def restore(self):
         self.ball.hide(); self.root.deiconify(); self.root.lift(); self.root.focus_force(); self.chrome.sync()
+
+    def run_setup(self):
+        """设置里「下载 / 安装 / 修复」：黑框 PowerShell 里跑 setup.ps1，跑完自动重新检查。"""
+        if self.setup_proc: return
+        if not SETUP_PS1.exists(): return notify(L('找不到 setup.ps1，请重新下载 Quill。', 'setup.ps1 not found. Please download Quill again.'), 'err')
+        cmd = f"& '{SETUP_PS1}'; Read-Host 'Finished. Press Enter to close this window'"
+        self.setup_proc = subprocess.Popen(['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', cmd], cwd=HERE, creationflags=0x10)  # 新黑框
+        log('运行 setup.ps1'); self.refresh_settings(); self.root.after(1500, self.watch_setup)
+
+    def watch_setup(self):
+        if self.setup_proc.poll() is None: return self.root.after(1500, self.watch_setup)
+        self.setup_proc = None
+        log('setup.ps1 结束，重新检查'); ollama_retry[0] = 0.0  # 能补救的当场补上（Whisper 重新载入，Ollama 重新试），不用重启 Quill
+        if eng.wh_state not in ('ok', 'loading', 'nogpu'):
+            eng.wh_state, eng.load_error = 'loading', ''; eng.loaded.clear(); threading.Thread(target=eng.load, daemon=True).start()
+        post('mode'); self.refresh_settings()
 
     def refresh_settings(self):
         for a in ('settings', 'pop'):
@@ -2618,15 +2738,15 @@ class App:
             if changed: self.refresh_settings(); self.update_dot()
         elif kind == 'key_recorded':
             if self.alive('settings'): self.settings.key_recorded(a[0])
-        elif kind == 'mode':  # Whisper 载完 / 载不了：第一次启动有缺的东西就自己弹出准备情况窗口
-            self.refresh_sub()
+        elif kind == 'mode':  # Whisper 载完 / 载不了：第一次启动有缺的东西就自己打开设置
+            self.refresh_sub(); self.refresh_settings()
             if not self.first_shown: self.first_shown = True; self.root.after(5000, self.first_run)
         elif kind == 'check' and self.alive('check_win'): self.check_win.update(*a)
         elif kind == 'checks_done' and self.alive('check_win'): self.check_win.done(a[0])
 
 
 class Settings:
-    """设置窗口：麦克风 / 快捷键 / 说中文时 / 改错服务 / 界面语言 五块卡片。"""
+    """设置窗口：识别模型 / 麦克风 / 快捷键 / 说中文时 / 改错服务 / 界面语言 六块卡片。"""
     W = 400
     ZH_OUTS = (('en', ('出英文', 'ENGLISH'), ''), ('zh', ('出中文', 'CHINESE'), ''))  # 出中文：删掉口头禅 / 重复 / 改口，不翻译
 
@@ -2639,6 +2759,24 @@ class Settings:
         self.w.bind('<MouseWheel>', lambda e: self.scroll(-int(e.delta / 120) * 3))
 
     # 每一块：先算高度（要先画卡片底再画内容），返回 (高度, 画法)
+    def sec_asr(self, n, x, y, w, draw):
+        h = 101  # 写法和改错服务那张一样：标题行右边状态点，下面一行说明；缺东西时右边一个按钮跑 setup.ps1。100 时 150% 缩放（S=1.4985）下面「标准 4B」字偏 1.5px，ui_test 报没对齐
+        if not draw: return h
+        st = eng.wh_state; lv, _, act = readiness(self.app.ol_last)[0]
+        self.label(n, x, y, w, h, L('识别模型', 'Speech model'))
+        text, info = {'ok': (L('正常', 'Running'), 'Whisper · int8 · ' + L('显卡', 'GPU')), 'loading': (L('载入中…', 'Loading…'), 'Whisper'),
+                      'nogpu': (L('没有显卡', 'No GPU'), L('Whisper 要 NVIDIA 显卡', 'Whisper needs an NVIDIA GPU')),
+                      'nolib': (L('缺运行库', 'Missing runtime'), L('cuBLAS · 约 0.5GB', 'cuBLAS · about 0.5 GB')),
+                      'nomodel': (L('缺模型', 'Missing model'), L('Whisper · 约 1.6GB', 'Whisper · about 1.6 GB'))}.get(st, (L('载入失败', 'Failed'), L('详情见 run.log', 'See run.log')))
+        n.text(x + w - 20, y + 22, '● ' + text, 12, {'ok': GREEN, 'info': SUB}.get(lv, RED), anchor='ne')
+        n.text(x + 20, y + 56, info, 11, SUB, width=w - (130 if act else 40), lines=1)
+        if act: self.setup_btn(n, x, w, y, act)
+        return h
+
+    def setup_btn(self, n, x, w, y, act):
+        busy = bool(self.app.setup_proc)
+        n.button(btn_x(x, w, 0, 1), y + 46, BTN_W, BTN_H, text=L('进行中', 'RUNNING…') if busy else act, size=12, color=SUB if busy else TEXT, cmd=self.app.run_setup)
+
     def sec_mic(self, n, x, y, w, draw):
         devs = [L('系统默认', 'System default')] + eng.devices(); cur = cfg['device'] if cfg['device'] in devs else devs[0]
         dev_y = y + 56; h = dev_y + len(devs) * 44 + 10 - y  # 音量条放在标题那行右边，设置一页放得下不用滚
@@ -2689,14 +2827,17 @@ class Settings:
         app = self.app; st = app.ol_last
         if st == 'down' and time.time() - app.ol_starting < 30: st = 'starting'
         self.label(n, x, y, w, h, L('改错服务', 'Cleanup'))
-        text, color = {'ok': (L('正常', 'Running'), GREEN), 'no_model': (L(f'缺少 {LLM_MODEL}', f'Missing {LLM_MODEL}'), RED), 'down': (L('没有运行', 'Not running'), ORANGE),
+        act = readiness(st)[1][2]  # 没装 Ollama / 缺改错模型：右边换成跑 setup.ps1 的按钮
+        if not ollama_installed(): st = 'none'
+        text, color = {'none': (L('没装 Ollama', 'No Ollama'), RED), 'ok': (L('正常', 'Running'), GREEN), 'no_model': (L(f'缺少 {LLM_MODEL}', f'Missing {LLM_MODEL}'), RED), 'down': (L('没有运行', 'Not running'), ORANGE),
                        'starting': (L('启动中…', 'Starting…'), ORANGE), None: (L('检查中…', 'Checking…'), SUB)}[st]
         n.text(x + w - 20, y + 22, '● ' + text, 12, color, anchor='ne')
         on_gpu = llm_opts()[1]  # 说明只留一行：在哪跑 + 上一句用了几秒
         info = f'Ollama · {LLM_MODEL} · ' + (L('显卡', 'GPU') if on_gpu else 'CPU' + (L('（显卡慢，暂时换）', ' (GPU slow, for now)') if LLM_GPU_LAYERS else ''))
         if llm_stat: info += L(f' · 上一句 {llm_stat["secs"]:.1f} 秒', f' · last {llm_stat["secs"]:.1f} s')
-        n.text(x + 20, y + 56, info, 11, SUB, width=w - (130 if st == 'down' else 40), lines=1)
-        if st == 'down': n.button(btn_x(x, w, 0, 1), y + 46, BTN_W, BTN_H, text=L('启动', 'START'), size=12, cmd=self.start_ol)
+        n.text(x + 20, y + 56, info, 11, SUB, width=w - (130 if act or st == 'down' else 40), lines=1)
+        if act: self.setup_btn(n, x, w, y, act)
+        elif st == 'down': n.button(btn_x(x, w, 0, 1), y + 46, BTN_W, BTN_H, text=L('启动', 'START'), size=12, cmd=self.start_ol)
         t = L('改错模型', 'Model'); n.text(x + 20, y + 86 + BTN_H / 2 - ink_up(t, 12), t, 12, TEXT, anchor='w')  # 和右边那排按钮对着中线
         for i, (k, name) in enumerate(LLM_MODELS):
             n.button(btn_x(x, w, i, 2), y + 86, BTN_W, BTN_H, text=L(*name), size=12, on=k == LLM_MODEL, cmd=lambda k=k: self.set_llm(k))
@@ -2717,7 +2858,7 @@ class Settings:
     @classmethod
     def full_height(cls):
         """完整设置窗口的高度（记录窗口也用它，两个窗口一样高）。各块不画只量高度时用不到 self。"""
-        secs = (cls.sec_mic, cls.sec_key, cls.sec_mode, cls.sec_ol, cls.sec_ui)
+        secs = (cls.sec_asr, cls.sec_mic, cls.sec_key, cls.sec_mode, cls.sec_ol, cls.sec_ui)
         return 92 + sum(f(None, None, 20, 0, 360, False) for f in secs) + 20 * (len(secs) - 1) + 20  # 最后一张卡片离底边 20 = 卡片圆角和窗口圆角同心
 
     @classmethod
@@ -2737,13 +2878,12 @@ class Settings:
 
     def build(self):
         n, app = self.n, self.app
-        secs = [getattr(self, 'sec_' + s) for s in ('mic', 'key', 'mode', 'ol', 'ui')]
+        secs = [getattr(self, 'sec_' + s) for s in ('asr', 'mic', 'key', 'mode', 'ol', 'ui')]
         x, w, y0, gap = 20, 360, 92, 20
         H = self.full_height()
         V, oy = self.view_height(), n.c.canvasy(0) / S  # 改了设置重画时停在原来滚到的位置
         n.reset(H); n.c.configure(height=px(V), scrollregion=(0, 0, px(self.Wd), px(H)), yscrollincrement=px(20))
         n.text(33, 23.5, 'SETTINGS', 22, INK, family=DISPLAY)
-        n.button(261, 33, 30, 30, icon=I_SETUP, size=9, color=ICON_C, cmd=app.open_ready)  # 准备情况；和主页右上角三个圆同位置
         n.button(299, 33, 30, 30, icon=I_CHECK, size=9, color=ICON_C, cmd=app.open_checks)  # 自检
         close_btn(n, self.Wd, self.w.withdraw)
         y = y0
@@ -3152,76 +3292,23 @@ class Checks:
 
 SETUP_PS1 = HERE / 'setup.ps1'
 
+def ollama_installed(): return bool(shutil.which('ollama')) or os.path.exists(os.path.expandvars(r'%LOCALAPPDATA%\Programs\Ollama\ollama.exe'))
+
 def readiness(ol):
-    """准备情况两行：[(lv, 一句人话, 按钮字 或 None)]，lv = ok / warn / fail / info。ol：改错服务状态（App.ol_last）。按钮都是运行 setup.ps1。"""
+    """识别模型、改错服务两行：[(lv, 一句人话, 按钮字 或 None)]（启动时有缺就打开设置；设置卡片的按钮字从这里取），lv = ok / warn / fail / info。ol：改错服务状态（App.ol_last）。按钮都是运行 setup.ps1。"""
     rows = [{'ok': ('ok', L('Whisper 已载入。', 'Whisper is loaded.'), None),
              'loading': ('info', L('载入中…', 'Loading…'), None),
              'nogpu': ('fail', L('没有 NVIDIA 显卡：Whisper 识别要用显卡，现在说不了话。', 'No NVIDIA GPU: Whisper needs one, so voice input is unavailable.'), None),
              'nolib': ('fail', L('缺显卡运行库（cuBLAS，约 0.5GB）。', 'Missing GPU runtime (cuBLAS, about 0.5 GB).'), L('修复', 'FIX')),
              'nomodel': ('fail', L('Whisper 模型（约 1.6GB）还没下载。', 'Whisper model (about 1.6 GB) not downloaded yet.'), L('下载', 'DOWNLOAD'))}.get(eng.wh_state, ('fail', L('没载入成功，详情见 run.log。', 'Failed to load. See run.log.'), L('修复', 'FIX')))]
 
-    if not shutil.which('ollama') and not os.path.exists(os.path.expandvars(r'%LOCALAPPDATA%\Programs\Ollama\ollama.exe')):
+    if not ollama_installed():
         rows.append(('fail', L('没装 Ollama：它负责改语病和翻译，没有它只能原样输出。', 'Ollama is not installed. It does the cleanup and translation; without it your words are typed as is.'), L('安装', 'INSTALL')))
     elif ol == 'no_model': rows.append(('fail', L(f'还没下载改错模型 {LLM_MODEL}（约 2.6GB）。', f'Cleanup model {LLM_MODEL} (about 2.6 GB) not downloaded yet.'), L('下载', 'DOWNLOAD')))
     elif ol == 'down': rows.append(('warn', L('改错服务没在运行，Quill 会自动启动它。', 'The cleanup service is not running; Quill starts it automatically.'), None))
     elif ol is None: rows.append(('info', L('检查中…', 'Checking…'), None))
     else: rows.append(('ok', L(f'Ollama 正常，改错模型 {LLM_MODEL} 在。', f'Ollama is running and cleanup model {LLM_MODEL} is ready.') + ('' if nvidia_gpu() and LLM_GPU_LAYERS else L('现在用 CPU 改错，每句约 5~8 秒。', ' Cleanup runs on the CPU, about 5–8 s per sentence.')), None))
     return rows
-
-
-class Ready:
-    """准备情况窗口：缺 Ollama / 模型 / 显卡库时说清楚缺什么，按钮在黑框 PowerShell 里运行 setup.ps1（装完自动重新检查）。"""
-    NAMES = [('识别模型（Whisper）', 'Speech model (Whisper)'), ('改错服务', 'Cleanup service')]
-    W, ROW = 400, 88
-
-    def __init__(self, app):
-        self.app, self.proc, self.sig, self.btns = app, None, None, []
-        self.w = sub_window(app, '准备情况', self.W)
-        top = 92; by = top + len(self.NAMES) * self.ROW + 16 + 22
-        n = self.n = Neu(self.w, self.W, by + 52 + 20); n.c.pack()
-        close_btn(n, self.W, self.w.withdraw)
-        n.text(33, 23.5, 'SETUP', 22, INK, family=DISPLAY)
-        n.raised(20, top, 360, len(self.NAMES) * self.ROW + 16, 28, d=ELEV)
-        self.rows = []
-        for i, name in enumerate(self.NAMES):
-            y = top + 8 + i * self.ROW
-            n.inset(36, y + 10, 32, 32, 16, d=ELEV * INSET_K)
-            self.rows.append((n.text(52, y + 26, '', 13, SUB, anchor='center'), n.text(84, y + 10, L(*name), 12, TEXT), n.text(84, y + 34, '', 11, SUB), y))
-        n.button(20, by, 360, 52, r=26, text=L('重新检查', 'CHECK AGAIN'), size=12, cmd=lambda: self.refresh(True))
-        n.commit(); self.refresh(); self.w.after(1500, self.tick)
-
-    def build(self): self.refresh(True)
-
-    def tick(self):
-        if not self.w.winfo_exists(): return
-        if self.w.winfo_viewable(): self.refresh()
-        if self.proc and self.proc.poll() is not None: self.proc = None; self.after_setup(); self.refresh(True)
-        self.w.after(1500, self.tick)
-
-    def refresh(self, force=False):
-        rows = readiness(self.app.ol_last); sig = (tuple(rows), bool(self.proc))
-        if sig == self.sig and not force: return
-        self.sig = sig
-        for b in self.btns: self.n.remove(b)
-        self.btns = []
-        for (lv, text, act), (ic, _, d, y) in zip(rows, self.rows):
-            sym, color = Checks.icon(lv)
-            self.n.c.itemconfigure(ic, text=sym, fill=color)
-            self.n.c.itemconfigure(d, text=fit(text, fnt(11), px(190 if act else 276), 3), fill=RED if lv == 'fail' else SUB)
-            if act: self.btns.append(self.n.button(364 - BTN_W, y + 18, BTN_W, BTN_H, text=L('进行中', 'RUNNING…') if self.proc else act, size=12, color=SUB if self.proc else INK, cmd=self.run_setup))
-
-    def run_setup(self):
-        if self.proc or not SETUP_PS1.exists(): return notify(L('找不到 setup.ps1，请重新下载 Quill。', 'setup.ps1 not found. Please download Quill again.'), 'err')
-        cmd = f"& '{SETUP_PS1}'; Read-Host 'Finished. Press Enter to close this window'"
-        self.proc = subprocess.Popen(['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', cmd], cwd=HERE, creationflags=0x10)  # 新黑框
-        log('运行 setup.ps1'); self.refresh(True)
-
-    def after_setup(self):
-        """setup.ps1 跑完：能补救的当场补上（Whisper 重新载入，Ollama 重新试），不用重启 Quill。"""
-        log('setup.ps1 结束，重新检查'); ollama_retry[0] = 0.0
-        if eng.wh_state not in ('ok', 'loading', 'nogpu'):
-            eng.wh_state, eng.load_error = 'loading', ''; eng.loaded.clear(); threading.Thread(target=eng.load, daemon=True).start()
-        post('mode')
 
 
 def mix(a, b, t):

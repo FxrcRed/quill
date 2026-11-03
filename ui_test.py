@@ -84,7 +84,7 @@ def pump(secs):
 pump(6)  # 等 Whisper 载入、主页出 READY
 canvas_texts('主页', app.n.c); canvas_texts('主页常用词', app.wn.c); shot('Quill', 'main'); check_align('主页', app.n); check_align('主页常用词', app.wn)
 for attr, opener, title in (('settings', app.open_settings, '设置'), ('history', app.open_history, '记录'), ('words', app.open_words, '常用词'),
-                            ('check_win', app.open_checks, '自检'), ('ready_win', app.open_ready, '准备情况')):
+                            ('check_win', app.open_checks, '自检')):
     opener(); pump(1.5); win = getattr(app, attr)
     canvas_texts(title, win.n.c); shot(title, attr); check_align(title, win.n); win.w.withdraw()
 ov = app.overlay  # 浮窗各状态（只记字，样子看 e2e_test 存的图）

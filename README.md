@@ -74,7 +74,7 @@ powershell -ExecutionPolicy Bypass -File setup.ps1          # add -Mirror in mai
 `setup.ps1` installs [uv](https://github.com/astral-sh/uv) and Python 3.12 (no system Python needed), the packages,
 the Whisper model, [Ollama](https://ollama.com) with `qwen3:4b`, and a desktop shortcut.
 It is safe to re-run. If a step fails it stops with a red message and what to do next (usually: fix the cause, open a new PowerShell window, run it again).
-If something goes missing later, the wrench icon in Quill's settings (**准备情况**, "Setup") says what and fixes it for you.
+If something goes missing later, the top cards in Quill's settings (Speech model, Cleanup) say what and have a button that fixes it.
 For better cleanup, `ollama pull qwen3:8b` (~5 GB) and pick it in the settings.
 
 Then start **Quill** from the desktop. The first start loads the Whisper model onto the GPU and starts Ollama: it takes a few seconds to about a minute, longer right after a reboot or on a slow disk. The status card says **WAKING** until it shows **READY**, and **the hotkey does nothing before READY**. Then hold **Right Ctrl** and speak.
@@ -82,7 +82,7 @@ Then start **Quill** from the desktop. The first start loads the Whisper model o
 ## Usage tips
 
 - The language button (top right of the status card) cycles **AUTO → EN → CN**: AUTO (default) detects Chinese or English for each sentence; EN / CN fix the language you speak. Output is English, unless you set *When speaking Chinese* → *Chinese* in Settings.
-- Below the status card are **HISTORY** and **WORDS** buttons and a settings gear. Settings: microphone, hotkey (click *Record* and press any key), output mode, interface language (English or Chinese; follows Windows by default); the three round icons at the top right are Setup, Self-test (checks every part) and Close.
+- Below the status card are **HISTORY** and **WORDS** buttons and a settings gear. Settings: speech model and cleanup status, microphone, hotkey (click *Record* and press any key), output mode, interface language (English or Chinese; follows Windows by default); the two round icons at the top right are Self-test (checks every part) and Close.
 - The shrink button (two arrows, top right) turns Quill to a floating ball at the edge of the screen; click it to come back.
 - The moon / sun button (top right) switches between dark and light. Quill follows Windows by default; switching back to the system theme makes it follow again.
 - **HISTORY** keeps the last 20 sentences (the icon in its title row opens the file): the original speech, the English, and the Chinese meaning. You can turn saving off, keep only the last 7 / 30 days, or clear it.

@@ -1,6 +1,6 @@
-r"""用法：.venv\Scripts\python.exe tools\ready_test.py <项目目录> <截图前缀>。「准备情况」窗口 + 状态判断的测试：不启动 Quill 本体（用户的 Quill 开着也行），
-假装各种缺东西的情形（eng.wh_state、Ollama 状态、模型文件）检查 readiness() 的结果，再把窗口截成 <前缀>_<情形>.png。"""
-import importlib.machinery, importlib.util, ctypes, subprocess, sys, time
+r"""用法：.venv\Scripts\python.exe tools\ready_test.py <项目目录> <截图前缀>。状态判断（设置页识别模型 / 改错服务卡片用）的测试：不启动 Quill 本体（用户的 Quill 开着也行），
+假装各种缺东西的情形（eng.wh_state、Ollama 状态、模型文件）检查 readiness() 的结果。卡片样子看 ui_test.py 截的设置页。"""
+import importlib.machinery, importlib.util, ctypes, sys
 import tkinter as tk
 from pathlib import Path
 ctypes.windll.shcore.SetProcessDpiAwareness(1)
@@ -22,7 +22,7 @@ m.eng.load_error = ''
 levels = lambda ol: [r[0] for r in m.readiness(ol)]
 
 m.eng.wh_state = 'ok'
-ok(levels('ok') == ['ok', 'ok', 'ok'], '全齐：三行都是绿')
+ok(levels('ok') == ['ok', 'ok'], '全齐：两行都是绿')
 m.eng.wh_state = 'nogpu'; m.nvidia_gpu = lambda: ''; m.LLM_GPU_LAYERS = 0
 ok(levels('ok')[0] == 'fail' and m.readiness('ok')[0][2] is None, '没有 N 卡：红、没有按钮（装不了）')
 m.nvidia_gpu = lambda: 'GPU'; m.LLM_GPU_LAYERS = -1
@@ -36,13 +36,4 @@ real_which, real_exists = m.shutil.which, m.os.path.exists; m.shutil.which = lam
 ok(m.readiness('down')[1][:1] + m.readiness('down')[1][2:] == ('fail', '安装'), '没装 Ollama：红 + 安装')
 m.shutil.which, m.os.path.exists = real_which, real_exists
 
-w = m.Ready(app)
-def shot(tag):
-    w.refresh(True)
-    m.place_side(app, w.w, w.W); w.w.deiconify(); w.w.chrome.sync(); w.w.lift()
-    for _ in range(15): root.update(); m.sync_chromes(); time.sleep(0.03)
-    pr = subprocess.Popen([sys.executable, str(HERE / 'tools' / 'shot.py'), '准备情况', f'{OUT}_{tag}.png'])
-    while pr.poll() is None: root.update(); time.sleep(0.02)
-m.eng.wh_state = 'nolib'; app.ol_last = 'no_model'; shot('lack')
-m.eng.wh_state = 'nogpu'; m.nvidia_gpu = lambda: ''; app.ol_last = 'ok'; shot('nogpu')
 print('完成')
