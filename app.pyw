@@ -889,6 +889,17 @@ class Engine:
                 except Exception: pass
             down = d
 
+# Whisper 偶尔陷进循环，同一截一直重复到长度上限（「为什么要用这个：Claude、Claude、…、Claud」）。连着 5 次以上、重复部分满 12 字才算：
+# 「快点快点快点快点」「100000」不动。只留一次，末尾被截断的半截也删掉
+LOOP = re.compile(r'(.{1,30}?)\1{4,}(?:(.{0,29})$)?')
+def unloop(t):
+    def one(m):
+        u, tail = m.group(1), m.group(2) or ''
+        if len(m.group(0)) - len(tail) < 12: return m.group(0)
+        if u.startswith(tail): tail = ''
+        return (u if tail else u.rstrip('、，, ')) + tail
+    return LOOP.sub(one, t.replace('�', ''))  # �：循环里半个字的字节，夹在中间会把一串重复切碎
+
 # ---- 识别子进程 ----
 # CUDA / ctranslate2 初始化慢、占 GIL，放在界面进程里刚打开的窗口就点不动 → 识别放在单独的子进程里
 # （app.pyw --asr-worker），这边只用管道送音频、收文字。父 → 子：4 字节样本数 + float32；子 → 父：4 字节长度 + UTF-8（启动时先回 OK 或出错信息）。
@@ -915,8 +926,8 @@ def asr_worker():
             # 温度回退默认 0→1.0 六档，置信度低时整段重解码最多 6 次：真实录音（cer_eval auto，147 段）上限改 0.2 后字错率不变，总耗时 77s → 53s、最慢一段 2.4s → 1.2s
             segs, _ = m.transcribe(a, condition_on_previous_text=False, initial_prompt=prompt, temperature=0.0 if preview else (0.0, 0.2), **kw)
             parts = [t for s in segs if (t := s.text.strip())]
-            if not zh: return ' '.join(parts)
-            return ''.join(' ' + p if i and parts[i - 1][-1].isascii() and p[0].isascii() else p for i, p in enumerate(parts))  # 中文段之间不加空格；自动模式按中文认英文时，两段英文之间要空格（「wantsYesterday」）
+            if not zh: return unloop(' '.join(parts))
+            return unloop(''.join(' ' + p if i and parts[i - 1][-1].isascii() and p[0].isascii() else p for i, p in enumerate(parts)))  # 中文段之间不加空格；自动模式按中文认英文时，两段英文之间要空格（「wantsYesterday」）
     except Exception as e:
         log('识别子进程加载失败', traceback.format_exc())
         return send('NOLIB' if 'cublas' in str(e).lower() else 'models\\whisper 里的文件可能缺了')

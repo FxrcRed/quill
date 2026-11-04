@@ -41,7 +41,8 @@ if fix:
     threading.Thread(target=ft.m.fix_worker, daemon=True).start()
     if 'nosmart' not in sys.argv: ft.m.zh_needs_llm = lambda t: True  # 每句都送模型（nosmart：和 app 一样只送带改口的）
 from faster_whisper import WhisperModel
-wh = WhisperModel(str(HERE / 'models' / 'whisper'), device='cuda', compute_type='int8_float16')
+_m = next((a[6:] for a in sys.argv if a.startswith('model=')), 'whisper')  # model=whisper-large-v3：换 models\ 下别的模型比
+wh = WhisperModel(str(HERE / 'models' / _m), device='cuda', compute_type='int8_float16')
 _t = terms(); _zh = [t for t in _t if not t.isascii()]  # half1 / half2：中文词只放前一半 / 后一半，用来看词表的水分
 if 'half1' in sys.argv: _t = [t for t in _t if t.isascii() or t in _zh[:len(_zh) // 2]]
 if 'half2' in sys.argv: _t = [t for t in _t if t.isascii() or t in _zh[len(_zh) // 2:]]
@@ -58,7 +59,7 @@ for name, ref in labels:
     prompt = base + (prev if ctx else '')
     a = load(D / f'{name}.wav'); t0 = time.time()
     segs, _ = wh.transcribe(a, initial_prompt=None if 'noprompt' in sys.argv else prompt, **kw)  # noprompt：不带句子 + 词表提示
-    hyp = ''.join(s.text for s in segs).strip(); secs.append(time.time() - t0)  # segs 是生成器，取完才算完
+    hyp = ft.m.unloop(''.join(s.text for s in segs).strip()); secs.append(time.time() - t0)  # segs 是生成器，取完才算完；unloop 和 app 一样拦重复循环
     if 'nopy' in sys.argv: pass  # nopy：不换词
     elif 'half1' in sys.argv or 'half2' in sys.argv: hyp = ft.m.pinyin_fix(hyp, [t for t in _t if re.fullmatch(r'[一-鿿]{2,}', t)])
     else: hyp = ft.m.apply_glossary(ft.m.zh_punct(hyp))  # 和 app 一样：标点换全角 → 词表替换 + 拼音换回中文词
