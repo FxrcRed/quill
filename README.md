@@ -96,12 +96,13 @@ Then start **Quill** from the desktop. The first start loads the Whisper model o
 ## Development
 
 - All of the app is one file: [`app.pyw`](app.pyw) (tkinter + Pillow for the UI).
+- `check.py [ui] [prompt]` — runs the checks for whatever you changed: syntax and pyflakes, the end-to-end tests, optionally the UI and correction test sets, then restarts Quill and checks `run.log`.
 - `e2e_test.py [zh]` — end-to-end test without a microphone (feeds a wav at real-time speed).
 - `fix_test.py [zh | zhzh]` — compare correction output on real-world phrases after changing prompts.
 - `term_test.py` — checks how well the model tells a misheard name (cloud → Claude) from the ordinary word.
 - `eval_run.py [en | zh | zhzh | all]` — runs the correction test set with a fixed seed and diffs it against the last run.
 - `cer_eval.py [auto]` — Chinese character error rate on your own recordings in `eval_zh\` (not in git).
-- `harvest.py` — collects test samples by pairing each dictation with the edited message you sent in Claude Code (needs `"save_audio": true` in `settings.json`).
+- `harvest.py` — collects test samples by pairing each dictation with the edited message you sent in Claude Code (needs `"save_audio": true` in `settings.json`). Its report starts with one line per day: latency, timeouts, and how many sentences you edited before sending (timings come from `stats.tsv`, one line per sentence written by Quill).
 - `make_words_demo.py` — regenerates the word-list image.
 - `make_demo.py` — regenerates the GIF and screenshot above.
 - `tools/` — one-off development helpers (window screenshots, UI layout tests, word-list and model comparison scripts, icon and social-preview generators). You don't need them to use Quill. `selftest.bat` and `start.bat` are debug launchers (self-test, and start with a console to see errors); the desktop shortcut and `start.vbs` start Quill normally.

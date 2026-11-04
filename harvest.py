@@ -57,13 +57,14 @@ OUT.mkdir(parents=True, exist_ok=True)
 lab = OUT / 'labels.txt'
 if not lab.exists(): lab.write_text('# 每行：录音名<Tab>你发出去的定稿（harvest.py 自动配的）。不要的行前面加 #，别删。\n', encoding='utf-8')
 have = lab.read_text(encoding='utf-8')
-rep, subs, new, nch = [], Counter(), [], 0
+rep, subs, new, nch, per = [], Counter(), [], 0, {}
 for t, p, w in h:
     if len(p) < 4: continue
     cand = [align(p, m) for mt, m in ms if t <= mt <= t + WINDOW]
     span, r = max(cand, key=lambda x: x[1], default=('', 0))
     if r < MIN_RATIO or abs(len(span) - len(p)) > MAX_LEN * len(p): continue
     changed = span != p; nch += changed
+    d = per.setdefault(f'{t:%m-%d}', [0, 0]); d[0] += 1; d[1] += changed  # 每天配上几句、手改了几句
     if changed:
         for op, a1, a2, b1, b2 in SequenceMatcher(None, p, span, autojunk=False).get_opcodes():
             if op != 'equal' and PUNCT.sub('', p[a1:a2] + span[b1:b2]): subs[f'{p[a1:a2] or "∅"} → {span[b1:b2] or "∅"}'] += 1
@@ -73,6 +74,18 @@ for t, p, w in h:
 if new:
     with lab.open('a', encoding='utf-8') as f: f.write(''.join(l + '\n' for l in new))
 top = [f'{n}×  {k}' for k, n in subs.most_common(40)]
+st = {}  # app 每句一行的计时（app.pyw 的 save_stat）：按天汇总，和手改率放一起看有没有变好
+if (HERE / 'stats.tsv').exists():
+    for c in (l.split('\t') for l in (HERE / 'stats.tsv').read_text(encoding='utf-8').splitlines()[1:]):
+        if len(c) >= 9: st.setdefault(c[0][5:10], []).append(c)
+def q(v, k): v = sorted(v); return f'{v[min(len(v) - 1, int(k * len(v)))]:.2f}' if v else '-'
+day = []
+for d in sorted(set(per) | set(st)):
+    c, (a, b) = st.get(d, []), per.get(d, (0, 0)); ps = [float(x[5]) for x in c if x[5]]
+    day.append(f'{d}  ' + (f'{len(c):>3} 句  出字中位 {q(ps, .5)}s / 最慢一成 {q(ps, .9)}s  识别超时 {sum(x[6] == "1" for x in c)}'
+                           f'  没出字 {sum(x[8] == "1" for x in c)}  ' if c else '') + f'手改 {b}/{a}' + (f'（{b / a:.0%}）' if a else ''))
 (OUT / 'harvest.txt').write_text(f'配上 {len(rep)} 条（改过 {nch}），新加录音 {len(new)} 段\n\n'
-                                 '== 错字 → 正字（出现次数）==\n' + '\n'.join(top) + '\n\n== 配对 ==\n' + '\n'.join(rep) + '\n', encoding='utf-8')
+                                 '== 每天（句数、出字耗时、超时来自 stats.tsv；手改 = 发给 Claude 前改过的句数 / 配上的句数）==\n'
+                                 + '\n'.join(day) + '\n\n== 错字 → 正字（出现次数）==\n' + '\n'.join(top) + '\n\n== 配对 ==\n' + '\n'.join(rep) + '\n', encoding='utf-8')
+print('\n'.join(day[-7:]))
 print(f'配上 {len(rep)} 条（改过 {nch}），新加录音 {len(new)} 段 → {OUT / "harvest.txt"}')

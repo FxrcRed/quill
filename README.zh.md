@@ -93,12 +93,13 @@ powershell -ExecutionPolicy Bypass -File setup.ps1 -Mirror     # 国内网络加
 ## 开发
 
 - 整个程序就一个文件：[`app.pyw`](app.pyw)（界面用 tkinter + Pillow 画）。
+- `check.py [ui] [prompt]`：按改过的文件跑检查：语法和 pyflakes、端到端测试，可选界面和改错测试集，最后重启 Quill 看 `run.log`。
 - `e2e_test.py [zh]`：不用麦克风的端到端测试（按实时速度喂一段 wav）。
 - `fix_test.py [zh | zhzh]`：改了提示词后，用真实说法对比改错效果。
 - `term_test.py`：测模型能不能分清听错的名字（cloud → Claude）和普通词。
 - `eval_run.py [en | zh | zhzh | all]`：用固定随机种子跑改错测试集，和上一次对比。
 - `cer_eval.py [auto]`：在你自己的录音（`eval_zh\`，不进 git）上算中文字错率。
-- `harvest.py`：把每句识别和你在 Claude Code 里改完发出去的消息配对，自动收测试样本（要在 `settings.json` 里开 `"save_audio": true`）。
+- `harvest.py`：把每句识别和你在 Claude Code 里改完发出去的消息配对，自动收测试样本（要在 `settings.json` 里开 `"save_audio": true`）。报告开头每天一行：出字耗时、超时次数、发出前改过几句（计时来自 Quill 每句写一行的 `stats.tsv`）。
 - `make_words_demo.py`：重新生成常用词演示图。
 - `make_demo.py`：重新生成上面的 GIF 和截图。
 - `tools/`：开发用的一次性小工具（窗口截图、界面布局测试、常用词和模型对比脚本、图标和分享预览图生成）。用 Quill 不需要管它们。`selftest.bat` 和 `start.bat` 是调试用启动器（自检；带黑框启动看报错），平时用桌面快捷方式或 `start.vbs`。

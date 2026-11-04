@@ -707,7 +707,10 @@ class Job:
 
     def finish(self, a):
         """松开后整段给 Whisper（最多等 WHISPER_TIMEOUT 秒），出错 / 超时就用最后一次预览的字。没声音不送（Whisper 对着静音会编一句）。"""
-        text = (eng.whisper_start(a, self.lang)() if has_speech(a) else '') or self.heard
+        speech = has_speech(a)
+        text = eng.whisper_start(a, self.lang)() if speech else ''
+        self.miss = speech and not text  # 整段识别超时 / 出错，用的是预览（stats.tsv 记一笔）
+        text = text or self.heard
         mark('wh')
         if not re.search(r'\w', text): return None  # 只有标点（「。 。 。」）：当没听清，别粘出去
         if self.auto and not re.search(r'[一-鿿]', text): self.lang = self.seg_lang = 'en'
@@ -842,7 +845,7 @@ class Engine:
         self.loaded.wait()
         if not self.wh: return notify(self.load_error, 'err', True)
         t = time.time(); seg = job.finish(audio)
-        if not seg: return notify(L('没听清，再说一次（靠近麦克风、说慢一点）。', "Didn't catch that. Try again, a bit closer and slower."), 'warn', True)
+        if not seg: save_stat(job, audio, None, rec); return notify(L('没听清，再说一次（靠近麦克风、说慢一点）。', "Didn't catch that. Try again, a bit closer and slower."), 'warn', True)
         raw = seg.raw; post('thinking', raw)
         if rec: REC_OF[raw] = rec
         fixed = seg.get('fixed')
@@ -852,6 +855,7 @@ class Engine:
         if not job.by_key: mark('paste')
         r0 = lat.get('rel', t)  # 分段计时（松开后第几秒）：Whisper / 改错首字 / 英文写完 / 粘贴
         log('计时 ' + ' '.join(f'{n}={lat[k] - r0:.2f}' for n, k in (('Whisper', 'wh'), ('首字', 'llm_first'), ('英文', 'llm_en'), ('粘贴', 'paste')) if k in lat))
+        save_stat(job, audio, seg, rec)
         n = next(SEG_NO); post('fixed', n, raw, fixed, job.by_key, seg.failed)
         if self.busy is job: self.busy = False; post('state', 'ready')  # 中文翻译还在后台出，不耽误说下一句
         post('zh', n, seg.get('zh'))
@@ -990,6 +994,19 @@ def save_history(raw, fixed, zh):
     with open(HIST, 'a', encoding='utf-8') as f:
         rec = REC_OF.pop(raw, '')
         f.write(f'{datetime.now():%Y-%m-%d %H:%M}\n说：{raw}\n改：{fixed}\n译：{zh}\n' + (f'录：{rec}\n' if rec else '') + '\n')
+
+STATS = HERE / 'stats.tsv'
+def save_stat(job, audio, seg, rec):
+    """每句一行、不含文字（记录关了也写）：延迟、超时、没出字有没有变好，harvest.py 按天汇总。秒数都从松开算起，改错秒从识别完算起。"""
+    f = lambda k, a='rel': f'{lat[k] - lat[a]:.2f}' if k in lat and a in lat else ''
+    row = (f'{datetime.now():%Y-%m-%d %H:%M:%S}', seg.lang if seg else job.lang, f'{len(audio) / RATE:.1f}', f('wh'), f('llm_en', 'wh'), f('paste'),
+           int(job.miss), int(bool(seg and seg.failed)), int(not seg), rec or '')
+    try:
+        new = not STATS.exists()
+        with open(STATS, 'a', encoding='utf-8') as fh:
+            if new: fh.write('时间\t语言\t录音秒\t识别秒\t改错秒\t粘贴秒\t识别没出结果\t改错失败\t没出字\t录音\n')
+            fh.write('\t'.join(map(str, row)) + '\n')
+    except OSError as e: log('stats.tsv 写不了：', repr(e))
 
 
 def set_clip(text):

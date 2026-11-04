@@ -27,7 +27,7 @@ ctypes.windll.shcore.SetProcessDpiAwareness(1)
 loader = importlib.machinery.SourceFileLoader('app', str(HERE / 'app.pyw')); spec = importlib.util.spec_from_loader('app', loader)
 m = importlib.util.module_from_spec(spec); loader.exec_module(m)
 m.load_fonts(); root = tk.Tk(); root.withdraw(); m.root = root; m.S = S = root.winfo_fpixels('1i') / 96; m.setup_fonts(root)
-m.save_history = m.save_cfg = lambda *a: None
+m.save_history = m.save_cfg = m.save_stat = lambda *a: None
 m.WORDS_FILE = HERE / '_demo_words.txt'; m.WORDS_FILE.write_text('Claude Code: cloud code\nGitHub\nQuill\n', encoding='utf-8')  # 演示用词表，不用自己的
 m.word_sugs = lambda: [('cloud code', 'Claude Code', 3, 'open cloud code and run the tests')]  # 常用词卡片里的「可能听错」示例（不读真实记录）
 m.App.words_loop = lambda self: None  # 不扫真实记录

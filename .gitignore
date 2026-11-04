@@ -4,12 +4,14 @@ models/
 __pycache__/
 history.txt
 run.log
+stats.tsv
 selftest.out
 test.wav
 e2e_out/
 test_zh.wav
 settings.json
 HANDOFF.md
+HANDOFF-log.md
 CLAUDE.md
 words.txt
 words_scan.json
