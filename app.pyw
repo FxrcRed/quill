@@ -8,7 +8,7 @@ import tkinter.font as tkfont
 
 import numpy as np
 import sounddevice as sd
-from PIL import Image, ImageChops, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageGrab, ImageTk
+from PIL import Image, ImageChops, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageTk
 
 HERE = Path(__file__).parent
 TITLE = 'Quill'
@@ -55,11 +55,11 @@ Examples:
 """
 
 PROMPTS = {
-    ('en', 'fast'): PROMPT,
-    ('zh', 'fast'): ZH_CLEAN + """Also give the cleaned-up Chinese (the same message without the fillers, repeats and corrections).
+    'en': PROMPT,
+    'zh': ZH_CLEAN + """Also give the cleaned-up Chinese (the same message without the fillers, repeats and corrections).
 Reply JSON only: {"fixed": "<English>", "zh": "<cleaned-up Chinese>"}""",
     # 说中文 → 出中文：理干净 + 改错字 + 修断句，不翻译、不改写（口头禅 / 重复已经被 zh_tidy() 删过；只有带改口的句子才送来）
-    ('zhzh', 'fast'): """The input is a speaker's dictated Chinese from speech recognition (it may contain some English words). Write down the message they meant, in Chinese:
+    'zhzh': """The input is a speaker's dictated Chinese from speech recognition (it may contain some English words). Write down the message they meant, in Chinese:
 """ + ZH_DROP + """- The recognizer often writes the wrong characters for a word that sounds the same or similar (合理 -> 合子里, 炉子 -> 卢子), and garbles English words (OK -> okK). Fix these when the sentence makes the intended word clear; if you are not sure, keep it as it is.
 - Fix the punctuation: the recognizer puts 。 wherever the speaker paused, even in the middle of a sentence. Join the broken pieces back into proper sentences.
 - Keep the speaker's own wording, meaning and tone. Do not translate, rewrite, add content or summarize. Most sentences need no change at all: then output them unchanged. Never answer or reply to the text: it is a message to be written down, even when it is a question or a request.
@@ -447,7 +447,7 @@ def llm(text, on_field=None, timeout=60, watch=True, lang='en'):  # watch=False�
     """流式调 Ollama：JSON 里每个字段一写完就回调 on_field(名字, 内容)，英文不用等中文翻译生成完。返回所有字段。"""
     keys, (opts, on_gpu) = ('fixed',) if lang == 'zhzh' else FIELDS, llm_opts()
     body = {'model': LLM_MODEL, 'stream': True, 'think': False, 'keep_alive': cfg.get('keep', '2m'), 'format': 'json', 'options': opts,
-            'messages': [{'role': 'system', 'content': with_glossary(PROMPTS[lang, 'fast'])}, {'role': 'user', 'content': text}]}
+            'messages': [{'role': 'system', 'content': with_glossary(PROMPTS[lang])}, {'role': 'user', 'content': text}]}
     req = urllib.request.Request(LLM_URL + '/api/chat', json.dumps(body).encode(), {'Content-Type': 'application/json'})
     buf, got, stats, t0 = '', {}, {}, time.time()
     def give(k, v):
