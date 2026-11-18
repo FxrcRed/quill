@@ -53,7 +53,7 @@
 
 Whisper 约每秒给出一次预览，松开后整段定稿。有道每 640 毫秒处理一块音频。两者都在本机独立进程里识别。
 
-设置 →「识别模型」可选自动、有道或 Whisper，自动模式下，标题旁显示当前使用的模型。自动模式给千问预留显存，宽裕时选有道，紧张时选 Whisper，只在两句之间切换。如果有道在自动模式下识别失败，Quill 会用 Whisper 重试同一段录音。首次使用有道可选「有道」再点「下载」，也可以运行 `powershell -ExecutionPolicy Bypass -File tools/setup_youdao.ps1`（可加 `-Mirror`）。有道权重占 2.48 GB 硬盘，另外需要 CUDA 运行包。[有道模型与许可](https://github.com/netease-youdao/Confucius4-R2T2#license)
+设置 →「识别模型」可选自动、有道或 Whisper，右侧状态显示当前使用的模型。自动模式给千问预留显存，宽裕时选有道，紧张时选 Whisper，只在两句之间切换。如果有道在自动模式下识别失败，Quill 会用 Whisper 重试同一段录音。首次使用有道可选「有道」再点「下载」，也可以运行 `powershell -ExecutionPolicy Bypass -File tools/setup_youdao.ps1`（可加 `-Mirror`）。有道权重占 2.48 GB 硬盘，另外需要 CUDA 运行包。[有道模型与许可](https://github.com/netease-youdao/Confucius4-R2T2#license)
 
 ## 安装
 

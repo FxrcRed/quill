@@ -54,7 +54,7 @@ hold key → microphone (16 kHz)
 
 Whisper previews about once a second and transcribes the full recording on release. Youdao previews every 640 ms. Both run locally in a separate process.
 
-Settings → Speech model offers Auto, Youdao and Whisper and shows the active recognizer beside the title in Auto mode. Auto reserves room for Qwen, picks Youdao when GPU memory allows and switches between recordings. If Youdao fails during a recording in Auto, Quill retries the same audio with Whisper. To add the optional Youdao model, select Youdao and click Download, or run `powershell -ExecutionPolicy Bypass -File tools/setup_youdao.ps1`. The weights take 2.48 GB of disk in addition to the CUDA runtime. [Youdao model and license](https://github.com/netease-youdao/Confucius4-R2T2#license)
+Settings → Speech model offers Auto, Youdao and Whisper and shows the active recognizer at the right of the header. Auto reserves room for Qwen, picks Youdao when GPU memory allows and switches between recordings. If Youdao fails during a recording in Auto, Quill retries the same audio with Whisper. To add the optional Youdao model, select Youdao and click Download, or run `powershell -ExecutionPolicy Bypass -File tools/setup_youdao.ps1`. The weights take 2.48 GB of disk in addition to the CUDA runtime. [Youdao model and license](https://github.com/netease-youdao/Confucius4-R2T2#license)
 
 ## Install
 

@@ -3056,11 +3056,9 @@ class Settings:
         st = eng.wh_state
         h = 102 if st in ('ok', 'loading') else 154
         if not draw: return h
-        title = L('识别模型', 'Speech model')
-        self.label(n, x, y, w, h, title)
+        self.label(n, x, y, w, h, L('识别模型', 'Speech model'))
         status = active_asr() if st == 'ok' else L('载入中…', 'Loading…') if st == 'loading' else L('未就绪', 'Unavailable')
-        if st != 'ok' or cfg.get('asr', 'auto') == 'auto' or cfg.get('asr') != getattr(eng.wh, 'name', None):
-            n.text(x + 20 + fnt(12).measure(title) / S + 10, y + 25, status, 11, SUB)
+        self.header_status(n, x, y, w, status, {'ok': GREEN, 'loading': ORANGE}.get(st, RED))
         width = (w - 60) / 3
         for i, (key, text) in enumerate((('auto', L('自动', 'Auto')), ('youdao', L('有道', 'Youdao')), ('whisper', 'Whisper'))):
             n.button(x + 20 + i * (width + 10), y + 48, width, BTN_H, text=text, size=12,
@@ -3111,7 +3109,7 @@ class Settings:
             n.button(bx, y + 14, BTN_W, BTN_H, text=L('进行中', 'RUNNING…') if act and app.setup_proc else act or L('启动', 'START'), size=12,
                      color=SUB if act and app.setup_proc else TEXT, cmd=app.run_setup if act else self.start_ol)
             n.text(bx - 12, y + 14 + BTN_H / 2 - ink_up(text, 12), '● ' + text, 12, color, anchor='e')
-        else: n.text(x + w - 20, y + 22, '● ' + text, 12, color, anchor='ne')
+        else: self.header_status(n, x, y, w, text, color)
         on_gpu, v = llm_opts()[1], app.vram
         info = f'{LLM_MODEL} · ' + (L('显卡', 'GPU') if on_gpu else 'CPU' + (L('（显卡慢，暂时换）', ' (GPU slow, for now)') if LLM_GPU_LAYERS else ''))
         if v is not None: info += L(f' · 占显存 {v} GB', f' · {v} GB VRAM') if v else L(' · 已释放显存', ' · unloaded')
@@ -3173,6 +3171,9 @@ class Settings:
         """卡片底 + 标题。"""
         n.raised(x, y, w, h, 28, d=ELEV)
         n.text(x + 20, y + 24, name, 12, TEXT)
+
+    def header_status(self, n, x, y, w, text, color):
+        n.text(x + w - 20, y + 22, '● ' + text, 12, color, anchor='ne')
 
     def build(self):
         n, app = self.n, self.app
