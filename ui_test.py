@@ -52,12 +52,17 @@ def check_align(where, n):
     """按钮里的字 / 图标离按钮中心多远；同一行左边的标签（「Model」「快捷键」、标题）和右边按钮的中心差多少。"""
     c, S = n.c, m.S; oy = c.canvasy(0)
     im = np.asarray(m.print_window(c.winfo_id()).convert('L')).astype(int)
+    top, bottom = 0, im.shape[0]
+    for bar in n.btns:
+        if isinstance(bar, m.ScrollBar) and bar.pins:
+            # The scroll fade masks part of the glyphs. Only measure fully visible controls.
+            top, bottom = m.History.FADE * S, (bar.view - m.History.FADE_B) * S
     rows, mine = [], set()
     for b in n.btns:
         if not isinstance(b, m.Btn) or not b.lab: continue
         mine.update(b.lab); x, y, w, h = b.box
         cx, cy = (x + w / 2) * S, (y + h / 2) * S - oy
-        if not 0 < cy < im.shape[0]: continue
+        if cy - h * S / 2 < top or cy + h * S / 2 > bottom: continue
         rows.append((cy, h * S / 2, b))
         p = ink_center(im, round(x * S) + 6, round(y * S - oy) + 4, round((x + w) * S) - 6, round((y + h) * S - oy) - 4)
         if not p: continue

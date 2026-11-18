@@ -3054,20 +3054,20 @@ class Settings:
     # 每一块：先算高度（要先画卡片底再画内容），返回 (高度, 画法)
     def sec_asr(self, n, x, y, w, draw):
         st = eng.wh_state
-        h = 102 if st in ('ok', 'loading') else 154
+        h = 110 if st in ('ok', 'loading') else 162
         if not draw: return h
         self.label(n, x, y, w, h, L('识别模型', 'Speech model'))
         status = active_asr() if st == 'ok' else L('载入中…', 'Loading…') if st == 'loading' else L('未就绪', 'Unavailable')
         self.header_status(n, x, y, w, status, {'ok': GREEN, 'loading': ORANGE}.get(st, RED))
         width = (w - 60) / 3
         for i, (key, text) in enumerate((('auto', L('自动', 'Auto')), ('youdao', L('有道', 'Youdao')), ('whisper', 'Whisper'))):
-            n.button(x + 20 + i * (width + 10), y + 48, width, BTN_H, text=text, size=12,
+            n.button(x + 20 + i * (width + 10), y + 56, width, BTN_H, text=text, size=12,
                      on=cfg.get('asr', 'auto') == key, cmd=lambda key=key: self.set_asr(key))
         if st not in ('ok', 'loading'):
             _, info, act = readiness(self.app.ol_last)[0]
-            n.text(x + 20, y + 106, info, 11, SUB, width=w - (135 if act else 40), lines=2)
+            n.text(x + 20, y + 114, info, 11, SUB, width=w - (135 if act else 40), lines=2)
             if act:
-                n.button(btn_x(x, w, 0, 1), y + 100, BTN_W, BTN_H, text=act, size=12,
+                n.button(btn_x(x, w, 0, 1), y + 108, BTN_W, BTN_H, text=act, size=12,
                          cmd=lambda: self.app.run_setup(youdao=cfg.get('asr') == 'youdao'))
         return h
 
