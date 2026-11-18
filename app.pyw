@@ -3056,9 +3056,11 @@ class Settings:
         st = eng.wh_state
         h = 102 if st in ('ok', 'loading') else 154
         if not draw: return h
-        self.label(n, x, y, w, h, L('识别模型', 'Speech model'))
+        title = L('识别模型', 'Speech model')
+        self.label(n, x, y, w, h, title)
         status = active_asr() if st == 'ok' else L('载入中…', 'Loading…') if st == 'loading' else L('未就绪', 'Unavailable')
-        n.text(x + w - 20, y + 24, status, 12, GREEN if st == 'ok' else SUB, anchor='ne')
+        if st != 'ok' or cfg.get('asr', 'auto') == 'auto' or cfg.get('asr') != getattr(eng.wh, 'name', None):
+            n.text(x + 20 + fnt(12).measure(title) / S + 10, y + 25, status, 11, SUB)
         width = (w - 60) / 3
         for i, (key, text) in enumerate((('auto', L('自动', 'Auto')), ('youdao', L('有道', 'Youdao')), ('whisper', 'Whisper'))):
             n.button(x + 20 + i * (width + 10), y + 48, width, BTN_H, text=text, size=12,
