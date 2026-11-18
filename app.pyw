@@ -1,6 +1,6 @@
 """本地英文语音输入（图形界面版）：按住快捷键或界面按钮说英文 → Whisper 识别 → Qwen 改语病 + 中文翻译 → 粘贴到光标处。
 双击桌面「Quill」图标启动（pythonw，无黑框）。--selftest：无人值守自检，结果写 run.log 后退出。"""
-import math, ctypes, ctypes.wintypes, difflib, itertools, json, os, queue, re, shutil, socket, subprocess, sys, threading, time, traceback, urllib.error, urllib.request, wave
+import base64, http.client, io, math, ctypes, ctypes.wintypes, difflib, itertools, json, os, queue, re, shutil, socket, subprocess, sys, threading, time, traceback, urllib.error, urllib.request, wave
 from datetime import datetime, timedelta
 from pathlib import Path
 import tkinter as tk
@@ -702,13 +702,20 @@ class Job:
     """一次录音。说话时每隔约 1 秒用 Whisper 把目前为止的整段认一遍给浮窗看（heard）；松开后整段再认一次，结果当一句去改。"""
     def __init__(self, by_key, lang='en', out='en'):
         self.by_key, self.auto, self.out, self.heard = by_key, lang == 'auto', out, ''
+        self.asr_policy = cfg.get('asr', 'auto')
+        self.stream_lock = threading.Lock()
+        self.prefix, self.transcript, self.consumed, self.token_limit = '', '', 0, 10
+        self.stream_error = None
         self.lang = 'zh' if self.auto else lang  # 自动：先按中文认。说的是英文时，按中文认出来的照样是英文（715 段真实录音 + 40 段英文只判错 1 段），不用再认一遍
         self.seg_lang = 'zhzh' if self.lang == 'zh' and out == 'zh' else self.lang  # 改错用哪套提示词
 
     def finish(self, a):
         """松开后整段给 Whisper（最多等 WHISPER_TIMEOUT 秒），出错 / 超时就用最后一次预览的字。没声音不送（Whisper 对着静音会编一句）。"""
         speech = has_speech(a)
-        text = eng.whisper_start(a, self.lang)() if speech else ''
+        if not speech:
+            self.miss = False
+            return None
+        text = eng.final_text(self, a)
         self.miss = speech and not text  # 整段识别超时 / 出错，用的是预览（stats.tsv 记一笔）
         text = text or self.heard
         mark('wh')
@@ -717,7 +724,124 @@ class Job:
         return Seg(text, self.seg_lang)
 
 
-WH_ERRORS = {'nogpu': ('没有 NVIDIA 显卡：Quill 用 Whisper 识别，要 NVIDIA 显卡。', 'No NVIDIA GPU: Quill recognizes speech with Whisper, which needs one.'),
+def youdao_dir():
+    folder = HERE / 'models/r2t2'
+    files = ('model.gguf', 'mmproj.gguf', 'tokenizer.json', 'llama/llama-server.exe', 'llama/.b10950-ready')
+    return folder if all((folder / f).is_file() for f in files) else None
+
+def own_server(process):
+    """A Windows job closes our server even if the GUI is force-closed."""
+    from ctypes import wintypes as wt
+    class Basic(ctypes.Structure):
+        _fields_ = [('times', ctypes.c_int64 * 2), ('flags', wt.DWORD), ('minimum', ctypes.c_size_t),
+                    ('maximum', ctypes.c_size_t), ('processes', wt.DWORD), ('affinity', ctypes.c_size_t),
+                    ('priority', wt.DWORD), ('scheduling', wt.DWORD)]
+    class Extended(ctypes.Structure):
+        _fields_ = [('basic', Basic), ('io', ctypes.c_uint64 * 6), ('memory', ctypes.c_size_t * 4)]
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.CreateJobObjectW.argtypes, kernel.CreateJobObjectW.restype = [ctypes.c_void_p, wt.LPCWSTR], wt.HANDLE
+    kernel.SetInformationJobObject.argtypes = [wt.HANDLE, ctypes.c_int, ctypes.c_void_p, wt.DWORD]
+    kernel.AssignProcessToJobObject.argtypes = [wt.HANDLE, wt.HANDLE]
+    kernel.CloseHandle.argtypes = [wt.HANDLE]
+    handle = kernel.CreateJobObjectW(None, None)
+    if not handle: raise ctypes.WinError(ctypes.get_last_error())
+    info = Extended(); info.basic.flags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    if not (kernel.SetInformationJobObject(handle, 9, ctypes.byref(info), ctypes.sizeof(info))
+            and kernel.AssignProcessToJobObject(handle, int(process._handle))):
+        err = ctypes.get_last_error(); kernel.CloseHandle(handle); raise ctypes.WinError(err)
+    return lambda: kernel.CloseHandle(handle)
+
+class Youdao:
+    name = 'youdao'
+    step = 10240  # 640 ms at 16 kHz; the first block has 160 ms extra lookahead
+
+    def __init__(self):
+        from tokenizers import Tokenizer
+        folder = youdao_dir()
+        if folder is None: raise RuntimeError('noyoudao')
+        self.tokens = Tokenizer.from_file(str(folder / 'tokenizer.json'))
+        with socket.socket() as sock:
+            sock.bind(('127.0.0.1', 0)); self.port = sock.getsockname()[1]
+        self.key = os.urandom(32).hex()
+        cmd = [str(folder / 'llama/llama-server.exe'), '-m', str(folder / 'model.gguf'), '--mmproj', str(folder / 'mmproj.gguf'),
+               '--host', '127.0.0.1', '--port', str(self.port), '--api-key', self.key, '--offline', '-ngl', '99', '-c', '4096', '-np', '1', '--log-disable']
+        env = os.environ.copy()
+        env['PATH'] = os.pathsep.join([str(p) for p in cublas_dirs()] + [env.get('PATH', '')])
+        self.p = subprocess.Popen(cmd, env=env, cwd=folder, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                  stderr=subprocess.DEVNULL, creationflags=0x08000000)
+        self.close_job = None
+        try:
+            self.close_job = own_server(self.p)
+            deadline = time.monotonic() + 60
+            while self.p.poll() is None and time.monotonic() < deadline:
+                try:
+                    props = self.request('/props', timeout=1)
+                    if props.get('modalities', {}).get('audio'):
+                        self.marker = props['media_marker']
+                        self.decode(np.zeros(6400, np.float32), 'en', '', 4)
+                        return
+                except (ConnectionError, TimeoutError, http.client.HTTPException): pass
+                time.sleep(0.15)
+            raise RuntimeError('Youdao server failed to start')
+        except Exception:
+            self.close()
+            raise
+
+    def close(self):
+        if self.close_job:
+            self.close_job(); self.close_job = None
+        try: self.p.wait(timeout=0.5)
+        except subprocess.TimeoutExpired:
+            self.p.kill(); self.p.wait(timeout=5)
+
+    def request(self, path, data=None, timeout=WHISPER_TIMEOUT):
+        conn = http.client.HTTPConnection('127.0.0.1', self.port, timeout=timeout)
+        try:
+            conn.request('POST' if data is not None else 'GET', path, None if data is None else json.dumps(data),
+                         {'Content-Type': 'application/json', 'Authorization': 'Bearer ' + self.key})
+            resp = conn.getresponse()
+            if resp.status == 503 and path == '/props': raise ConnectionError('loading')
+            if resp.status != 200: raise RuntimeError(f'Youdao HTTP {resp.status}')
+            return json.loads(resp.read())
+        finally: conn.close()
+
+    def decode(self, audio, lang, prefix, limit):
+        terms = glossary()[0]
+        if lang == 'en':
+            terms = [t for t in terms if t.isascii()]
+            hint = 'Glossary: ' + ', '.join(terms) + '.' if terms else ''
+        else:
+            hint = ('以下是普通话的句子，使用简体中文。' if lang == 'zh' else '') + ('常用词：' + '、'.join(terms) + '。' if terms else '')
+        tag = {'en': 'language English<asr_text>', 'zh': 'language Chinese<asr_text>', 'auto': ''}[lang]
+        prompt = f'<|im_start|>system\n{hint}<|im_end|>\n<|im_start|>user\n{self.marker}<|im_end|>\n<|im_start|>assistant\n{tag}{prefix}'
+        buf = io.BytesIO()
+        with wave.open(buf, 'wb') as w:
+            w.setparams((1, 2, RATE, 0, 'NONE', 'not compressed'))
+            w.writeframes(np.clip(audio * 32768, -32768, 32767).astype(np.int16).tobytes())
+        blob = base64.b64encode(buf.getvalue()).decode('ascii')
+        reply = self.request('/completion', {'prompt': {'prompt_string': prompt, 'multimodal_data': [blob]},
+                             'temperature': 0, 'repeat_penalty': 1, 'n_predict': limit, 'cache_prompt': False, 'seed': 42})
+        return (prefix + reply['content']).replace('\ufffd', '').split('|')[0]
+
+    def advance(self, job, audio, final=False):
+        lang = 'auto' if job.auto else job.lang
+        end = len(audio) if final else job.consumed + (self.step if job.consumed else self.step + 2560)
+        if end > len(audio) or (not final and end <= job.consumed): return job.transcript
+        # If the hotkey was released before previews caught up, allow enough tokens for the unprocessed tail.
+        limit = max(32, (end - job.consumed) // 800 + 8) if final else job.token_limit
+        raw = self.decode(audio[:end], lang, job.prefix, min(2048, limit))
+        text = raw.partition('<asr_text>')[2] if job.auto else raw
+        ids = self.tokens.encode(raw, add_special_tokens=False).ids[:-1]
+        stable = self.tokens.decode(ids, skip_special_tokens=False)
+        while ids and '\ufffd' in stable:
+            ids.pop(); stable = self.tokens.decode(ids, skip_special_tokens=False)
+        if job.auto and not text: stable = ''
+        job.token_limit = 8 if len(stable) > len(job.prefix) else min(16, job.token_limit + 1)
+        job.consumed, job.prefix, job.transcript = end, stable, text.strip()
+        return job.transcript
+
+WH_ERRORS = {'nogpu': ('没有 NVIDIA 显卡：语音识别需要 NVIDIA 显卡。', 'Speech recognition needs an NVIDIA GPU.'),
+             'noyoudao': ('缺少有道识别模型或运行程序。', 'Youdao model or runtime is missing.'),
              'nolib': ('缺显卡运行库（cuBLAS）：去设置里识别模型那张卡片点「修复」。', 'Missing GPU runtime (cuBLAS): click Fix on the Speech model card in Settings.'),
              'nomodel': ('没有识别模型（models\\whisper）：去设置里识别模型那张卡片点「下载」。', 'No speech model (models\\whisper): click Download on the Speech model card in Settings.'),
              'error': ('识别模型加载失败，详情见 run.log。', 'The speech model failed to load. See run.log.')}
@@ -726,6 +850,9 @@ class Engine:
     def __init__(self):
         self.wh, self.load_error, self.loaded = None, '', threading.Event()  # Whisper 识别子进程，载不了就是 None
         self.wh_state = 'loading'  # loading / ok / nogpu 没有 NVIDIA 显卡 / nolib 缺 cuBLAS / nomodel 没下 Whisper 模型 / error
+        self.switch_lock, self.gate = threading.Lock(), threading.Lock()
+        self.spare_since, self.retry_youdao = None, 0.
+        self.retry_pending = False
         self.stream, self.rec, self.src, self.chunks, self.probe, self.peak = None, False, None, [], None, 0.0
         self.key_paused, self.busy, self.job, self.tried = False, False, None, False  # tried：已经试过打开麦克风
 
@@ -757,19 +884,71 @@ class Engine:
             log('麦克风打不开', name, traceback.format_exc()); self.stream = None
             notify(L('这个麦克风打不开：换一个试试，或检查 Windows 设置 → 隐私和安全性 → 麦克风。', "Can't open this microphone. Try another one, or check Windows Settings → Privacy & security → Microphone."), 'err'); return False
 
-    def load(self):
-        """Whisper large-v3-turbo（显卡）：说话时的预览和松开后的结果都是它认的。"""
-        t = time.time()
+    def target_model(self):
+        mode = cfg.get('asr', 'auto')
+        if mode in ('whisper', 'youdao'): return mode
+        now = time.monotonic()
+        current = getattr(self.wh, 'name', None)
+        if youdao_dir() is None or now < self.retry_youdao: return 'whisper'
         try:
-            if not nvidia_gpu(): self.wh_state = 'nogpu'
-            elif not (HERE / 'models' / 'whisper' / 'model.bin').exists(): self.wh_state = 'nomodel'
-            else:
-                try: self.wh = AsrProc(); self.wh_state = 'ok'; log(f'识别模型已加载 {time.time() - t:.1f}s')
-                except Exception as e: self.wh_state = {'NOGPU': 'nogpu', 'NOLIB': 'nolib'}.get(str(e), 'error')
-            if not self.wh: self.load_error = L(*WH_ERRORS[self.wh_state]); log('识别模型没加载：', self.wh_state)
-        finally:
-            self.loaded.set()
-        post('state', self.idle_state()); post('mode')
+            smi = subprocess.run(['nvidia-smi', '-i', '0', '--query-gpu=memory.free', '--format=csv,noheader,nounits'],
+                                 capture_output=True, text=True, timeout=3, creationflags=0x08000000, check=True)
+            free = int(smi.stdout.strip())
+        except (OSError, ValueError, subprocess.SubprocessError):
+            self.spare_since = None
+            return 'whisper'
+        # Free memory excludes resident models. Credit the current ASR and reserve only the missing part of Qwen.
+        reserve = max(0, (4608 if LLM_MODEL.endswith(':8b') else 3072) - 1024 * (llm_vram() or 0)) if llm_opts()[1] else 0
+        budget = free + {'youdao': 3584, 'whisper': 1024}.get(current, 0) - reserve
+        if budget < (3840 if current == 'youdao' else 4224):
+            self.spare_since = None
+            return 'whisper'
+        if self.spare_since is None: self.spare_since = now
+        return 'youdao' if current != 'whisper' or now - self.spare_since >= 24 else 'whisper'
+
+    def replace_model(self, target):
+        old, self.wh = self.wh, None
+        if old: old.close()
+        if not nvidia_gpu(): raise RuntimeError('nogpu')
+        if target == 'youdao': self.wh = Youdao()
+        else:
+            if not (HERE / 'models/whisper/model.bin').is_file(): raise RuntimeError('nomodel')
+            self.wh = AsrProc()
+        self.wh_state, self.load_error = 'ok', ''
+        log('识别模型已加载', self.wh.name)
+
+    def reconcile(self, initial=False, retry=False):
+        with self.switch_lock:
+            self.retry_pending |= retry
+            if not initial and (not self.loaded.is_set() or self.busy or self.rec): return
+            target = self.target_model()
+            if self.wh and self.wh.name == target and self.wh.p.poll() is None:
+                self.retry_pending = False
+                return
+            if not initial and not self.retry_pending and self.wh_state not in ('loading', 'ok'): return
+            with self.gate:
+                if not initial and (self.rec or self.busy): return
+                self.retry_pending = False
+                self.loaded.clear(); self.wh_state = 'loading'
+            post('mode')
+            try:
+                try: self.replace_model(target)
+                except Exception:
+                    if target != 'youdao' or cfg.get('asr', 'auto') != 'auto': raise
+                    log('有道不可用，回退 Whisper', traceback.format_exc())
+                    self.retry_youdao = time.monotonic() + 60
+                    self.replace_model('whisper')
+            except Exception as e:
+                k = str(e).lower()
+                self.wh_state = k if k in WH_ERRORS else 'error'
+                self.load_error = L(*WH_ERRORS[self.wh_state]); log('识别模型没加载：', traceback.format_exc())
+            finally:
+                self.loaded.set()
+            if not self.rec and not self.busy: post('state', self.idle_state())
+            post('mode')
+
+    def load(self):
+        self.reconcile(initial=True)
         if self.wh and llm_hello(): log('改错模型已预热', '（显卡）' if llm_opts()[1] else '（CPU）')
 
     def idle_state(self): return 'ready' if self.wh else 'error' if self.loaded.is_set() else 'loading'
@@ -777,12 +956,37 @@ class Engine:
     def recognize(self, a, lang='en', preview=False):
         """lang：en 说英文 / zh 说中文（Whisper language=zh，标点换全角）。preview：说话时的预览（解码从简，见 asr_worker）。"""
         if not self.wh: return ''
-        t = self.wh.recognize(a, zh=lang == 'zh', preview=preview)
+        backend = self.wh
+        if isinstance(backend, Youdao):
+            t = backend.advance(Job(False, lang), a, final=True)
+        else: t = backend.recognize(a, zh=lang == 'zh', preview=preview)
         return zh_punct(t) if lang == 'zh' else t
+
+    def final_text(self, job, audio):
+        backend = self.wh
+        if isinstance(backend, Youdao):
+            try:
+                with job.stream_lock:
+                    if job.stream_error: raise job.stream_error
+                    text = backend.advance(job, audio, final=True)
+                    if text: return zh_punct(text) if job.lang == 'zh' else text
+                    raise ValueError('empty Youdao transcript')
+            except Exception as e:
+                log('有道本句未完成', repr(e))
+                if job.asr_policy != 'auto': return ''
+            # The microphone buffer belongs to the job and survives unloading the failed backend.
+            with self.switch_lock:
+                self.retry_youdao = time.monotonic() + 60; self.spare_since = None
+                try: self.replace_model('whisper')
+                except Exception:
+                    self.wh_state = 'error'; self.load_error = L(*WH_ERRORS['error'])
+                    log('Whisper 回退失败', traceback.format_exc()); post('mode'); return ''
+                log('保留本句录音，用 Whisper 重试'); post('mode')
+        return self.whisper_start(audio, job.lang)()
 
     def whisper_start(self, a, lang='en'):
         """在后台开跑，返回 wait()：最多等 WHISPER_TIMEOUT 秒；出错 / 超时返回 ''。"""
-        got = []; t = time.time()
+        got = []; t = time.time(); backend = self.wh
         def run():
             try: got.append(self.recognize(a, lang))
             except Exception as e: log('Whisper 出错：', repr(e))
@@ -791,7 +995,7 @@ class Engine:
             th.join(max(0.0, WHISPER_TIMEOUT - (time.time() - t)))
             if not got:
                 log(f'Whisper 没出结果（{time.time() - t:.1f}s），用预览的', gpu_note())
-                if self.wh: self.wh.abort()  # 卡住的那次一直占着锁，之后每句都要等满超时 → 杀掉重开
+                if backend is self.wh and isinstance(backend, AsrProc): backend.abort()
                 return ''
             dt = time.time() - t; log(f'Whisper {dt:.1f}s', gpu_note() if dt > 3 else ''); return got[0]
         return wait
@@ -801,9 +1005,10 @@ class Engine:
         return np.concatenate(ch)[:, 0] if ch else np.zeros(0, np.float32)
 
     def start(self, src):
-        if self.rec or self.busy: return
-        self.chunks.clear(); self.src, self.rec = src, True
-        self.job = job = Job(src == 'key', cfg['lang'], cfg.get('zh_out', 'en'))
+        with self.gate:
+            if self.rec or self.busy: return
+            self.chunks.clear(); self.src, self.rec = src, True
+            self.job = job = Job(src == 'key', cfg['lang'], cfg.get('zh_out', 'en'))
         log('开始录音', src); post('state', 'rec', src == 'key')
         threading.Thread(target=self.live, args=(job,), daemon=True).start()
         if time.time() - last_llm[0] > min(1200, keep_secs() - 10): threading.Thread(target=llm_warm, daemon=True).start()  # 闲到快被卸掉（或已卸掉）：边说边把模型载回来；释放显存设 2 分钟时原来要闲 20 分钟才预热，2~20 分钟之间松开后要现载模型（多 2~5 秒）
@@ -811,6 +1016,26 @@ class Engine:
     def live(self, job):
         """说话时的预览：每隔 PREVIEW_EVERY 秒把目前为止的整段给 Whisper 认一遍（显卡上一次零点几秒）。
         说得长、一次认得比间隔还久时，间隔拉到上次耗时的两倍：预览最多占一半显卡，松开后的整段识别不用排长队。"""
+        self.loaded.wait()
+        backend = self.wh
+        if isinstance(backend, Youdao):
+            while self.rec and self.job is job:
+                size = job.consumed + (backend.step if job.consumed else backend.step + 2560)
+                # Avoid copying the whole recording while waiting for a new block.
+                if sum(len(c) for c in self.chunks) < size:
+                    time.sleep(0.025); continue
+                with job.stream_lock:
+                    if not self.rec or self.job is not job: return
+                    audio = self.audio()
+                    if not has_speech(audio[:size]):
+                        job.consumed = size
+                        continue
+                    try: text = backend.advance(job, audio)
+                    except Exception as e:
+                        job.stream_error = e; return
+                if self.rec and self.job is job and re.search(r'\w', text) and not PHANTOM.search(text):
+                    job.heard = text; post('live', text, '')
+            return
         t, gap = time.time(), PREVIEW_EVERY
         while True:
             time.sleep(max(0.05, t + gap - time.time()))
@@ -823,8 +1048,9 @@ class Engine:
             if self.rec and self.job is job: job.heard = text; post('live', text, '')
 
     def stop(self):
-        if not self.rec: return
-        self.rec = False; self.busy = self.job; lat.clear(); mark('rel')  # busy 记是哪一句：上一句的中文翻译出完时别把这一句的 busy 清掉
+        with self.gate:
+            if not self.rec: return
+            self.rec = False; self.busy = self.job; lat.clear(); mark('rel')
         threading.Thread(target=self.work, args=(self.audio(), self.job), daemon=True).start()
 
     def work(self, audio, job):
@@ -854,7 +1080,7 @@ class Engine:
         else: root.after(0, lambda: set_clip(fixed))
         if not job.by_key: mark('paste')
         r0 = lat.get('rel', t)  # 分段计时（松开后第几秒）：Whisper / 改错首字 / 英文写完 / 粘贴
-        log('计时 ' + ' '.join(f'{n}={lat[k] - r0:.2f}' for n, k in (('Whisper', 'wh'), ('首字', 'llm_first'), ('英文', 'llm_en'), ('粘贴', 'paste')) if k in lat))
+        log('计时 ' + ' '.join(f'{n}={lat[k] - r0:.2f}' for n, k in ((active_asr(), 'wh'), ('首字', 'llm_first'), ('英文', 'llm_en'), ('粘贴', 'paste')) if k in lat))
         save_stat(job, audio, seg, rec)
         n = next(SEG_NO); post('fixed', n, raw, fixed, job.by_key, seg.failed)
         if self.busy is job: self.busy = False; post('state', 'ready')  # 中文翻译还在后台出，不耽误说下一句
@@ -944,7 +1170,10 @@ def asr_worker():
 
 class AsrProc:
     """识别子进程的代理（几个线程都会调，排队）。"""
+    name = 'whisper'
+
     def __init__(self):
+        self.closed = False
         self.lock, self.aborted = threading.Lock(), False
         self.spawn()
 
@@ -953,6 +1182,13 @@ class AsrProc:
         self.aborted = True
         try: self.p.kill()
         except Exception: pass
+
+    def close(self):
+        self.closed = True
+        self.p.stdin.close()
+        try: self.p.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            self.p.kill(); self.p.wait()
 
     def spawn(self):
         exe = Path(sys.executable).with_name('pythonw.exe')
@@ -969,21 +1205,26 @@ class AsrProc:
     def recognize(self, a, zh=False, preview=False):
         a = np.ascontiguousarray(a, np.float32); msg = (len(a) | zh << 31 | preview << 30).to_bytes(4, 'little') + a.tobytes()  # 最高位 = 说中文，次高位 = 预览（见 asr_worker）
         with self.lock:
+            if self.closed: return ''
             try:
                 self.p.stdin.write(msg); self.p.stdin.flush(); return self._recv()
             except (OSError, RuntimeError):  # 子进程没了（被杀 / 崩了）：重开一个再试一次，不然之后每句都识别不了
+                if self.closed: return ''
                 log('识别子进程断了，重开'); self.p.kill(); self.spawn()
                 if self.aborted: self.aborted = False; return ''  # 是超时杀掉的：这段已经用了预览的字，不再认
                 self.p.stdin.write(msg); self.p.stdin.flush(); return self._recv()
 
 eng = Engine()
 
+def active_asr():
+    return L('有道', 'Youdao') if isinstance(eng.wh, Youdao) else 'Whisper'
+
 def mode_summary():
     """当前是哪种模式，对速度 / 质量有什么影响（自检用）：返回 (ok|warn, 一句人话)。"""
     g, st = nvidia_gpu(), eng.wh_state
     ai = L('AI 改错用显卡', 'cleanup on the GPU') if g and LLM_GPU_LAYERS else L('AI 改错用 CPU，每句约 5~8 秒', 'cleanup on the CPU, about 5–8 s per sentence') if not g else L('AI 改错暂时用 CPU', 'cleanup on the CPU for now')
-    if st == 'ok': return 'ok', L(f'Whisper 识别（{g}），{ai}', f'Whisper on {g}; {ai}')
-    if st == 'loading': return 'ok', L('识别模型（Whisper）载入中…', 'Loading the speech model (Whisper)…')
+    if st == 'ok': return 'ok', L(f'{active_asr()} 识别（{g}），{ai}', f'{active_asr()} on {g}; {ai}')
+    if st == 'loading': return 'ok', L('识别模型载入中…', 'Loading speech model…')
     return 'warn', eng.load_error
 
 HIST = HERE / 'history.txt'
@@ -1120,11 +1361,13 @@ def run_checks(report, interactive):
     try:
         with wave.open(str(HERE / 'test.wav')) as w:
             a = np.frombuffer(w.readframes(w.getnframes()), np.int16).astype(np.float32) / 32768
-        t = time.time(); raw = eng.recognize(a)
+        t = time.time()
+        with eng.switch_lock:
+            raw = eng.recognize(a)
         if raw: report(3, 'ok', f'{time.time() - t:.1f} ' + L(f'秒：{raw}', f's: {raw}'))
         else: report(3, 'fail', L('没识别出文字', 'No text recognized')); ok = False
     except Exception:
-        log(traceback.format_exc()); report(3, 'fail', '识别出错（test.wav 可能不见了），详情见 run.log'); ok = False
+        log(traceback.format_exc()); report(3, 'fail', L('识别测试录音失败，详情见 run.log。', 'Test recording failed. See run.log.')); ok = False
 
     report(4, 'run', L('让 Qwen 改一句话（第一次要十几秒）…', 'Asking Qwen to clean up a sentence (10+ s the first time)…'))
     st = ollama_status()
@@ -2559,11 +2802,12 @@ class App:
     def restore(self):
         self.ball.hide(); self.root.deiconify(); self.root.lift(); self.root.focus_force(); self.chrome.sync()
 
-    def run_setup(self):
+    def run_setup(self, youdao=False):
         """设置里「下载 / 安装 / 修复」：黑框 PowerShell 里跑 setup.ps1，跑完自动重新检查。"""
         if self.setup_proc: return
-        if not SETUP_PS1.exists(): return notify(L('找不到 setup.ps1，请重新下载 Quill。', 'setup.ps1 not found. Please download Quill again.'), 'err')
-        cmd = f"& '{SETUP_PS1}'; Read-Host 'Finished. Press Enter to close this window'"
+        script = HERE / 'tools/setup_youdao.ps1' if youdao else SETUP_PS1
+        if not script.exists(): return notify(L('找不到安装脚本，请重新下载 Quill。', 'Setup script not found. Please download Quill again.'), 'err')
+        cmd = "& '" + str(script).replace("'", "''") + "'; Read-Host 'Finished. Press Enter to close this window'"
         self.setup_proc = subprocess.Popen(['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', cmd], cwd=HERE, creationflags=0x10)  # 新黑框
         log('运行 setup.ps1'); self.refresh_settings(); self.root.after(1500, self.watch_setup)
 
@@ -2571,8 +2815,7 @@ class App:
         if self.setup_proc.poll() is None: return self.root.after(1500, self.watch_setup)
         self.setup_proc = None
         log('setup.ps1 结束，重新检查'); ollama_retry[0] = 0.0  # 能补救的当场补上（Whisper 重新载入，Ollama 重新试），不用重启 Quill
-        if eng.wh_state not in ('ok', 'loading', 'nogpu'):
-            eng.wh_state, eng.load_error = 'loading', ''; eng.loaded.clear(); threading.Thread(target=eng.load, daemon=True).start()
+        threading.Thread(target=eng.reconcile, kwargs={'retry': True}, daemon=True).start()
         post('mode'); self.refresh_settings()
 
     def refresh_settings(self):
@@ -2711,7 +2954,7 @@ class App:
             if st == 'down': st = ensure_ollama()  # 没开就自己拉起，不用用户管
             v = llm_vram() if st == 'ok' else None
             if v != self.vram: self.vram = v; post('vram')
-            post('ollama', st); time.sleep(8)
+            post('ollama', st); eng.reconcile(); time.sleep(8)
 
     def idle(self):
         """闲着：没在说话 / 改错，2 分钟内没说过话，改错服务正常且在显卡上（CPU 上一批要十几秒，会挡住下一句）。"""
@@ -2810,23 +3053,28 @@ class Settings:
 
     # 每一块：先算高度（要先画卡片底再画内容），返回 (高度, 画法)
     def sec_asr(self, n, x, y, w, draw):
-        if eng.wh_state == 'ok': return 0  # 正常时不显示，出问题才出来
-        h = 101  # 写法和改错服务那张一样：标题行右边状态点，下面一行说明；缺东西时右边一个按钮跑 setup.ps1。100 时 150% 缩放（S=1.4985）下面「标准 4B」字偏 1.5px，ui_test 报没对齐
+        st = eng.wh_state
+        h = 102 if st in ('ok', 'loading') else 154
         if not draw: return h
-        st = eng.wh_state; lv, _, act = readiness(self.app.ol_last)[0]
         self.label(n, x, y, w, h, L('识别模型', 'Speech model'))
-        text, info = {'ok': (L('正常', 'Running'), 'Whisper · int8 · ' + L('显卡', 'GPU')), 'loading': (L('载入中…', 'Loading…'), 'Whisper'),
-                      'nogpu': (L('没有显卡', 'No GPU'), L('Whisper 要 NVIDIA 显卡', 'Whisper needs an NVIDIA GPU')),
-                      'nolib': (L('缺运行库', 'Missing runtime'), L('cuBLAS · 约 0.5GB', 'cuBLAS · about 0.5 GB')),
-                      'nomodel': (L('缺模型', 'Missing model'), L('Whisper · 约 1.6GB', 'Whisper · about 1.6 GB'))}.get(st, (L('载入失败', 'Failed'), L('详情见 run.log', 'See run.log')))
-        n.text(x + w - 20, y + 22, '● ' + text, 12, {'ok': GREEN, 'info': SUB}.get(lv, RED), anchor='ne')
-        n.text(x + 20, y + 56, info, 11, SUB, width=w - (130 if act else 40), lines=1)
-        if act: self.setup_btn(n, x, w, y, act)
+        status = active_asr() if st == 'ok' else L('载入中…', 'Loading…') if st == 'loading' else L('未就绪', 'Unavailable')
+        n.text(x + w - 20, y + 24, status, 12, GREEN if st == 'ok' else SUB, anchor='ne')
+        width = (w - 60) / 3
+        for i, (key, text) in enumerate((('auto', L('自动', 'Auto')), ('youdao', L('有道', 'Youdao')), ('whisper', 'Whisper'))):
+            n.button(x + 20 + i * (width + 10), y + 48, width, BTN_H, text=text, size=12,
+                     on=cfg.get('asr', 'auto') == key, cmd=lambda key=key: self.set_asr(key))
+        if st not in ('ok', 'loading'):
+            _, info, act = readiness(self.app.ol_last)[0]
+            n.text(x + 20, y + 106, info, 11, SUB, width=w - (135 if act else 40), lines=2)
+            if act:
+                n.button(btn_x(x, w, 0, 1), y + 100, BTN_W, BTN_H, text=act, size=12,
+                         cmd=lambda: self.app.run_setup(youdao=cfg.get('asr') == 'youdao'))
         return h
 
-    def setup_btn(self, n, x, w, y, act):
-        busy = bool(self.app.setup_proc)
-        n.button(btn_x(x, w, 0, 1), y + 46, BTN_W, BTN_H, text=L('进行中', 'RUNNING…') if busy else act, size=12, color=SUB if busy else TEXT, cmd=self.app.run_setup)
+    def set_asr(self, key):
+        cfg['asr'] = key; save_cfg()
+        self.app.refresh_settings()
+        threading.Thread(target=eng.reconcile, kwargs={'retry': True}, daemon=True).start()
 
     def sec_mic(self, n, x, y, w, draw):
         devs = [L('系统默认', 'System default')] + eng.devices(); cur = cfg['device'] if cfg['device'] in devs else devs[0]
@@ -3354,10 +3602,11 @@ def ollama_installed(): return bool(shutil.which('ollama')) or os.path.exists(os
 
 def readiness(ol):
     """识别模型、改错服务两行：[(lv, 一句人话, 按钮字 或 None)]（启动时有缺就打开设置；设置卡片的按钮字从这里取），lv = ok / warn / fail / info。ol：改错服务状态（App.ol_last）。按钮都是运行 setup.ps1。"""
-    rows = [{'ok': ('ok', L('Whisper 已载入。', 'Whisper is loaded.'), None),
+    rows = [{'ok': ('ok', L(active_asr() + ' 已载入。', active_asr() + ' is loaded.'), None),
              'loading': ('info', L('载入中…', 'Loading…'), None),
              'nogpu': ('fail', L('没有 NVIDIA 显卡：Whisper 识别要用显卡，现在说不了话。', 'No NVIDIA GPU: Whisper needs one, so voice input is unavailable.'), None),
              'nolib': ('fail', L('缺显卡运行库（cuBLAS，约 0.5GB）。', 'Missing GPU runtime (cuBLAS, about 0.5 GB).'), L('修复', 'FIX')),
+             'noyoudao': ('fail', L('缺少有道模型或运行程序。', 'Youdao model or runtime is missing.'), L('下载', 'DOWNLOAD')),
              'nomodel': ('fail', L('Whisper 模型（约 1.6GB）还没下载。', 'Whisper model (about 1.6 GB) not downloaded yet.'), L('下载', 'DOWNLOAD'))}.get(eng.wh_state, ('fail', L('没载入成功，详情见 run.log。', 'Failed to load. See run.log.'), L('修复', 'FIX')))]
 
     if not ollama_installed():

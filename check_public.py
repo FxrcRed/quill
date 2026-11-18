@@ -9,8 +9,9 @@ sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 from pathlib import Path
 HERE = Path(__file__).parent
 
-BAD_NAMES = {'history.txt', 'words.txt', 'words_scan.json', 'settings.json', 'run.log', 'selftest.out', 'handoff.md', 'claude.md'}
-BAD_DIRS = ('recordings/', 'models/', 'e2e_out/', 'eval_out/', '.venv/', '.python/')
+BAD_NAMES = {'history.txt', 'words.txt', 'words_scan.json', 'settings.json', 'run.log', 'run.prev.log', 'crash.log', 'stats.tsv',
+             'selftest.out', 'handoff.md', 'handoff-log.md', 'claude.md', 'sync_archive.sh'}
+BAD_DIRS = ('recordings/', 'models/', 'e2e_out/', 'eval_out/', 'eval_zh/', 'artifact/', 'scratch/', '.claude/', '.venv/', '.python/')
 BAD_EXT = ('.onnx', '.bin', '.gguf', '.safetensors', '.pt', '.wav', '.mp3')
 BAD_SUBSTR = ('misans',)  # 字体许可不允许分发
 MAX_MB = 5
@@ -23,7 +24,7 @@ problems = []
 has_ofl = any('ofl' in f.lower() for f in files)
 for f in files:
     low, p = f.lower(), HERE / f
-    if low.rsplit('/', 1)[-1] in BAD_NAMES: problems.append(f'{f}：个人数据 / 本机文件，不该公开')
+    if low.rsplit('/', 1)[-1] in BAD_NAMES or '.md.bak-' in low: problems.append(f'{f}：个人数据 / 本机文件，不该公开')
     if low.startswith(BAD_DIRS): problems.append(f'{f}：本机目录，不该公开')
     if low.endswith(BAD_EXT): problems.append(f'{f}：模型 / 音频文件，不该公开')
     if any(s in low for s in BAD_SUBSTR): problems.append(f'{f}：许可不允许分发')

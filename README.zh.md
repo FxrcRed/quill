@@ -5,8 +5,8 @@
 # Quill
 
 **Windows 上的离线语音输入。**
-按住一个键，说不太顺的英文，**或者直接说中文**，松开后，地道的英文就打在光标处。
-全程不联网。
+按住右 Ctrl 说中文或英文，松开就能在光标处输入。说中文时也可以选择输出英文。
+语音识别可选 Whisper 或有道 R2T2，也可按可用显存自动选择。识别和千问改错都在本机运行。
 
 [English](README.md) · MIT · Windows 10/11
 
@@ -45,14 +45,15 @@
 
 ```
 按住快捷键 → 麦克风（16 kHz）
-          → 语音识别  Whisper large-v3-turbo（显卡），带上你的常用词：
-                      说话时约每秒认一遍给浮窗看，松开后整段再认一次
+          → 语音识别  Whisper large-v3-turbo 或有道 R2T2（显卡），带上你的常用词
           → 对词表    常用词里的中文词被认成同音字的，按拼音换回来
           → 理顺      Qwen3 4B（Ollama；设置里可换 8B；显卡忙时自动换 CPU）
           → 粘贴到光标处
 ```
 
-Whisper 整段认，比按停顿一段段认准得多（不会把半句话认成别的词）。识别跑在单独的进程里，界面不会卡。
+Whisper 约每秒给出一次预览，松开后整段定稿。有道每 640 毫秒处理一块音频。两者都在本机独立进程里识别。
+
+设置 →「识别模型」可选自动、有道或 Whisper，右上角显示实际使用的模型。自动模式给千问预留显存，宽裕时选有道，紧张时选 Whisper，只在两句之间切换。如果有道在自动模式下识别失败，Quill 会用 Whisper 重试同一段录音。首次使用有道可选「有道」再点「下载」，也可以运行 `powershell -ExecutionPolicy Bypass -File tools/setup_youdao.ps1`（可加 `-Mirror`）。有道权重占 2.48 GB 硬盘，另外需要 CUDA 运行包。[有道模型与许可](https://github.com/netease-youdao/Confucius4-R2T2#license)
 
 ## 安装
 
@@ -101,12 +102,13 @@ powershell -ExecutionPolicy Bypass -File setup.ps1 -Mirror     # 国内网络加
 - `cer_eval.py [auto]`：在你自己的录音（`eval_zh\`，不进 git）上算中文字错率。
 - `harvest.py`：把每句识别和你在 Claude Code 里改完发出去的消息配对，自动收测试样本（要在 `settings.json` 里开 `"save_audio": true`）。报告开头每天一行：出字耗时、超时次数、发出前改过几句（计时来自 Quill 每句写一行的 `stats.tsv`）。
 - `make_words_demo.py`：重新生成常用词演示图。
-- `make_demo.py`：重新生成上面的 GIF 和截图。
+- `make_demo.py` 生成 README 的主窗口截图，GIF 预览保存在本机的 `e2e_out/`。
 - `tools/`：开发用的一次性小工具（窗口截图、界面布局测试、常用词和模型对比脚本、图标和分享预览图生成）。用 Quill 不需要管它们。`selftest.bat` 和 `start.bat` 是调试用启动器（自检；带黑框启动看报错），平时用桌面快捷方式或 `start.vbs`。
 - 这个项目是和 Claude Code 一起做的。
 
 ## 致谢
 
+- 网易有道的可选识别模型 [Confucius4-R2T2](https://github.com/netease-youdao/Confucius4-R2T2)，通过 [llama.cpp](https://github.com/ggml-org/llama.cpp) 在本地运行。
 - OpenAI 的 [Whisper large-v3-turbo](https://huggingface.co/openai/whisper-large-v3-turbo)（MIT），用 [faster-whisper](https://github.com/SYSTRAN/faster-whisper) 运行
 - [Qwen3](https://github.com/QwenLM/Qwen3)（Apache-2.0），由 [Ollama](https://ollama.com) 提供服务
 - [pypinyin](https://github.com/mozillazg/python-pinyin)（MIT）；按拼音对词表的思路来自 [CapsWriter-Offline](https://github.com/HaujetZhao/CapsWriter-Offline)

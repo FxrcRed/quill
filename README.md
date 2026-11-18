@@ -5,8 +5,8 @@
 # Quill
 
 **Offline voice typing for Windows.**
-Hold a key, speak messy English *or Chinese*, let go — clean, natural English is typed at your cursor.
-Nothing leaves your computer.
+Hold Right Ctrl to dictate in English or Chinese. Release to type at your cursor, with optional Chinese-to-English translation.
+Choose Whisper or Youdao R2T2, or let Quill choose based on free GPU memory. Recognition and Qwen cleanup run on your PC.
 
 [中文说明](README.zh.md) · MIT · Windows 10/11
 
@@ -46,15 +46,15 @@ all of that verbatim, or send my voice to the cloud. Quill does the cleanup loca
 
 ```
 hold key → microphone (16 kHz)
-         → recognition   Whisper large-v3-turbo on the GPU, primed with your word list:
-                         about once a second for the live overlay, then the whole recording on release
+         → recognition   Whisper large-v3-turbo or Youdao R2T2 on the GPU, with your word list
          → word list     Chinese words heard as same-sounding characters are swapped back by pinyin
          → cleanup       Qwen3 4B via Ollama (8B in Settings; falls back to CPU if the GPU is busy)
          → paste at cursor
 ```
 
-Reading the whole recording at once is far more accurate than recognizing short pieces between pauses.
-Recognition runs in a separate process so the UI stays responsive.
+Whisper previews about once a second and transcribes the full recording on release. Youdao previews every 640 ms. Both run locally in a separate process.
+
+Settings → Speech model offers Auto, Youdao and Whisper and shows the active recognizer. Auto reserves room for Qwen, picks Youdao when GPU memory allows and switches between recordings. If Youdao fails during a recording in Auto, Quill retries the same audio with Whisper. To add the optional Youdao model, select Youdao and click Download, or run `powershell -ExecutionPolicy Bypass -File tools/setup_youdao.ps1`. The weights take 2.48 GB of disk in addition to the CUDA runtime. [Youdao model and license](https://github.com/netease-youdao/Confucius4-R2T2#license)
 
 ## Install
 
@@ -104,12 +104,13 @@ Then start **Quill** from the desktop. The first start loads the Whisper model o
 - `cer_eval.py [auto]` — Chinese character error rate on your own recordings in `eval_zh\` (not in git).
 - `harvest.py` — collects test samples by pairing each dictation with the edited message you sent in Claude Code (needs `"save_audio": true` in `settings.json`). Its report starts with one line per day: latency, timeouts, and how many sentences you edited before sending (timings come from `stats.tsv`, one line per sentence written by Quill).
 - `make_words_demo.py` — regenerates the word-list image.
-- `make_demo.py` — regenerates the GIF and screenshot above.
+- `make_demo.py` captures the main window for the README and saves a local GIF preview in `e2e_out/`.
 - `tools/` — one-off development helpers (window screenshots, UI layout tests, word-list and model comparison scripts, icon and social-preview generators). You don't need them to use Quill. `selftest.bat` and `start.bat` are debug launchers (self-test, and start with a console to see errors); the desktop shortcut and `start.vbs` start Quill normally.
 - The project was built together with Claude Code.
 
 ## Credits
 
+- The optional [Confucius4-R2T2](https://github.com/netease-youdao/Confucius4-R2T2) recognizer by NetEase Youdao runs with [llama.cpp](https://github.com/ggml-org/llama.cpp).
 - [Whisper large-v3-turbo](https://huggingface.co/openai/whisper-large-v3-turbo) by OpenAI (MIT), run with [faster-whisper](https://github.com/SYSTRAN/faster-whisper)
 - [Qwen3](https://github.com/QwenLM/Qwen3) (Apache-2.0) served by [Ollama](https://ollama.com)
 - [pypinyin](https://github.com/mozillazg/python-pinyin) (MIT); matching words by sound is an idea from [CapsWriter-Offline](https://github.com/HaujetZhao/CapsWriter-Offline)

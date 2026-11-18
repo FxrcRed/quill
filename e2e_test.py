@@ -1,6 +1,6 @@
 """端到端测试（不用真麦克风、不会粘贴到别的程序）：.venv\\Scripts\\python.exe e2e_test.py
 把 test.wav（说两遍、中间停 0.9 秒）按实时速度喂进去跑一句，
-浮窗每个阶段的样子存到 e2e_out\\ov_*.png，耗时看输出和 run.log。不写 history.txt，结束后恢复剪贴板。
+浮窗每个阶段的样子存到 e2e_out\\ov_*.png，耗时看输出和 run.log。最终出字在内存中验收。
 要先关掉正在运行的 Quill（Stop-Process -Force -Id (Get-CimInstance Win32_Process -Filter "Name='pythonw.exe'" | ? CommandLine -match 'voice-input').ProcessId），否则两个都在用麦克风和快捷键。"""
 import ctypes, importlib.machinery, importlib.util, sys, threading, time, wave
 import tkinter as tk
@@ -18,9 +18,14 @@ m.save_history = lambda *a: None; m.STATS = OUT / 'stats.tsv'  # 每句计时写
 latest = [None]; orig = m.ulw
 def ulw(h, img, x, y): orig(h, img, x, y); latest[0] = img
 m.ulw = ulw
-try: clip = root.clipboard_get()
-except Exception: clip = None
 LANG = 'zh' if {'zh', 'zhzh'} & set(sys.argv) else 'en'; m.cfg['lang'] = 'auto' if 'auto' in sys.argv else LANG  # e2e_test.py zh：说中文（test_zh.wav）；加 auto：主页选自动
+ASR = next((x[4:] for x in sys.argv if x.startswith('asr=')), None)
+copied = []
+m.set_clip = copied.append
+if ASR:
+    m.cfg['asr'] = ASR
+m.cfg['save_audio'] = False
+m.save_cfg = lambda: None
 ZHZH = 'zhzh' in sys.argv; m.cfg['zh_out'] = 'zh' if ZHZH else 'en'  # e2e_test.py zhzh：说中文 → 出中文
 app = m.App(root); root.deiconify()
 threading.Thread(target=m.fix_worker, daemon=True).start(); threading.Thread(target=m.eng.load, daemon=True).start()
@@ -48,12 +53,15 @@ def say(tag):
 def scenario():
     try:
         m.eng.loaded.wait(); time.sleep(4)
+        if ASR and (not m.eng.wh or m.eng.wh.name != ASR): raise RuntimeError('expected recognizer ' + ASR)
         say('fast')
+        if not copied or not copied[-1].strip(): raise RuntimeError('no final output')
+    except Exception as e:
+        errors.append(e)
     finally:
-        def end():
-            if clip is not None: root.clipboard_clear(); root.clipboard_append(clip); root.update()
-            root.destroy()
-        root.after(500, end)
+        root.after(500, root.destroy)
 
+errors = []
 threading.Thread(target=scenario, daemon=True).start()
 root.mainloop()
+if errors: raise errors[0]

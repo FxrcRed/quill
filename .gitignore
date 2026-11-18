@@ -20,3 +20,8 @@ eval_out/
 eval_zh/
 run.prev.log
 crash.log
+*.md.bak-*
+artifact/
+tools/sync_archive.sh
+scratch/
+.claude/
